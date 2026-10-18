@@ -483,3 +483,6 @@ $RECYCLE.BIN/
 
 # Reference implementations (cloned, not committed)
 reference/
+
+# Agent worktrees
+.claude/worktrees/

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Threading.Channels;
+using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Interop.Tests.Harness;
 
@@ -64,25 +65,3 @@ public sealed record ReceivedPacket(
     long TimeMs,
     ulong? Timestamp
 );
-
-/// <summary>RakNet PacketReliability, in C++ order.</summary>
-public enum Reliability
-{
-    Unreliable,
-    UnreliableSequenced,
-    Reliable,
-    ReliableOrdered,
-    ReliableSequenced,
-    UnreliableWithAckReceipt,
-    ReliableWithAckReceipt,
-    ReliableOrderedWithAckReceipt,
-}
-
-/// <summary>RakNet PacketPriority, in C++ order.</summary>
-public enum Priority
-{
-    Immediate,
-    High,
-    Medium,
-    Low,
-}

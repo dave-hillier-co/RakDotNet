@@ -1,0 +1,14 @@
+{
+  "scenario": "unconnected-ping",
+  "description": "Native client pings a native server with an offline ping response of 'hello'.",
+  "source": "interop-peer, RakNet 1a169895a900c9fc4841c556e16514182b75faf8",
+  "captured": "2026-10-18T19:29:17Z",
+  "peers": {
+    "a": { "role": "client", "guid": "1792351756482798" },
+    "b": { "role": "server", "guid": "1792351756445388" }
+  },
+  "datagrams": [
+    { "index": 0, "timeMs": 0, "from": "a", "to": "b", "hex": "01000000000000000c00ffff00fefefefefdfdfdfd1234567800065e2269c1f8ee" },
+    { "index": 1, "timeMs": 0, "from": "b", "to": "a", "hex": "1c000000000000000c00065e2269c166cc00ffff00fefefefefdfdfdfd1234567868656c6c6f" }
+  ]
+}

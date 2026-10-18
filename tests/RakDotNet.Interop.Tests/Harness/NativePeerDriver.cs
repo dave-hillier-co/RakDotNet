@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Interop.Tests.Harness;
 

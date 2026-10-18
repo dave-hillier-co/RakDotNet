@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json.Nodes;
+using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Interop.Tests.Harness;
 
