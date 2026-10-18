@@ -182,7 +182,15 @@ public ref struct BitStreamReader
         return true;
     }
 
-    /// <summary>Reads an IPv4 SystemAddress. See <see cref="BitStreamWriter.WriteAddress"/>.</summary>
+    /// <summary>
+    /// Reads a SystemAddress as BitStream::Read(SystemAddress) does; false on a truncated or unsupported address.
+    /// </summary>
+    /// <remarks>
+    /// Not an overload of <see cref="TryReadAddress"/>, because <c>TryReadAddress(out var a)</c> would then be ambiguous.
+    /// </remarks>
+    public bool TryReadSystemAddress(out SystemAddress address) => throw new NotImplementedException();
+
+    /// <summary>Reads an IPv4 SystemAddress. See <see cref="BitStreamWriter.WriteAddress(IPEndPoint)"/>.</summary>
     public bool TryReadAddress(out IPEndPoint? endPoint)
     {
         endPoint = null;

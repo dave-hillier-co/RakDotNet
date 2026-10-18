@@ -22,6 +22,18 @@ public ref struct BitStreamWriter
         _buffer = buffer;
     }
 
+    /// <summary>
+    /// Resumes writing into <paramref name="buffer"/> at <paramref name="bitPosition"/>, keeping the bits already
+    /// written before it, so a writer can be handed out, stored as a position and recreated (<see cref="BitStream"/>).
+    /// </summary>
+    public BitStreamWriter(Span<byte> buffer, int bitPosition)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bitPosition);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(bitPosition, buffer.Length * 8);
+        _buffer = buffer;
+        _bitPosition = bitPosition;
+    }
+
     public readonly int BitsWritten => _bitPosition;
 
     public readonly int BytesWritten => (_bitPosition + 7) >> 3;
@@ -172,6 +184,12 @@ public ref struct BitStreamWriter
             WriteByte((byte)~b);
         WriteUInt16((ushort)endPoint.Port);
     }
+
+    /// <summary>
+    /// Writes a SystemAddress as BitStream::Write(SystemAddress) does. IPv6 follows the platform sockaddr_in6 caveat in
+    /// docs/plan.md.
+    /// </summary>
+    public void WriteAddress(SystemAddress address) => throw new NotImplementedException();
 
     private readonly void EnsureCapacity(int bits)
     {

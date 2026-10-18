@@ -191,6 +191,33 @@ public class BitStreamTests
         Assert.False(r.TryReadUInt24(out _));
     }
 
+    [Fact]
+    public void A_writer_resumed_at_a_bit_position_continues_where_another_stopped()
+    {
+        var buffer = new byte[8];
+        var first = new BitStreamWriter(buffer);
+        first.WriteBits(0b101, 3);
+
+        var resumed = new BitStreamWriter(buffer, first.BitsWritten);
+        resumed.WriteUInt16(0x1234);
+
+        var expected = Write((ref BitStreamWriter w) =>
+        {
+            w.WriteBits(0b101, 3);
+            w.WriteUInt16(0x1234);
+        }, out var bits);
+        Assert.Equal(bits, resumed.BitsWritten);
+        Assert.Equal(expected, resumed.Written.ToArray());
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(17)]
+    public void A_resume_position_outside_the_buffer_throws(int bitPosition)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BitStreamWriter(new byte[2], bitPosition));
+    }
+
     private delegate void WriteAction(ref BitStreamWriter writer);
 
     private static byte[] Write(WriteAction write, out int bits)
