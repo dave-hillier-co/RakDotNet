@@ -43,7 +43,8 @@ Connection events (accepted, disconnected, lost, receipts) and user messages are
 Things that are easy to get wrong, from the C++ source:
 
 - Offline magic: `00 FF FF 00 FE FE FE FE FD FD FD FD 12 34 56 78` (`RakPeer.cpp`).
-- `BitStream` writes bits MSB-first within each byte. Multi-byte values are big-endian, except `uint24`, which is little-endian.
+- `BitStream` writes bits MSB-first within each byte. Multi-byte values are big-endian and are not byte-aligned first. `uint24` is the exception: it aligns to a byte boundary, then writes little-endian.
+- IPv6 `SystemAddress` is serialised as a raw platform `sockaddr_in6`, whose layout and `AF_INET6` value differ between Windows, Linux and macOS. IPv6 interop needs per-platform captures before it can be supported.
 - Encapsulated message length is a `u16` in bits, not bytes.
 - IPv4 `SystemAddress` is serialised as a version byte, the bitwise-NOT of the address, then the port.
 - `OPEN_CONNECTION_REQUEST_1` is padded so the whole datagram equals the MTU being probed, minus UDP/IP headers (28 bytes). MTUs tried: 1492, 1200, 576.

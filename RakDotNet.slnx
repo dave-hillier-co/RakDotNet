@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RakDotNet.Protocol/RakDotNet.Protocol.csproj" />
+    <Project Path="src/RakDotNet/RakDotNet.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RakDotNet.Interop.Tests/RakDotNet.Interop.Tests.csproj" />
+    <Project Path="tests/RakDotNet.Protocol.Tests/RakDotNet.Protocol.Tests.csproj" />
+    <Project Path="tests/RakDotNet.Tests/RakDotNet.Tests.csproj" />
+  </Folder>
+</Solution>
