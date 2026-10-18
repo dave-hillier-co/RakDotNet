@@ -50,7 +50,7 @@ On launch the peer prints one event before reading commands:
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
 
 ```json
-{"event":"packet","messageId":134,"messageName":"ID_USER_PACKET_ENUM","guid":"1234567890","address":"127.0.0.1:61234","data":"86010203","timeMs":12345}
+{"event":"packet","messageId":134,"messageName":"ID_USER_PACKET_ENUM+0","guid":"1234567890","address":"127.0.0.1:61234","data":"86010203","timeMs":12345}
 ```
 
 - `messageId` is `data[0]`, or `data[1+8]` when `data[0]` is `ID_TIMESTAMP` (then `timestamp` is also present, the big-endian `RakNet::Time` that follows it, as a decimal string).
