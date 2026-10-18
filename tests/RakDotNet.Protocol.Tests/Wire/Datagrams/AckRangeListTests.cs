@@ -184,9 +184,10 @@ public class AckRangeListTests
     }
 
     [Fact]
-    public void At_the_maximum_mtu_cpp_fits_295_single_ranges_per_ack()
+    public void At_the_maximum_mtu_cpp_fits_289_single_ranges_per_ack()
     {
-        // maxBits = (1492 - 9) * 8 = 11864 (ReliabilityLayer.cpp:3618, 3909-3924). 81 + 40i <= 11864 for i <= 294.
+        // maxBits = (1492 - 28 - 9) * 8 = 11640 (ReliabilityLayer.cpp:361, 3618, 3909-3924; CCRakNetSlidingWindow.cpp:49,
+        // 322-325). 81 + 40i <= 11640 for i <= 288.
         var list = AckRangeList.FromNumbers(Enumerable.Range(0, 400).Select(i => new UInt24((uint)i * 2)));
         var written = 0;
 
@@ -196,9 +197,9 @@ public class AckRangeListTests
             written = list.Write(ref w, DatagramLimits.MaxPayloadBits(DatagramLimits.MaximumMtuSize));
         });
 
-        Assert.Equal(295, written);
-        Assert.Equal(1 + 2 + 295 * 4, bytes.Length);
-        Assert.Equal(105, list.Skip(written).Ranges.Count);
+        Assert.Equal(289, written);
+        Assert.Equal(1 + 2 + 289 * 4, bytes.Length);
+        Assert.Equal(111, list.Skip(written).Ranges.Count);
     }
 
     [Fact]

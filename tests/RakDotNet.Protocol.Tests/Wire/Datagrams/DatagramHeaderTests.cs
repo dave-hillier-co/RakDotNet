@@ -153,6 +153,22 @@ public class DatagramHeaderTests
     {
         // ReliabilityLayer.cpp:133-141: 2 + 3 + sizeof(float), no timestamp in the default build.
         Assert.Equal(9, DatagramLimits.HeaderBudgetBytes);
-        Assert.Equal((1492 - 9) * 8, DatagramLimits.MaxPayloadBits(1492));
+    }
+
+    [Fact]
+    public void Max_payload_bits_excludes_the_udp_header_and_the_header_budget()
+    {
+        // ReliabilityLayer.cpp:361 gives the congestion manager MTUSize - UDP_HEADER_SIZE (28, CCRakNetSlidingWindow.h:51),
+        // and GetMaxDatagramSizeExcludingMessageHeaderBytes subtracts the 9 byte header budget from that (3909-3912).
+        Assert.Equal(28, DatagramLimits.UdpHeaderBytes);
+        Assert.Equal((1492 - 28 - 9) * 8, DatagramLimits.MaxPayloadBits(1492));
+        Assert.Equal((400 - 28 - 9) * 8, DatagramLimits.MaxPayloadBits(400));
+    }
+
+    [Fact]
+    public void Max_payload_bits_rejects_an_mtu_too_small_for_the_udp_header_and_header_budget()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => DatagramLimits.MaxPayloadBits(28 + 9 - 1));
+        Assert.Equal(0, DatagramLimits.MaxPayloadBits(28 + 9));
     }
 }

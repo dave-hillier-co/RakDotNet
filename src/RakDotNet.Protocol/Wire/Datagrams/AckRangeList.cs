@@ -120,7 +120,8 @@ public sealed record AckRangeList
     /// Matches the C++ accounting exactly (DS_RangeList.h:74-92): before each range it stops when
     /// <c>16 + bitsWritten + 2 * 32 + 1 &gt; maxBits</c>, and it adds 40 bits per single range and 72 per ranged entry,
     /// because sizeof(uint24_t) is 4. The bits already in the stream (header, alignment) are not counted. RakNet passes
-    /// <see cref="DatagramLimits.MaxPayloadBits"/> of the MTU (ReliabilityLayer.cpp:1823, 3618, 3649).
+    /// <see cref="DatagramLimits.MaxPayloadBits"/> of the negotiated MTU (ReliabilityLayer.cpp:1823, 3618, 3649), which
+    /// leaves out the 28 byte IP/UDP header and the 9 byte header budget; at MTU 1492 that fits 289 single ranges.
     /// </remarks>
     public int Write(ref BitStreamWriter writer, int maxBits)
     {
