@@ -123,13 +123,12 @@ internal sealed class PeerCore
 
     /// <summary>
     /// RakPeer::Send (RakPeer.cpp:1308-1352): sends to a connected system and returns the receipt number used.
-    /// Like RakPeer, a receipt is returned even when the target is not connected and nothing is sent.
+    /// Like RakPeer, a receipt is returned even when the target is not connected or the data is empty and nothing is
+    /// sent (RakPeer.cpp:1317 rejects only a negative length; ReliabilityLayer.cpp:1567-1570 drops a 0-bit message).
     /// </summary>
     public uint Send(IPEndPoint remote, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, long nowUs)
     {
         ArgumentNullException.ThrowIfNull(remote);
-        if (data.IsEmpty)
-            return 0;
         var receipt = NextSendReceipt();
         var system = FindActive(remote);
         if (system is not null)
@@ -141,7 +140,7 @@ internal sealed class PeerCore
     public uint Send(ulong guid, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, long nowUs)
     {
         // RakPeer.cpp:1323-1324: an undefined target returns 0 without using a receipt number.
-        if (data.IsEmpty || guid == RakNetConstants.UnassignedGuid)
+        if (guid == RakNetConstants.UnassignedGuid)
             return 0;
         var system = FindActive(guid);
         if (system is null)

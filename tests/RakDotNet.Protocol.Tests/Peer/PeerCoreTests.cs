@@ -191,6 +191,21 @@ public class PeerCoreTests
     }
 
     [Fact]
+    public void An_empty_send_uses_a_receipt_number_and_sends_nothing()
+    {
+        // RakPeer.cpp:1317-1328 rejects only length < 0 before IncrementNextSendReceipt; ReliabilityLayer.cpp:1567-1570
+        // then drops the 0-bit message.
+        Connect();
+
+        Assert.Equal(1u, _client.Send(ServerAddress, [], Reliability.Reliable, Priority.High, 0, _link.NowUs));
+        Assert.Equal(2u, _client.Send(ServerGuid, [], Reliability.Reliable, Priority.High, 0, _link.NowUs));
+        Assert.Equal(3u, _client.Send(ServerGuid, [134], Reliability.Reliable, Priority.High, 0, _link.NowUs));
+
+        _link.RunUntil(() => ServerEvents.OfType<MessageReceived>().Any(), TimeSpan.FromSeconds(1));
+        Assert.Equal([134], ServerEvents.OfType<MessageReceived>().Single().Packet.ToArray());
+    }
+
+    [Fact]
     public void Notifying_for_shutdown_closes_every_connection_once_the_notification_is_delivered()
     {
         // RakPeer::Shutdown (RakPeer.cpp:1050-1082) calls NotifyAndFlagForShutdown for every active system, then waits
