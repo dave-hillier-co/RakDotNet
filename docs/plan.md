@@ -51,6 +51,7 @@ Things that are easy to get wrong, from the C++ source:
 - Ack-receipt reliability types are mapped to their base types before going on the wire.
 - Sequenced messages carry a separate sequencing index in addition to the ordering index and channel.
 - Datagram header flags: valid, ACK, NAK, packet pair, continuous send, needs B and AS. Parse the bits; don't match on byte values.
+- RakNet rewrites `ID_UNCONNECTED_PONG` before handing it to the application: the application sees the ID, a 4-byte big-endian time and the response data, with the GUID and magic removed (`RakPeer.cpp:4682-4700`). Code that presents packets the way RakNet does must apply the same rewrite.
 
 ## Hardening requirements
 
@@ -70,11 +71,16 @@ Every reference port missed at least one of these. Each needs a test.
 
 RakNet's own tests (`Samples/Tests`) run both peers in one process against RakNet itself, so they cannot test another implementation. The harness splits each scenario into two roles in separate processes.
 
-- `interop-peer`: a small C++ program linking RakNet's static library, controlled by line-delimited JSON on stdin and stdout. Commands: `startup`, `connect`, `send`, `close`, `ping`, `set_offline_ping_response`, `advertise`, `stats`, `shutdown`. Every received packet is reported as an event.
+- `tools/interop-peer`: a small C++ program linking RakNet's static library, controlled by JSON Lines on stdin and stdout as specified in [interop-protocol.md](interop-protocol.md). Every received packet is reported as an event.
 - `IPeerDriver`: one C# interface with `NativePeerDriver` (spawns `interop-peer`) and `RakDotNetPeerDriver`.
 - Every scenario runs as a matrix: native-native (validates the harness and gives the baseline), C#-native, native-C#, C#-C#.
-- A C# UDP proxy sits between the peers. It records datagrams (golden vectors for layer 0 and 1 tests) and injects seeded loss, reordering, duplication and delay.
-- RakNet is fetched by CMake `FetchContent` pinned to upstream commit `1a169895a900c9fc4841c556e16514182b75faf8`, since `reference/` is not committed. RakNet's `cmake_minimum_required(VERSION 2.6)` needs `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` under CMake 4, or a minimal CMake file of our own that compiles `Source/*.cpp`.
+- A C# UDP proxy sits between the peers. It records datagrams (golden vectors, see [golden-vectors.md](golden-vectors.md)) and injects seeded loss, reordering, duplication and delay.
+- RakNet is fetched by CMake `FetchContent` pinned to upstream commit `1a169895a900c9fc4841c556e16514182b75faf8`, since `reference/` is not committed. Our own CMake compiles `Source/*.cpp` directly; RakNet's CMake files are never configured.
+- RakNet needs two compiler workarounds under modern clang, applied as flags without patching its sources: it is compiled as `gnu++98`, and with `-fno-strict-float-cast-overflow` because `CCRakNetSlidingWindow` casts `-1.0` to an unsigned integer as an "RTT unknown" sentinel, which clang otherwise compiles to a trap.
+
+### Pass criterion
+
+Interop is judged by behaviour, not by identical traffic. Every datagram must be wire-exact, but timing, batching and congestion-control decisions may differ from RakNet. A scenario passes when both peers observe the same message stream and connection events.
 
 ### Scenarios derived from RakNet samples
 
@@ -93,18 +99,42 @@ RakNet's own tests (`Samples/Tests`) run both peers in one process against RakNe
 
 ## Milestones
 
-Each milestone has an exit criterion that is a passing test.
+Each milestone has an exit criterion that is a passing test. Milestones build a thin path through every layer first, then deepen it, so C# talks to native RakNet over a real socket as early as possible.
 
-1. **Harness skeleton.** RakNet static library builds; `interop-peer` supports `startup`, `ping`, `set_offline_ping_response`; C# driver and proxy exist. Exit: unconnected ping/pong passes native-native, and the captured datagrams are saved as golden vectors.
-2. **Wire layer.** `UInt24`, `BitStream`, offline messages, datagram header, encapsulated message, ACK ranges. Exit: every golden vector decodes and re-encodes byte-for-byte.
-3. **Offline handshake.** OCR1/2 and replies, MTU discovery, error replies. Exit: C# client completes the offline handshake with a native server and vice versa.
-4. **Session layer.** Reliability, ordering, sequencing, split, ACK/NAK, connected handshake, pings, sliding-window congestion control. Exit: the reliable ordered, big packet and timestamping scenarios pass all four matrix combinations through the lossy proxy.
-5. **Transport and public API.** Socket loops, `RakPeer`, `RakConnection`, event stream, options, statistics. Exit: the full scenario table (excluding security) passes the matrix.
-6. **Extras, as needed.** Compatibility facade, protocol profiles, plugins in priority order: ReplicaManager3, RPC4, FullyConnectedMesh2 + ConnectionGraph2, NatPunchthrough, FileListTransfer.
+1. **Harness.** Native `interop-peer`, C# driver, recording and fault-injecting proxy, scenario matrix. Exit: native-native scenarios pass through the proxy, and golden vectors are captured.
+2. **Wire layer.** `UInt24`, `BitStream`, message IDs, offline and connected control messages, datagram header, encapsulated message, ACK ranges. Exit: every golden vector decodes and re-encodes byte-for-byte, and decoded fields match the captured peers' values.
+3. **Thin end-to-end path.** Offline handshake at a fixed MTU, connected handshake, reliable ordered delivery on one channel without loss, ACKs, disconnect. Minimal Session and Peer layers, a thin internal transport, and `RakDotNetPeerDriver`. Built serially with classic TDD. Exit: unconnected ping and connect/send/disconnect scenarios pass in all four matrix combinations.
+4. **Deepening.** Independent items, each extending the working core and turning on its scenarios in all four combinations through the lossy proxy:
+   - Loss: resends, NAKs, RTO and sliding-window congestion control (including sending ACKs immediately while RTT is unknown).
+   - Split messages and reassembly.
+   - Sequenced delivery, all 32 channels, priorities, send receipts.
+   - Hardening limits and timeouts from the list above.
+   - MTU discovery and rejection replies.
+   - Connected pings, `ID_TIMESTAMP` and clock differential, timeout detection.
+5. **Public API.** Designed alongside milestones 3 and 4 (several independent proposals judged against the Brutal.RakNet surface and the ordered event stream), implemented once the core is stable. `RakDotNetPeerDriver` moves onto it. Exit: the full scenario table (excluding security) passes against the public API.
+6. **Performance.** BenchmarkDotNet suite and an allocation budget per datagram on the hot path, compared with RakNet's LoopbackPerformanceTest. Exit: benchmarks run in CI and the allocation budget is enforced by a test.
+7. **Extras, as needed.** Compatibility facade, protocol profiles, plugins in priority order: ReplicaManager3, RPC4, FullyConnectedMesh2 + ConnectionGraph2, NatPunchthrough, FileListTransfer.
+
+## Platforms and CI
+
+- Golden vectors must be captured on Linux as well as macOS before release, and on Windows if IPv6 is in scope (IPv6 addresses are serialised in a platform-specific layout).
+- CI builds the native peer, which needs network access to fetch RakNet or a cached copy, then runs the full matrix.
+
+## Working in parallel
+
+Parallel work runs as waves of agents, each in its own git worktree and branch:
+
+1. Before a wave, contracts are written and committed: interfaces, formats, and an ownership list naming which item creates each shared type, so no two items define the same concept.
+2. Each item is built, then independently reviewed against the C++ source and the contracts. Reviewers report only confirmed findings with evidence.
+3. Every finding is triaged: fixed on the branch, or declined with a reason. None are dropped by rule.
+4. Branches are merged one at a time, and the full suite including native scenarios runs after each merge.
+
+Work that is tightly coupled or design-heavy (such as the first pass through the Session layer) is done serially rather than split across agents.
 
 ## Open questions
 
-- Is a source-compatible facade for existing RakNet or Brutal.RakNet users needed? If so, it should be designed alongside milestone 5.
+- Who is the first consumer? This sets the priority of the questions below.
+- Is a source-compatible facade for existing RakNet or Brutal.RakNet users needed? If so, it should be designed alongside the public API.
 - Should layer 2 (Peer) be public for consumers with their own I/O, or internal until requested?
 - Is RakNet security (`cat` library) wire compatibility required, or is a modern AEAD/DTLS acceptable?
-- Which protocol profiles beyond stock RakNet 6? Bedrock 10/11 has no complete reference implementation and would need captures.
+- Which protocol profiles beyond stock RakNet 6? Bedrock 10/11 has no complete reference implementation and would need captures from real Bedrock clients and servers.
