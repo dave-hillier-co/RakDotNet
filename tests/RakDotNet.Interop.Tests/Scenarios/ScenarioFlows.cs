@@ -58,6 +58,14 @@ public static class ScenarioFlows
         Assert.Equal(
             sent.Select(Convert.ToHexStringLower).Order(),
             received.Select(p => Convert.ToHexStringLower(p.Data.Span)).Order());
+        // Unreliable messages may arrive in any order, but the ordered and sequenced messages of each channel arrive in the
+        // order they were sent. Each message carries its channel at byte 1 and its reliability at byte 2.
+        foreach (var channel in new byte[] { 0, 3 })
+        {
+            Assert.Equal(
+                sent.Where(d => d[1] == channel && ((Reliability)d[2]).HasOrderingChannel()).Select(Convert.ToHexStringLower),
+                received.Select(p => p.Data.ToArray()).Where(d => d[1] == channel && ((Reliability)d[2]).HasOrderingChannel()).Select(Convert.ToHexStringLower));
+        }
 
         foreach (var receipt in receipts)
         {
