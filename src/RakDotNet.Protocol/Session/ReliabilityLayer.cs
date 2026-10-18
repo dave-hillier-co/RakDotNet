@@ -35,9 +35,6 @@ internal sealed class ReliabilityLayer
 
     private const int ChannelCount = OrderingChannels.ChannelCount;
 
-    // ReliabilityLayer.cpp:1741-1742.
-    private const long MaxTimeSinceLastTickUs = 100_000;
-
     // AllocateFromInternalPacketPool sets reliableMessageNumber to (uint32_t)-1 (ReliabilityLayer.cpp:3678).
     private static readonly UInt24 UnassignedMessageNumber = UInt24.MaxValue;
 
@@ -202,8 +199,8 @@ internal sealed class ReliabilityLayer
             _lastUpdateUs = nowUs;
             return;
         }
-        var timeSinceLastTickUs = Math.Min(nowUs - _lastUpdateUs, MaxTimeSinceLastTickUs);
-        _ = timeSinceLastTickUs; // Used by the unreliable send timeout, not implemented yet.
+        // The unreliable send timeout (ReliabilityLayer.cpp:1745-1793), driven by the time since the last tick capped at
+        // 100 ms, is not implemented yet.
         _lastUpdateUs = nowUs;
 
         if (MessagesInResendBuffer != 0 && AckTimeout(nowUs / 1000))

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using RakDotNet.Protocol.Session;
@@ -350,7 +351,7 @@ internal sealed class PeerCore
                 else
                     // Already connected: reply normally. The C++ reads the time from after a magic that is not there
                     // (RakPeer.cpp:5992-5997); that misreading is kept.
-                    OnConnectionRequest(system, data.Length >= 33 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(data[25..]) : 0, nowUs);
+                    OnConnectionRequest(system, data.Length >= 33 ? BinaryPrimitives.ReadUInt64BigEndian(data[25..]) : 0, nowUs);
                 break;
 
             // RakPeer.cpp:6005: longer than the ID, a 4-byte address, a port and two times.
@@ -627,7 +628,7 @@ internal sealed class PeerCore
     {
         // Every rejection is ID, magic, GUID, except that ID_INCOMPATIBLE_PROTOCOL_VERSION has its version byte first.
         var guidOffset = (MessageId)data[0] == MessageId.IncompatibleProtocolVersion ? 2 + OfflineMagic.Length : 1 + OfflineMagic.Length;
-        var guid = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(data[guidOffset..]);
+        var guid = BinaryPrimitives.ReadUInt64BigEndian(data[guidOffset..]);
         var attempt = FindAttempt(from);
         if (attempt is null)
             return;
