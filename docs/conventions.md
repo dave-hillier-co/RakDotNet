@@ -22,6 +22,7 @@
 - `src/RakDotNet.Protocol/Session/`: layer 1. Internal, visible to tests and `RakDotNet`.
 - `src/RakDotNet.Protocol/Peer/`: layer 2. Internal, visible to tests and `RakDotNet`.
 - `src/RakDotNet/`: layer 3, public API.
+- `src/RakDotNet/Transport/`: the socket and update loops that run a `PeerCore`. Internal, visible to tests.
 - Test folders mirror source folders.
 
 ## Shared types
