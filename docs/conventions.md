@@ -21,8 +21,12 @@
 - `src/RakDotNet.Protocol/Wire/`: layer 0. Public.
 - `src/RakDotNet.Protocol/Session/`: layer 1. Internal, visible to tests and `RakDotNet`.
 - `src/RakDotNet.Protocol/Peer/`: layer 2. Internal, visible to tests and `RakDotNet`.
-- `src/RakDotNet/`: layer 3, public API.
+- `src/RakDotNet/`: layer 3, public API, namespace `RakDotNet`.
+- `src/RakDotNet/Security/`: layer 3 key and connect-security types, namespace `RakDotNet.Security`.
 - `src/RakDotNet/Transport/`: the socket and update loops that run a `PeerCore`. Internal, visible to tests.
+- `src/RakDotNet.Testing/`: test support for applications, such as `InMemoryNetwork`. Public.
+- `src/RakDotNet.Connections/`: layer 4 per-connection demultiplexing. Public.
+- `src/RakDotNet.Compatibility/`: layer 4 `RakPeerInterface`-shaped facade. Public; no plugin depends on it.
 - Test folders mirror source folders.
 
 ## Shared types

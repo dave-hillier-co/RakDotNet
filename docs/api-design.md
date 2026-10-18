@@ -2,6 +2,8 @@
 
 This document defines the public API of RakDotNet: layer 3 of [plan.md](plan.md) (namespace and assembly `RakDotNet`), the layer 0 types it adds to `RakDotNet.Protocol.Wire`, and the layer 4 packages that sit directly on it. It is binding for the implementation, for `RakDotNetPeerDriver` and for every plugin port.
 
+The API is declared as compiling code. Signatures, and the semantics of each member, are in the source and its XML doc comments; this document gives the principles, the rules that span types, the mappings from RakNet, and the decisions with their reasons.
+
 C++ references are to RakNet 4.081 at commit `1a169895`, as `File.cpp:line`. Where this API differs from RakNet's observable behaviour, the difference is stated with its reason.
 
 ## 1. Purpose
@@ -21,451 +23,87 @@ The API exposes the whole of RakNet's `RakPeerInterface` and `PluginInterface2` 
 4. **Commands are thread-safe and never block.** `Send`, `Close`, `Connect` and every setter enqueue a command for the I/O cycle. Queries read snapshots.
 5. **Programming errors throw; runtime outcomes are values.** Bad arguments and misuse throw. Network, connection and send outcomes are returned as typed results or events. Malformed input from the network never throws.
 6. **Plugins run where RakNet runs them.** Plugin hooks run on the event consumer, inside the read, in RakNet's order. Reliability-layer observers run in the I/O cycle.
-7. **RakNet names where they carry meaning.** `RakNetGuid`, `SystemAddress`, `AddressOrGuid`, `ConnectionState`, `RakNetStatistics`, the `ConnectionAttemptResult` and failure names, and the plugin hook names stay recognisable, so porting is mostly mechanical.
+7. **RakNet names where they carry meaning.** `RakNetGuid`, `SystemAddress`, `AddressOrGuid`, `ConnectionState`, `RakNetStatistics`, `BitStream`, the `ConnectAttemptResult` and failure names, and the plugin hook names stay recognisable, so porting is mostly mechanical.
 8. **Escape hatches are grouped.** Out-of-band sends, raw datagrams, TTL, datagram filtering, address migration, the network simulator and observers live under `peer.LowLevel`, which keeps the main surface small.
 9. **No reflection.** Trimming and NativeAOT are supported with analyzers as errors.
 
 ## 3. Assemblies and namespaces
 
-| Assembly | Namespace | Contents |
-|---|---|---|
-| `RakDotNet.Protocol` | `RakDotNet.Protocol.Wire` | Layer 0, public. Existing: `Reliability`, `Priority`, `MessageId`, `UInt24`, `BitStreamReader`, `BitStreamWriter`, the message codecs, `RakNetConstants`. Added by this design: `RakNetGuid`, `SystemAddress`, `BitStream`, `TimestampHeader`, `OutOfBandHeader`, the `BitStreamWriter(Span<byte>, int bitPosition)` constructor, the RakNet application encodings (section 15). |
-| `RakDotNet.Protocol` | `.Session`, `.Peer` | Layers 1 and 2, `internal` (decision 18.2). |
-| `RakDotNet` | `RakDotNet` | Layer 3: everything in sections 4 to 14 except security. |
-| `RakDotNet` | `RakDotNet.Security` | Key and connect-security types (section 13). |
-| `RakDotNet.Testing` | `RakDotNet.Testing` | `InMemoryNetwork`, a datagram transport fake for sociable multi-peer tests (section 16). |
-| `RakDotNet.Connections` | `RakDotNet.Connections` | Layer 4: `ConnectionDemultiplexer` (section 6.4). |
-| `RakDotNet.Compatibility` | `RakDotNet.Compatibility` | Layer 4: the `RakPeerInterface`-shaped facade (decision 18.1). |
+| Assembly | Namespace | Contents | Source |
+|---|---|---|---|
+| `RakDotNet.Protocol` | `RakDotNet.Protocol.Wire` | Layer 0, public: `Reliability`, `Priority`, `MessageId`, `UInt24`, `BitStreamReader`, `BitStreamWriter`, `RakNetGuid`, `SystemAddress`, `BitStream`, `BitStreamEncodings`, `BitSerializer`; in `.Messages`, the message codecs, `RakNetConstants`, `TimestampHeader`, `OutOfBandHeader` | `src/RakDotNet.Protocol/Wire/` |
+| `RakDotNet.Protocol` | `.Session`, `.Peer` | Layers 1 and 2, `internal` (decision 18.2) | `src/RakDotNet.Protocol/Session/`, `Peer/` |
+| `RakDotNet` | `RakDotNet` | Layer 3: everything in sections 4 to 14 except security | `src/RakDotNet/` |
+| `RakDotNet` | `RakDotNet.Security` | Key and connect-security types (section 13) | `src/RakDotNet/Security/` |
+| `RakDotNet.Testing` | `RakDotNet.Testing` | `InMemoryNetwork`, a datagram transport fake for sociable multi-peer tests (section 16) | `src/RakDotNet.Testing/` |
+| `RakDotNet.Connections` | `RakDotNet.Connections` | Layer 4: `ConnectionDemultiplexer` (section 6.4) | `src/RakDotNet.Connections/` |
+| `RakDotNet.Compatibility` | `RakDotNet.Compatibility` | Layer 4: the `RakPeerInterface`-shaped facade (decision 18.1) | `src/RakDotNet.Compatibility/` |
 
-Wire types are reused everywhere and never redeclared, as [conventions.md](conventions.md) requires.
+Wire types are reused everywhere and never redeclared, as [conventions.md](conventions.md) requires. Layer 2 has internal types named `PeerEvent` and `ConnectionState`; code in a `RakDotNet.*` namespace that uses them qualifies them as `Protocol.Peer.PeerEvent`, because the public types of the same name in `RakDotNet` take precedence over a `using` there.
 
 ## 4. Identity and addressing
 
-```csharp
-namespace RakDotNet.Protocol.Wire;
+`RakNetGuid` (`src/RakDotNet.Protocol/Wire/RakNetGuid.cs`) and `SystemAddress` (`src/RakDotNet.Protocol/Wire/SystemAddress.cs`) are values in Wire, so lookups and observer callbacks never allocate (decision 18.11). `SystemAddress` holds an IPv4 or IPv6 address and port inline; it converts from `IPEndPoint` implicitly and back with `ToIPEndPoint`, and copies to and from a `SocketAddress` without allocating on the send and receive paths. `default(SystemAddress)` is `Unassigned`, IPv4 `0.0.0.0:0`, as RakNet's default `SystemAddress` is. `default(RakNetGuid)` is GUID 0, which RakNet treats as assigned but never generates. Both format as the interop protocol writes them, and as RakNet's `ToString` for the unassigned values.
 
-/// RakNetGUID (RakNetTypes.h). Serialised as a big-endian u64.
-public readonly record struct RakNetGuid(ulong Value) : ISpanFormattable, ISpanParsable<RakNetGuid>
-{
-    public static RakNetGuid Unassigned { get; }          // UNASSIGNED_RAKNET_GUID, RakNetConstants.UnassignedGuid
-    public bool IsAssigned { get; }
-    public override string ToString();                    // decimal, as RakNetGUID::ToString and interop-protocol.md
-}
+`AddressOrGuid` (`src/RakDotNet/AddressOrGuid.cs`) holds exactly one of a GUID or an address. `default` is undefined, which is what `except: default` means on a broadcast. Converting an unassigned GUID or address gives an undefined target.
 
-/// An IPv4 or IPv6 address and port held inline. No allocation; usable as a dictionary key.
-public readonly struct SystemAddress : IEquatable<SystemAddress>, ISpanFormattable, ISpanParsable<SystemAddress>
-{
-    public static SystemAddress Unassigned { get; }       // UNASSIGNED_SYSTEM_ADDRESS
-    public SystemAddress(IPAddress address, int port);
-    public static SystemAddress FromSocketAddress(SocketAddress address);  // receive path; copies the bytes
-    public void CopyTo(SocketAddress destination);                         // send path; no allocation
-    public static implicit operator SystemAddress(IPEndPoint endPoint);
-    public IPEndPoint ToIPEndPoint();                     // allocates; for BCL interop
-    public AddressFamily AddressFamily { get; }
-    public ushort Port { get; }
-    public bool IsAssigned { get; }
-    public bool IsLoopback { get; }
-    public bool EqualsIgnoringPort(SystemAddress other);  // SystemAddress::EqualsExcludingPort
-    public bool TryWriteAddressBytes(Span<byte> destination, out int bytesWritten);
-    public override string ToString();                    // "a.b.c.d:port", as interop-protocol.md
-}
-```
-
-`BitStreamWriter.WriteAddress(SystemAddress)` and `BitStreamReader.TryReadAddress(out SystemAddress)` sit beside the existing `IPEndPoint` overloads. IPv6 serialisation follows the platform `sockaddr_in6` caveat in [plan.md](plan.md); until per-platform captures exist, an IPv6 binding fails at start with `StartupError.SocketFamilyNotSupported`.
-
-```csharp
-namespace RakDotNet;
-
-/// AddressOrGUID. Holds exactly one of a GUID or an address, never both, so a target is never ambiguous.
-public readonly struct AddressOrGuid : IEquatable<AddressOrGuid>
-{
-    public RakNetGuid Guid { get; }             // Unassigned when this holds an address
-    public SystemAddress Address { get; }       // Unassigned when this holds a GUID
-    public bool IsUndefined { get; }
-    public static implicit operator AddressOrGuid(RakNetGuid guid);
-    public static implicit operator AddressOrGuid(SystemAddress address);
-    public static implicit operator AddressOrGuid(IPEndPoint endPoint);
-    public static implicit operator AddressOrGuid(RakConnection connection);   // the connection's Guid
-}
-
-public readonly record struct SendReceipt(uint Value)
-{
-    public static SendReceipt None { get; }     // 0: "assign one" when passed as forceReceipt
-}
-
-public enum ConnectionState : byte              // RakNet ConnectionState, same order
-{ Pending, Connecting, Connected, Disconnecting, SilentlyDisconnecting, Disconnected, NotConnected }
-```
+`BitStreamWriter.WriteAddress(SystemAddress)` sits beside the `IPEndPoint` overload. The reader's counterpart is `TryReadSystemAddress`, not a `TryReadAddress` overload, because an overload on the `out` type would make every `TryReadAddress(out var a)` ambiguous. IPv6 serialisation follows the platform `sockaddr_in6` caveat in [plan.md](plan.md); until per-platform captures exist, an IPv6 binding fails at start with `StartupError.SocketFamilyNotSupported`.
 
 Hostnames are `string` and are resolved with `Dns.GetHostAddressesAsync`. No public member takes a hostname as bytes.
 
 ## 5. Main types
 
-### 5.1 `RakPeer`
-
-```csharp
-public sealed class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
-{
-    // ---- Lifecycle
-    public static RakPeer Start(RakPeerOptions options);    // binds, starts the loop; throws RakStartupException
-    public ValueTask ShutdownAsync(TimeSpan blockDuration, byte orderingChannel = 0,
-                                   Priority notificationPriority = Priority.Low,
-                                   CancellationToken cancellationToken = default);
-    public void Dispose();                                  // ShutdownAsync(TimeSpan.Zero), synchronously; idempotent
-    public ValueTask DisposeAsync();                        // ShutdownAsync(options.ShutdownBlockDuration); idempotent
-    public bool IsActive { get; }
-    public void Update();                                   // PeerThreading.Manual only: one I/O cycle (RunUpdateCycle)
-
-    // ---- The event stream (section 6)
-    public PeerEventReader Events { get; }
-
-    // ---- Identity and clock
-    public RakNetGuid Guid { get; }                         // GetMyGUID
-    public TimeProvider TimeProvider { get; }
-    public ulong GetTime();                                 // RakNet::GetTime, ms, from TimeProvider
-    public IReadOnlyList<RakSocket> Sockets { get; }        // one per SocketBinding, index = binding index
-    public IReadOnlyList<IPAddress> LocalAddresses { get; } // GetNumberOfAddresses / GetLocalIP
-    public bool IsLocalAddress(IPAddress address);          // IsLocalIP
-    public IReadOnlyList<SystemAddress> InternalAddresses { get; }    // GetInternalID(UNASSIGNED, i)
-    public void SetInternalAddress(SystemAddress address, int index = 0); // SetInternalID
-    public SystemAddress ExternalAddress { get; }           // GetExternalID(UNASSIGNED): first address a remote reported
-
-    // ---- Connection table
-    public int MaxConnections { get; }                      // GetMaximumNumberOfPeers
-    public int MaxIncomingConnections { get; set; }         // clamped to MaxConnections at start (RakPeer.cpp:605)
-    public int ConnectionCount { get; }                     // NumberOfConnections
-    public ConnectionList Connections { get; }              // GetConnectionList / GetSystemList
-    public bool TryGetConnection(RakNetGuid guid, [NotNullWhen(true)] out RakConnection? connection);
-    public bool TryGetConnection(SystemAddress address, [NotNullWhen(true)] out RakConnection? connection);
-    public bool TryGetConnectionByIndex(int systemIndex, [NotNullWhen(true)] out RakConnection? connection);
-    public RakNetGuid GetGuidFromAddress(SystemAddress address);   // Unassigned input -> own Guid (RakPeer.cpp:2396)
-    public SystemAddress GetAddressFromGuid(RakNetGuid guid);
-    public ConnectionState GetConnectionState(AddressOrGuid target);   // includes Pending attempts
-
-    // ---- Connecting (section 8)
-    public ConnectAttemptResult Connect(SystemAddress remote, ConnectOptions? options = null);
-    public ValueTask<ConnectResult> ConnectAsync(SystemAddress remote, ConnectOptions? options = null,
-                                                 CancellationToken cancellationToken = default);
-    public ValueTask<ConnectResult> ConnectAsync(string host, int port, ConnectOptions? options = null,
-                                                 CancellationToken cancellationToken = default);
-    public void CancelConnectionAttempt(SystemAddress remote);
-    public void Close(AddressOrGuid target, bool notify = true, byte orderingChannel = 0,
-                      Priority notificationPriority = Priority.Low);    // CloseConnection
-
-    // ---- Sending (section 9)
-    public SendResult Send(OutgoingMessage message, AddressOrGuid target, Reliability reliability,
-                           Priority priority = Priority.High, byte orderingChannel = 0,
-                           SendReceipt forceReceipt = default);
-    public SendResult Send<TState>(AddressOrGuid target, Reliability reliability, Priority priority,
-                                   byte orderingChannel, int sizeHint, TState state, MessageWriter<TState> write)
-        where TState : allows ref struct;
-    public SendResult Broadcast(OutgoingMessage message, Reliability reliability,
-                                Priority priority = Priority.High, byte orderingChannel = 0,
-                                AddressOrGuid except = default, SendReceipt forceReceipt = default);
-    public SendResult Broadcast<TState>(Reliability reliability, Priority priority, byte orderingChannel,
-                                        int sizeHint, TState state, MessageWriter<TState> write,
-                                        AddressOrGuid except = default)
-        where TState : allows ref struct;
-    public ValueTask<DeliveryOutcome> SendAndTrackAsync(OutgoingMessage message, AddressOrGuid target,
-                                                        Reliability reliability, Priority priority = Priority.High,
-                                                        byte orderingChannel = 0,
-                                                        CancellationToken cancellationToken = default);
-    public void SendLoopback(ReadOnlySpan<byte> message);
-    public SendReceipt PeekNextReceipt();                   // GetNextSendReceipt
-    public SendReceipt ReserveReceipt();                    // IncrementNextSendReceipt
-
-    // ---- Injecting events (PushBackPacket)
-    public void Inject(ReadOnlySpan<byte> data, SystemAddress source, RakNetGuid sourceGuid, bool atHead = false); // copies
-    public void Inject(OwnedPeerEvent owned, bool atHead = false);    // consumes ownership; no copy
-
-    // ---- Offline
-    public bool PingUnconnected(SystemAddress remote, bool onlyReplyOnAcceptingConnections = false, int socketIndex = 0);
-    public ValueTask<bool> PingUnconnectedAsync(string host, int port, bool onlyReplyOnAcceptingConnections = false,
-                                                int socketIndex = 0, CancellationToken cancellationToken = default);
-    public ValueTask<PongResult> PingAsync(SystemAddress remote, TimeSpan timeout,
-                                           bool onlyReplyOnAcceptingConnections = false, int socketIndex = 0,
-                                           CancellationToken cancellationToken = default);
-    public ReadOnlyMemory<byte> OfflinePingResponse { get; set; }     // copied on set; > 400 bytes throws
-    public bool AdvertiseSystem(SystemAddress remote, ReadOnlySpan<byte> data = default, int socketIndex = 0);
-    public ValueTask<bool> AdvertiseSystemAsync(string host, int port, ReadOnlyMemory<byte> data = default,
-                                                int socketIndex = 0, CancellationToken cancellationToken = default);
-
-    // ---- Runtime settings (initial values from RakPeerOptions; take effect on the next I/O cycle)
-    public ReadOnlyMemory<byte> IncomingPassword { get; set; }        // copied on set; > 255 bytes throws
-    public TimeSpan DefaultTimeout { get; set; }    // SetTimeoutTime(t, UNASSIGNED): default and every live connection (RakPeer.cpp:2526-2538)
-    public TimeSpan UnreliableTimeout { get; set; }
-    public bool OccasionalPing { get; set; }
-    public int SplitMessageProgressInterval { get; set; }
-    public bool LimitIpConnectionFrequency { get; set; }
-    public bool AllowConnectionResponseIpMigration { get; set; }
-    public long PerConnectionOutgoingBandwidthLimit { get; set; }     // bits per second, 0 = unlimited
-
-    // ---- Admission control
-    public BanList BanList { get; }
-    public AddressPatternList SecurityExceptions { get; }
-    public bool IsSecurityEnabled { get; }
-
-    // ---- Statistics (section 12)
-    public int CopyStatistics(Span<ConnectionStatistics> destination);   // GetStatisticsList
-
-    // ---- Plugins (section 11)
-    public PluginCollection Plugins { get; }
-
-    // ---- Escape hatches
-    public RakPeerLowLevel LowLevel { get; }
-
-    // ---- Diagnostics
-    public PoolStatistics Pools { get; }
-}
-
-/// Immutable snapshot, rebuilt only when a connection is added or removed. Struct enumerator, no allocation.
-public readonly struct ConnectionList : IReadOnlyList<RakConnection>
-{
-    public int Count { get; }
-    public RakConnection this[int index] { get; }
-    public Enumerator GetEnumerator();
-    public struct Enumerator : IEnumerator<RakConnection> { public RakConnection Current { get; } public bool MoveNext(); }
-}
-
-public readonly record struct PongResult(RakNetGuid Guid, SystemAddress Address, TimeSpan RoundTrip, ReadOnlyMemory<byte> Response);
-```
-
-A `RakPeer` starts once. `Start` either returns an active peer or throws, so there is no "constructed but not started" state. After shutdown every command throws `ObjectDisposedException` and every query returns its last value. To start again, create a new peer (decision 18.10).
-
-### 5.2 `RakConnection`
-
-There is one `RakConnection` per entry in RakNet's remote system list. It is created when that entry is assigned: for an outgoing attempt, when the offline handshake completes and the attempt moves from the request queue into the connection table; for an incoming one, when the connection request is accepted into the table. Before that, an outgoing attempt is visible only through `peer.GetConnectionState(address) == Pending` and its `ConnectAsync` task.
-
-A `RakConnection` is never reused. A later connection from the same address or GUID gets a new object, so a stale reference cannot address a new peer. After the connection ends the object stays readable with `State == Disconnected`, every property keeps its last value, and `Send` returns `SendStatus.NotConnected`. Object identity is therefore safe as a dictionary key.
-
-```csharp
-public sealed class RakConnection
-{
-    public RakPeer Peer { get; }
-    public RakNetGuid Guid { get; }
-    public SystemAddress Address { get; }              // changes only through LowLevel.ChangeSystemAddress
-    public int SystemIndex { get; }                    // GetIndexFromSystemAddress
-    public bool IsIncoming { get; }
-    public RakSocket Socket { get; }                   // GetSocket(target)
-    public ConnectionState State { get; }
-    public bool IsConnected { get; }
-    public int Mtu { get; }                            // GetMTUSize(target)
-    public TimeSpan Timeout { get; set; }              // SetTimeoutTime / GetTimeoutTime(target)
-    public TimeSpan? AveragePing { get; }              // null when RakNet returns -1 (no sample yet)
-    public TimeSpan? LastPing { get; }
-    public TimeSpan? LowestPing { get; }
-    public long ClockDifferential { get; }             // GetClockDifferential, signed ms
-    public SystemAddress ExternalAddress { get; }      // GetExternalID(target): our address as the remote sees it
-    public IReadOnlyList<SystemAddress> RemoteInternalAddresses { get; }   // GetInternalID(target, i)
-    public bool IsSecure { get; }
-    public RakPublicKey? RemoteIdentityKey { get; }    // GetClientPublicKeyFromSystemAddress
-    public object? UserState { get; set; }             // application state; never read by the library
-    public Task Closed { get; }                        // completes when State reaches Disconnected
-
-    public RakNetStatistics GetStatistics();           // GetStatistics(target); value snapshot
-
-    public SendResult Send(OutgoingMessage message, Reliability reliability, Priority priority = Priority.High,
-                           byte orderingChannel = 0, SendReceipt forceReceipt = default);
-    public SendResult Send<TState>(Reliability reliability, Priority priority, byte orderingChannel,
-                                   int sizeHint, TState state, MessageWriter<TState> write)
-        where TState : allows ref struct;
-    public ValueTask<DeliveryOutcome> SendAndTrackAsync(OutgoingMessage message, Reliability reliability,
-                                                        Priority priority = Priority.High, byte orderingChannel = 0,
-                                                        CancellationToken cancellationToken = default);
-    public void Ping();                                // Ping(SystemAddress), connected ping
-    public void Close(bool notify = true, byte orderingChannel = 0, Priority notificationPriority = Priority.Low);
-    public ValueTask CloseAsync(bool notify = true, byte orderingChannel = 0,
-                                Priority notificationPriority = Priority.Low,
-                                CancellationToken cancellationToken = default);   // completes with Closed
-}
-```
-
-In a cross-connection (both sides connecting at once) RakNet handles the second `ID_CONNECTION_REQUEST` on the existing entry while it is in `REQUESTED_CONNECTION` (`RakPeer.cpp:5981-5988`). Because a `RakConnection` mirrors that entry, the API promises one object per entry and nothing more; the `CrossConnectionTest`-derived interop scenario defines which events each side observes.
-
-### 5.3 `RakSocket`
-
-```csharp
-public sealed class RakSocket          // GetSockets / GetSocket; one per binding
-{
-    public int Index { get; }
-    public SystemAddress LocalAddress { get; }                       // GetMyBoundAddress(index)
-    public AddressFamily AddressFamily { get; }
-    public bool IsOpen { get; }                                      // false after shutdown
-    public bool SendTo(ReadOnlySpan<byte> datagram, SystemAddress remote);           // raw, no RakNet framing
-    public bool SendTo(ReadOnlySpan<byte> datagram, SystemAddress remote, int ttl);  // SendTTL-style raw send
-}
-```
-
-The underlying `Socket` is never handed out: its receive side belongs to the peer, and a second reader would steal datagrams.
-
-### 5.4 `RakPeerLowLevel`
-
-```csharp
-public sealed class RakPeerLowLevel    // peer.LowLevel: NAT, relay and diagnostic plugins
-{
-    public bool SendOutOfBand(SystemAddress remote, ReadOnlySpan<byte> payload, int socketIndex = 0);
-    public ValueTask<bool> SendOutOfBandAsync(string host, int port, ReadOnlyMemory<byte> payload,
-                                              int socketIndex = 0, CancellationToken cancellationToken = default);
-    public void WriteOutOfBandHeader(ref BitStreamWriter writer);   // ID_OUT_OF_BAND_INTERNAL, our GUID, magic
-    public void WriteOutOfBandHeader(BitStream stream);
-    public bool SendTtl(SystemAddress remote, int ttl, int socketIndex = 0);           // SendTTL
-    public void ChangeSystemAddress(RakNetGuid guid, SystemAddress address);           // Router2
-    public IncomingDatagramFilter? IncomingDatagramFilter { get; set; }                // SetIncomingDatagramEventHandler
-    public NetworkSimulatorOptions? NetworkSimulator { get; set; }                     // ApplyNetworkSimulator; null = off
-    public bool IsNetworkSimulatorActive { get; }
-    public NetworkObserverCollection Observers { get; }                                // observers that are not plugins
-}
-
-/// Returns false to drop the datagram before RakNet processes it. Runs in the I/O cycle.
-public delegate bool IncomingDatagramFilter(ReadOnlySpan<byte> datagram, SystemAddress from, int socketIndex);
-
-public sealed class NetworkObserverCollection : IReadOnlyCollection<INetworkObserver>
-{ public void Attach(INetworkObserver observer); public bool Detach(INetworkObserver observer); }
-```
+- **`RakPeer`** (`src/RakDotNet/RakPeer.cs`) is `RakPeerInterface`. A peer starts once: `Start` either returns an active peer or throws, so there is no "constructed but not started" state. After shutdown every command throws `ObjectDisposedException` and every query returns its last value. To start again, create a new peer (decision 18.10).
+- **`RakConnection`** (`src/RakDotNet/RakConnection.cs`) mirrors one entry in RakNet's remote system list and is created when that entry is assigned: for an outgoing attempt when the offline handshake completes and the attempt moves into the connection table, for an incoming one when the request is accepted. Before that an outgoing attempt is visible only as `GetConnectionState(address) == Pending` and its `ConnectAsync` task. A `RakConnection` is never reused, so a stale reference cannot address a new peer and object identity is safe as a dictionary key; after the connection ends it stays readable with `State == Disconnected`. In a cross-connection RakNet handles the second `ID_CONNECTION_REQUEST` on the existing entry (`RakPeer.cpp:5981-5988`), so the API promises one object per entry and nothing more; the `CrossConnectionTest`-derived interop scenario defines which events each side observes.
+- **`ConnectionList`** (`src/RakDotNet/ConnectionList.cs`) is an immutable snapshot, rebuilt only when a connection is added or removed, with a struct enumerator.
+- **`RakSocket`** (`src/RakDotNet/RakSocket.cs`) is one binding. The underlying `Socket` is never handed out: its receive side belongs to the peer, and a second reader would steal datagrams.
+- **`RakPeerLowLevel`** (`src/RakDotNet/RakPeerLowLevel.cs`) is `peer.LowLevel`, for NAT, relay and diagnostic plugins.
 
 ## 6. The event stream
 
 ### 6.1 Events
 
-```csharp
-public enum PeerEventKind : byte
-{
-    Message,          // any packet not listed below: user IDs, plugin IDs, ID_REMOTE_*, ID_TIMESTAMP-prefixed, loopback
-    Connected,        // ID_CONNECTION_REQUEST_ACCEPTED (IsIncoming false) or ID_NEW_INCOMING_CONNECTION (true)
-    ConnectFailed,    // ID_CONNECTION_ATTEMPT_FAILED and the nine rejection IDs; see ConnectFailure
-    Disconnected,     // ID_DISCONNECTION_NOTIFICATION or ID_CONNECTION_LOST; see DisconnectReason
-    ReceiptAcked,     // ID_SND_RECEIPT_ACKED
-    ReceiptLost,      // ID_SND_RECEIPT_LOSS
-    ReceiptAbandoned, // not a RakNet packet: the receipt's connection ended first (section 9.3)
-    UnconnectedPong,  // ID_UNCONNECTED_PONG
-    AdvertiseSystem,  // ID_ADVERTISE_SYSTEM
-    OutOfBand,        // ID_OUT_OF_BAND_INTERNAL
-    DownloadProgress, // ID_DOWNLOAD_PROGRESS
-}
+`PeerEvent` (`src/RakDotNet/PeerEvent.cs`) is a borrowed `ref struct` view of one stream entry: a pooled segment plus the generation it was issued with. `PeerEventKind` (`src/RakDotNet/PeerEventKind.cs`) is a pure function of `Data[0]`, as RakNet applications switch on it, except for `ReceiptAbandoned`. A packet that starts with `ID_TIMESTAMP` is a `Message`. Kind-specific members return `default` when the kind does not match.
 
-/// A borrowed view of one stream entry: a pooled segment plus the generation it was issued with.
-/// Valid until the next read on Events (section 7). A ref struct, so it cannot be stored in a field,
-/// boxed, captured or held across await.
-public readonly ref struct PeerEvent
-{
-    public PeerEventKind Kind { get; }
-    public bool IsRakNetPacket { get; }           // false only for kinds RakNet never produces (ReceiptAbandoned)
-    public MessageId Id { get; }                  // Data[0], or the ID after the ID_TIMESTAMP header
-    public RakConnection? Connection { get; }     // null for offline, loopback and some injected events
-    public RakNetGuid Guid { get; }               // Packet::guid
-    public SystemAddress Address { get; }         // Packet::systemAddress
-    public int SocketIndex { get; }
-    public ulong ReceivedTime { get; }            // GetTime() when the entry was queued
-    public bool IsLocal { get; }                  // Packet::wasGeneratedLocally
-
-    // Payload: exactly Packet::data and Packet::bitSize. Empty when IsRakNetPacket is false.
-    public ReadOnlySpan<byte> Data { get; }
-    public int BitLength { get; }
-    public ReadOnlySpan<byte> Body { get; }       // after the ID, or after ID_TIMESTAMP + time + ID
-    public BitStreamReader GetReader();           // over Data, limited to BitLength
-    public BitStreamReader GetBodyReader();
-    public bool HasTimestamp { get; }
-    public ulong Timestamp { get; }               // already shifted into local time (ShiftIncomingTimestamp)
-
-    // Kind-specific; default when Kind does not match
-    public bool IsIncoming { get; }               // Connected
-    public DisconnectReason DisconnectReason { get; }   // Disconnected
-    public bool ClosedLocally { get; }            // Disconnected: the connection ended because this peer called Close
-    public ConnectFailure ConnectFailure { get; } // ConnectFailed
-    public byte RemoteProtocolVersion { get; }    // ConnectFailed + IncompatibleProtocolVersion
-    public SendReceipt Receipt { get; }           // ReceiptAcked, ReceiptLost, ReceiptAbandoned
-    public UnconnectedPongView Pong { get; }      // UnconnectedPong
-    public DownloadProgressView Progress { get; } // DownloadProgress
-
-    public OwnedPeerEvent Detach();               // take ownership (section 7)
-    public byte[] ToArray();                      // unpooled copy of Data
-}
-
-public readonly ref struct UnconnectedPongView
-{ public uint SentTime { get; } public TimeSpan RoundTrip { get; } public ReadOnlySpan<byte> Response { get; } }
-
-public readonly ref struct DownloadProgressView
-{ public uint PartsArrived { get; } public uint PartCount { get; } public uint PartLength { get; } public ReadOnlySpan<byte> FirstPart { get; } }
-
-public enum DisconnectReason : byte    // PI2_LostConnectionReason values RakNet raises (RakPeer.cpp:6417-6422)
-{
-    DisconnectionNotification,         // ID_DISCONNECTION_NOTIFICATION
-    ConnectionLost,                    // ID_CONNECTION_LOST
-}
-
-/// An event the caller owns. The handle is (segment, generation); release is a CompareExchange on the
-/// generation, so disposing a copy, disposing twice, or disposing after Inject consumed it is a no-op.
-public struct OwnedPeerEvent : IDisposable
-{
-    public bool IsValid { get; }
-    public PeerEvent Event { get; }               // a view, valid while owned; throws ObjectDisposedException after
-    public ReadOnlyMemory<byte> Data { get; }     // same bytes as Event.Data, usable across await
-    public void Dispose();
-}
-```
-
-`Data` holds exactly the bytes RakNet's `Packet::data` would hold, including RakNet's rewrites:
-
-- `ID_UNCONNECTED_PONG`: the ID, the ping time as a 4-byte big-endian `TimeMS`, then the response; the GUID and magic are removed (`RakPeer.cpp:4682-4704`).
-- `ID_ADVERTISE_SYSTEM` and `ID_OUT_OF_BAND_INTERNAL`: the ID then the payload; the GUID and magic are removed (`RakPeer.cpp:4706-4735`).
-- `ID_TIMESTAMP`: the 8-byte time is shifted in place by the clock differential (`RakPeer.cpp:1549-1555`).
-- Receipt events: the ID then the receipt number as 4 bytes in host (little-endian) order (`ReliabilityLayer.cpp:760`, `ReliabilityLayer.cpp:1871-1872`).
-- `Connected`: the original `ID_CONNECTION_REQUEST_ACCEPTED` or `ID_NEW_INCOMING_CONNECTION` message.
-
-`BitLength` is `Packet::bitSize`. For messages from a connected system it is the bit length the reliability layer delivered (`RakPeer.cpp:6046`, `RakPeer.cpp:6231`), which can end mid-byte when the sender used `Send(BitStream*)` with a partial final byte; `ID_CONNECTION_REQUEST_ACCEPTED` is rounded to whole bytes (`RakPeer.cpp:6186`).
-
-`Kind` is a pure function of `Data[0]`, as RakNet applications switch on it, except for `ReceiptAbandoned`. A packet that starts with `ID_TIMESTAMP` is a `Message`.
+`Data` holds exactly the bytes of RakNet's `Packet::data`, including RakNet's rewrites of unconnected pongs, advertisements, out-of-band messages, timestamps and receipts; the remarks on `PeerEvent` list them with their citations. `BitLength` is `Packet::bitSize`, which can end mid-byte (decision 18.9).
 
 Internal traffic never reaches the stream: connected pings and pongs, unconnected pings, handshake messages and `ID_DETECT_LOST_CONNECTIONS`. Network observers can see it (section 11.4).
 
-### 6.2 `PeerEventReader`
+### 6.2 Reading
+
+`PeerEventReader` (`src/RakDotNet/PeerEventReader.cs`) is `peer.Events`. It is purpose-built rather than a `ChannelReader<T>`, because a read runs the plugin chain and releases the previous borrowed event, and it has no `TryPeek` (decision 18.5). `TryRead` is one dispatch step (section 11.2). `WaitToReadAsync` completes synchronously when an event is queued and otherwise awaits one reusable value-task source; while plugins are attached it also wakes every `PluginUpdateInterval` so `OnUpdate` keeps running. `ReadAllAsync` yields owned events for consumers that must `await` while holding one.
+
+A server on the background loop, allocation-free with borrowed events:
 
 ```csharp
-public sealed class PeerEventReader
+await using var server = RakPeer.Start(new RakPeerOptions
 {
-    public bool TryRead(out PeerEvent e);                                   // Receive()
-    public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default);
-    public IAsyncEnumerable<OwnedPeerEvent> ReadAllAsync(CancellationToken cancellationToken = default);
-    public int Count { get; }                                               // GetReceiveBufferSize
-    public Task Completion { get; }   // completes at shutdown; faults with RakTransportException on transport failure
-}
-```
+    MaxConnections = 64,
+    MaxIncomingConnections = 64,
+    Bindings = [SocketBinding.Port(19132)],
+});
 
-`PeerEventReader` is purpose-built rather than a `ChannelReader<T>` subclass, because a read has side effects that a `ChannelReader` must not have: it runs the plugin chain and releases the previous borrowed event. It has no `TryPeek`, since peeking would either run plugins or show an event a plugin is about to consume.
-
-- `TryRead` runs one dispatch step (section 11.2) and returns the next event that no plugin consumed, or false.
-- `WaitToReadAsync` returns true when an event may be available. It completes synchronously when one is queued, and otherwise awaits one reusable `ManualResetValueTaskSourceCore<bool>`. While plugins are attached it also returns true at least every `RakPeerOptions.PluginUpdateInterval`, so plugin `OnUpdate` keeps running for an idle async consumer; the following `TryRead` may then return false. It returns false after shutdown.
-- `ReadAllAsync` yields owned events: each item has been detached and must be disposed. It is for consumers that need `await` while holding an event. It allocates one enumerator per enumeration and rents one pooled handle per item.
-
-Consumption patterns:
-
-```csharp
-// Game loop, PeerThreading.Manual
-peer.Update();
-while (peer.Events.TryRead(out var e)) Handle(e);
-
-// Service, PeerThreading.Background: allocation-free, borrowed events, synchronous handler
-while (await peer.Events.WaitToReadAsync(ct))
-    while (peer.Events.TryRead(out var e))
-        Handle(e);
-
-// Service that awaits per event
-await foreach (var owned in peer.Events.ReadAllAsync(ct))
-    using (owned) await HandleAsync(owned);
-
-static void Handle(PeerEvent e)
-{
-    switch (e.Kind)
+while (await server.Events.WaitToReadAsync(ct))
+    while (server.Events.TryRead(out var e))
     {
-        case PeerEventKind.Connected: e.Connection!.UserState = new Player(); break;
-        case PeerEventKind.Message when e.Id == GameIds.Move:
-            var r = e.GetBodyReader();
-            if (r.TryReadSingle(out var x) && r.TryReadSingle(out var y)) Move(e.Connection!, x, y);
-            break;
-        case PeerEventKind.Disconnected: Remove(e.Connection!, e.DisconnectReason); break;
+        switch (e.Kind)
+        {
+            case PeerEventKind.Connected:
+                e.Connection!.UserState = new Player();
+                break;
+            case PeerEventKind.Message when e.Id == GameIds.Move:
+                var r = e.GetBodyReader();
+                if (r.TryReadSingle(out var x) && r.TryReadSingle(out var y))
+                    Move(e.Connection!, x, y);
+                break;
+            case PeerEventKind.Disconnected:
+                Remove(e.Connection!, e.DisconnectReason);
+                break;
+        }
     }
-}
 ```
+
+A consumer that awaits per event uses `await foreach (var owned in peer.Events.ReadAllAsync(ct))` and disposes each item.
 
 ### 6.3 Ordering guarantees
 
@@ -477,42 +115,14 @@ static void Handle(PeerEvent e)
 
 ### 6.4 `ConnectionDemultiplexer` (layer 4)
 
-For servers structured per connection. It is built on the public API only and becomes the single reader of `peer.Events`.
-
-```csharp
-namespace RakDotNet.Connections;
-
-public sealed class ConnectionDemultiplexer : IAsyncDisposable
-{
-    public ConnectionDemultiplexer(RakPeer peer, DemultiplexerOptions? options = null);
-    public ChannelReader<RakConnection> Connections { get; }       // each Connected, incoming and outgoing
-    public ChannelReader<OwnedPeerEvent> Offline { get; }          // pongs, advertisements, out-of-band, ConnectFailed
-    public ChannelReader<OwnedPeerEvent> EventsOf(RakConnection connection);
-        // that connection's messages and receipts, then exactly its terminal event if it has one, then completion
-    public Task RunAsync(CancellationToken cancellationToken);     // the pump; plugins run on this task
-}
-
-public sealed class DemultiplexerOptions
-{
-    public int PerConnectionCapacity { get; init; } = 1024;
-    public DemultiplexerOverflow Overflow { get; init; } = DemultiplexerOverflow.Wait;
-}
-
-public enum DemultiplexerOverflow : byte
-{
-    Wait,             // the pump waits: one slow handler pauses every connection (head-of-line blocking)
-    CloseConnection,  // the full connection is closed silently and its queue completed; others keep flowing
-}
-```
-
-Events cross threads here, so each one is detached and per-connection consumers dispose them. Order is kept within each connection, not between connections. The default is `Wait` because it never drops or closes anything the application did not ask for; the head-of-line cost is stated on the option so it is a visible choice.
+`ConnectionDemultiplexer` (`src/RakDotNet.Connections/ConnectionDemultiplexer.cs`) is for servers structured per connection. It is built on the public API only and becomes the single reader of `peer.Events`, so plugins run on its pump. Events cross threads there, so each one is detached and per-connection consumers dispose them. Order is kept within each connection, not between connections. The default overflow policy is `Wait`, because it never drops or closes anything the application did not ask for; its head-of-line cost is stated on the option so it is a visible choice.
 
 ## 7. Ownership and lifetime
 
 1. **Borrowed by default.** An event returned by `TryRead` is valid until the next `TryRead` on that peer, until `Update` in Manual mode, or until shutdown. An event passed to a plugin hook is valid for the duration of the call. Nothing needs freeing.
 2. **The compiler enforces the common case.** `PeerEvent`, `UnconnectedPongView`, `DownloadProgressView` and `FrameInfo` are `ref struct`s: they cannot be stored in fields, captured by lambdas, boxed or held across `await`.
 3. **Stale access throws.** Every `PeerEvent` member compares its generation with the segment's. After release, access throws `ObjectDisposedException`; reused memory is never read. A `ReadOnlySpan<byte>` already taken from `Data` is not tracked, and must not be used after the next read.
-4. **Detach to keep.** `e.Detach()` returns an `OwnedPeerEvent` and removes the segment from automatic release. Detaching twice throws `InvalidOperationException`. The owner calls `Dispose()`, or passes it to `peer.Inject(owned, atHead)`, which consumes it. Release is an `Interlocked.CompareExchange` on the generation, so disposing a copy or disposing twice never frees someone else's reuse of the segment.
+4. **Detach to keep.** `e.Detach()` returns an `OwnedPeerEvent` (`src/RakDotNet/OwnedPeerEvent.cs`) and removes the segment from automatic release. Detaching twice throws `InvalidOperationException`. The owner calls `Dispose()`, or passes it to `peer.Inject(owned, atHead)`, which consumes it. Release is an `Interlocked.CompareExchange` on the generation, so disposing a copy or disposing twice never frees someone else's reuse of the segment.
 5. **Leaks are bounded.** An owned event that is never disposed is collected by the GC. The pool misses once and allocates a replacement, and `peer.Pools.Misses` counts it. No native memory is involved.
 6. **Sending never takes ownership.** Every `Send` copies the caller's bytes into a pooled segment, or lets the caller write straight into it (`MessageWriter<TState>`), before returning. The caller's buffer is free when `Send` returns.
 7. **Injecting copies unless handed ownership.** `Inject(span, ...)` copies. `Inject(OwnedPeerEvent, ...)` takes the segment without copying.
@@ -523,53 +133,23 @@ Events cross threads here, so each one is detached and per-connection consumers 
 
 ### 8.1 Options and results
 
+`ConnectOptions` (`src/RakDotNet/ConnectOptions.cs`) carries the arguments of RakNet's `Connect` after the host and port, with RakNet's defaults. `ConnectResult.cs` declares the three facts about an attempt, kept separate (decision 18.13): `ConnectAttemptResult` (the synchronous answer, RakNet's `ConnectionAttemptResult`), `ConnectFailure` (RakNet's failure IDs, `RakPeer.cpp:6429-6458`) and `ConnectResult`, which `ConnectAsync` returns. RakNet's `INVALID_PARAMETER` is an `ArgumentException`, and a stopped peer throws `ObjectDisposedException`.
+
+A client:
+
 ```csharp
-public sealed record ConnectOptions
-{
-    public ReadOnlyMemory<byte> Password { get; init; }            // at most 255 bytes; longer throws
-    public ConnectSecurity Security { get; init; } = ConnectSecurity.Insecure;   // PublicKey
-    public int SocketIndex { get; init; }                          // connectionSocketIndex / ConnectWithSocket
-    public int AttemptCount { get; init; } = 12;                   // sendConnectionAttemptCount (RakPeerInterface.h:139)
-    public TimeSpan AttemptInterval { get; init; } = TimeSpan.FromMilliseconds(500);
-    public TimeSpan Timeout { get; init; }                         // 0 = peer.DefaultTimeout
-}
+await using var client = RakPeer.Start(new RakPeerOptions { MaxConnections = 1 });
 
-/// ConnectionAttemptResult: the synchronous answer to starting an attempt.
-public enum ConnectAttemptResult : byte
-{
-    Started,                              // CONNECTION_ATTEMPT_STARTED
-    CannotResolveDomainName,              // CANNOT_RESOLVE_DOMAIN_NAME (host overloads only)
-    AlreadyConnectedToEndpoint,           // ALREADY_CONNECTED_TO_ENDPOINT
-    ConnectionAttemptAlreadyInProgress,   // CONNECTION_ATTEMPT_ALREADY_IN_PROGRESS
-    SecurityInitializationFailed,         // SECURITY_INITIALIZATION_FAILED
-}
-// INVALID_PARAMETER: a bad argument throws ArgumentException; a stopped peer throws ObjectDisposedException.
+var result = await client.ConnectAsync("game.example.com", 19132, cancellationToken: ct);
+var server = result.EnsureConnected();   // throws RakConnectException carrying the result
 
-/// PI2_FailedConnectionAttemptReason: why a started attempt failed (RakPeer.cpp:6429-6458).
-public enum ConnectFailure : byte
-{
-    ConnectionAttemptFailed,          // ID_CONNECTION_ATTEMPT_FAILED
-    AlreadyConnected,                 // ID_ALREADY_CONNECTED
-    NoFreeIncomingConnections,        // ID_NO_FREE_INCOMING_CONNECTIONS
-    ConnectionBanned,                 // ID_CONNECTION_BANNED
-    InvalidPassword,                  // ID_INVALID_PASSWORD
-    IncompatibleProtocolVersion,      // ID_INCOMPATIBLE_PROTOCOL_VERSION
-    IpRecentlyConnected,              // ID_IP_RECENTLY_CONNECTED
-    RemoteSystemRequiresPublicKey,    // ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY
-    OurSystemRequiresSecurity,        // ID_OUR_SYSTEM_REQUIRES_SECURITY
-    PublicKeyMismatch,                // ID_PUBLIC_KEY_MISMATCH
-}
-
-/// The outcome of ConnectAsync. Three separate facts, never merged into one enum.
-public readonly struct ConnectResult
-{
-    public ConnectAttemptResult AttemptResult { get; }   // Started unless the attempt was rejected synchronously
-    public ConnectFailure? Failure { get; }              // set when a started attempt failed
-    public RakConnection? Connection { get; }            // set when connected
-    public byte RemoteProtocolVersion { get; }           // Failure == IncompatibleProtocolVersion only
-    public bool IsConnected { get; }
-    public RakConnection EnsureConnected();              // throws RakConnectException carrying this result
-}
+Span<byte> buffer = stackalloc byte[16];
+var w = new BitStreamWriter(buffer);
+new TimestampHeader(client.GetTime()).Write(ref w);
+w.WriteByte((byte)GameIds.Move);
+w.WriteSingle(x);
+w.WriteSingle(y);
+server.Send(w, Reliability.UnreliableSequenced, Priority.High, orderingChannel: 1);
 ```
 
 ### 8.2 Lifecycle
@@ -583,7 +163,7 @@ incoming request ─────────────────┤         
 ```
 
 - **`Connect`** checks the published connection table and the attempt registry, then queues the attempt and returns `Started` or the synchronous rejection. The outcome later arrives on the stream as `Connected` or `ConnectFailed`. `Started` does not rule out an immediate `ConnectFailed(ConnectionAttemptFailed)`.
-- **`ConnectAsync`** resolves a host name asynchronously (RakNet resolves on the caller, blocking), then behaves as `Connect`. It completes when the I/O cycle enqueues the `Connected` or `ConnectFailed` event, with the same outcome; the event still appears on the stream at its position. A synchronous rejection completes it immediately with `AttemptResult` set. Cancelling the token throws `OperationCanceledException` and stops the attempt: while it is still in the request queue by `CancelConnectionAttempt`, and once it has an entry in the connection table by a silent close, which for a system that is not yet connected produces no event.
+- **`ConnectAsync`** resolves a host name asynchronously (RakNet resolves on the caller, blocking), then behaves as `Connect`. It completes when the I/O cycle enqueues the `Connected` or `ConnectFailed` event, with the same outcome; the event still appears on the stream at its position (decision 18.8). A synchronous rejection completes it immediately with `AttemptResult` set. Cancelling the token throws `OperationCanceledException` and stops the attempt: while it is still in the request queue by `CancelConnectionAttempt`, and once it has an entry in the connection table by a silent close, which for a system that is not yet connected produces no event.
 - **`CancelConnectionAttempt`** removes a queued attempt and produces no stream event, as in RakNet (`RakPeer.cpp:1686-1710`). It does nothing once the attempt has an entry in the connection table.
 - **`Close(notify: true)`** on a connected system flags it for disconnection (`Disconnecting`). Once its outgoing data has drained, the I/O cycle enqueues `ID_DISCONNECTION_NOTIFICATION` (`RakPeer.cpp:5873-5903`), delivered as `Disconnected(DisconnectionNotification)` with `ClosedLocally == true`.
 - **`Close(notify: false)`** on a connected system enqueues `ID_CONNECTION_LOST` immediately with `IsLocal == true` (`RakPeer.cpp:1667-1678`), delivered as `Disconnected(ConnectionLost)` with `ClosedLocally == true`. A silent close of a system that is not yet connected produces no event, as in RakNet.
@@ -602,47 +182,15 @@ incoming request ─────────────────┤         
 3. `OnShutdown` runs on every plugin, on the dispatch step (section 10).
 4. The sockets close, undelivered entries are discarded, and `Events.Completion` completes.
 
-Pending operations end: `ConnectAsync`, `PingAsync` and the `*Async` host overloads throw `OperationCanceledException`; `SendAndTrackAsync` completes with `DeliveryStatus.PeerShutdown`; `Closed` tasks complete. No `Disconnected` or other event is added to the stream for connections ended by shutdown, because RakNet clears its queue (`RakPeer.cpp:1177-1181`). For an untracked receipt still outstanding at shutdown, the completion of `Events.Completion` is its completion.
+Pending operations end: `ConnectAsync`, `PingAsync` and the `*Async` host overloads throw `OperationCanceledException`; `SendAndTrackAsync` completes with `DeliveryStatus.PeerShutdown`; `Closed` tasks complete. No `Disconnected` or other event is added to the stream for connections ended by shutdown, because RakNet clears its queue (`RakPeer.cpp:1177-1181`). For an untracked receipt still outstanding at shutdown, the completion of `Events.Completion` is its completion. `Dispose` is `ShutdownAsync(TimeSpan.Zero)` run synchronously, and `DisposeAsync` uses `RakPeerOptions.ShutdownBlockDuration`; both are idempotent.
 
 ## 9. Sending
 
-### 9.1 Members
+### 9.1 Shape
 
-```csharp
-/// What Send accepts. One parameter type covers Send(char*), Send(BitStream*) and SendList.
-public readonly ref struct OutgoingMessage
-{
-    public OutgoingMessage(ReadOnlySpan<byte> data);
-    public OutgoingMessage(ReadOnlySpan<byte> data, int bitLength);     // partial final byte, as Send(BitStream*)
-    public OutgoingMessage(in ReadOnlySequence<byte> parts);             // SendList: concatenated without a copy
-    public static implicit operator OutgoingMessage(ReadOnlySpan<byte> data);
-    public static implicit operator OutgoingMessage(byte[] data);
-    public static implicit operator OutgoingMessage(BitStreamWriter writer);  // Written, BitsWritten
-    public static implicit operator OutgoingMessage(BitStream stream);        // Written, BitsWritten
-    public int BitLength { get; }
-}
+Every send takes an `OutgoingMessage` (`src/RakDotNet/OutgoingMessage.cs`), a `ref struct` that one parameter type uses to cover `Send(char*)`, `Send(BitStream*)` with its bit-exact length, and `SendList`. It converts implicitly from spans, arrays, `BitStreamWriter` and `BitStream`. The `Send<TState>` overloads take a `MessageWriter<TState>` that writes straight into the pooled outgoing segment. Results are in `src/RakDotNet/SendResult.cs`: `SendReceipt`, `SendStatus`, `SendResult`, and for tracked sends `DeliveryStatus` and `DeliveryOutcome`.
 
-/// Writes straight into the pooled outgoing segment. The writer's capacity is at least sizeHint bytes;
-/// writing beyond it throws. Use a static lambda for zero allocations.
-public delegate void MessageWriter<TState>(ref BitStreamWriter writer, TState state) where TState : allows ref struct;
-
-public enum SendStatus : byte { Queued, NotActive, NotConnected }
-
-public readonly record struct SendResult(SendStatus Status, SendReceipt Receipt)
-{ public bool IsQueued => Status == SendStatus.Queued; }
-
-public enum DeliveryStatus : byte
-{
-    Acked,             // ID_SND_RECEIPT_ACKED
-    Lost,              // ID_SND_RECEIPT_LOSS (unreliable receipts only)
-    Abandoned,         // the connection ended first
-    NotSent,           // Send returned NotActive or NotConnected; see SendStatus
-    PeerShutdown,
-}
-public readonly record struct DeliveryOutcome(DeliveryStatus Status, SendReceipt Receipt, SendStatus SendStatus);
-```
-
-Reliability is a required parameter on every send. Priority defaults to `High` and the ordering channel to 0. There is no options struct whose `default` would silently mean `Unreliable` at `Immediate` priority.
+Reliability is a required parameter on every send. Priority defaults to `High` and the ordering channel to 0. There is no options struct whose `default` would silently mean `Unreliable` at `Immediate` priority (decision 18.12).
 
 ### 9.2 Semantics
 
@@ -675,19 +223,22 @@ The hardening rule "every send's receipt or task completes or faults" holds for 
 | `INetworkObserver` hooks, `IncomingDatagramFilter` | the I/O cycle | must not block; may call the thread-safe commands |
 | Continuations of `ConnectAsync`, `CloseAsync`, `PingAsync`, `SendAndTrackAsync`, `Closed`, `WaitToReadAsync` | thread pool (`RunContinuationsAsynchronously`) | user code never runs inside the I/O cycle; no `SynchronizationContext` is captured |
 
-```csharp
-public enum PeerThreading : byte
-{
-    Background,   // one loop thread runs the I/O cycle; the application reads Events
-    Manual,       // no threads; the application calls Update() then reads Events (RAKPEER_USER_THREADED + RunUpdateCycle)
-}
-```
+`PeerThreading` (`src/RakDotNet/PeerThreading.cs`) selects the mode (decision 18.6).
 
 **The I/O cycle**, in both modes: drain commands; receive datagrams without blocking until the transport is empty or the event queue is full; feed the sans-IO layers with `now` from the `TimeProvider`; run timers (resends, ACK/NAK, pings, timeouts, connection retries, ban expiry, split reassembly timeouts, receipt timeouts); flush outgoing datagrams; call `INetworkObserver.OnUpdateCycle`.
 
 **Background mode** waits between cycles on one reusable value-task source that is signalled by the transports when a datagram arrives, by an `ITimer` from `TimeProvider.CreateTimer` at the next deadline, and by commands on an idle-to-busy transition or an `Immediate` send. `FakeTimeProvider.Advance` therefore wakes it. There are no per-socket receive threads and no hand-off between threads on the receive path.
 
-**Manual mode** creates no threads. `Update` runs one cycle on the caller. It is part of the dispatch step, so it cannot run concurrently with `TryRead`. Calling `Update` in Background mode throws `InvalidOperationException`.
+**Manual mode** creates no threads. `Update` runs one cycle on the caller. It is part of the dispatch step, so it cannot run concurrently with `TryRead`. Calling `Update` in Background mode throws `InvalidOperationException`. A game loop:
+
+```csharp
+using var peer = RakPeer.Start(new RakPeerOptions { MaxConnections = 8, Threading = PeerThreading.Manual });
+
+// once per frame
+peer.Update();
+while (peer.Events.TryRead(out var e))
+    Handle(e);
+```
 
 **Calls from inside plugin hooks.** The guard records the thread that holds it, and it is held only while a dispatch step runs, which includes every plugin hook but not the application's code between reads. `Plugins.Attach/Detach` and `Inject` called from a plugin hook act immediately, inside the current step. Called from anywhere else, they are applied at the start of the next dispatch step. Either way every plugin hook runs on the dispatch step.
 
@@ -699,50 +250,7 @@ Plugins are written against the public API only. Everything a RakNet plugin reac
 
 ### 11.1 Types
 
-```csharp
-public enum PluginResult : byte
-{
-    Continue,   // RR_CONTINUE_PROCESSING
-    Consume,    // RR_STOP_PROCESSING_AND_DEALLOCATE; Detach() first for RR_STOP_PROCESSING
-}
-
-public interface IRakPlugin
-{
-    void OnAttached(IPluginHost host) { }                                     // SetRakPeerInterface + OnAttach
-    void OnDetached() { }                                                     // OnDetach
-    void OnStartup() { }                                                      // OnRakPeerStartup
-    void OnShutdown() { }                                                     // OnRakPeerShutdown
-    void OnUpdate() { }                                                       // Update
-    void OnConnected(RakConnection connection, bool isIncoming) { }          // OnNewConnection
-    void OnDisconnected(RakConnection connection, DisconnectReason reason) { } // OnClosedConnection
-    void OnConnectFailed(PeerEvent e, ConnectFailure failure) { }            // OnFailedConnectionAttempt
-    PluginResult OnEvent(PeerEvent e) => PluginResult.Continue;              // OnReceive
-    void OnInjected(ReadOnlySpan<byte> data, int bitLength, SystemAddress source) { } // OnPushBackPacket
-}
-
-/// What a plugin may call, independent of host. RakPeer implements it; so does TcpInterface (milestone 8.6).
-/// Replaces the C++ *Unified helpers.
-public interface IPluginHost
-{
-    RakNetGuid Guid { get; }                                         // GetMyGUIDUnified
-    TimeProvider TimeProvider { get; }
-    ulong GetTime();
-    SendResult Send(OutgoingMessage message, AddressOrGuid target, Reliability reliability,
-                    Priority priority = Priority.High, byte orderingChannel = 0,
-                    SendReceipt forceReceipt = default);              // SendUnified, SendListUnified
-    SendResult Broadcast(OutgoingMessage message, Reliability reliability, Priority priority = Priority.High,
-                         byte orderingChannel = 0, AddressOrGuid except = default,
-                         SendReceipt forceReceipt = default);
-    void Inject(ReadOnlySpan<byte> data, SystemAddress source, RakNetGuid sourceGuid, bool atHead = false); // AllocatePacketUnified + PushBackPacketUnified
-    void Inject(OwnedPeerEvent owned, bool atHead = false);
-    RakPeer? Peer { get; }        // null when hosted by TCP; NAT, Router2 and similar plugins require a RakPeer
-}
-
-public sealed class PluginCollection : IReadOnlyCollection<IRakPlugin>
-{ public void Attach(IRakPlugin plugin); public bool Detach(IRakPlugin plugin); }
-```
-
-`PeerEvent` is a `ref struct`, so a plugin cannot keep the event it is given without `Detach()`.
+`IRakPlugin` and `PluginResult` (`src/RakDotNet/IRakPlugin.cs`) are `PluginInterface2` and `PluginReceiveResult`; every hook has a default no-op body. `IPluginHost` (`src/RakDotNet/IPluginHost.cs`) is what a plugin may call, independent of host, replacing the C++ `*Unified` helpers: `RakPeer` implements it, and so will `TcpInterface` (milestone 8.6). `PluginCollection` (`src/RakDotNet/PluginCollection.cs`) is `peer.Plugins`. `PeerEvent` is a `ref struct`, so a plugin cannot keep the event it is given without `Detach()`.
 
 ### 11.2 Dispatch order
 
@@ -768,33 +276,9 @@ Locally generated packets pass through the chain too (`RakPeer.cpp:1559-1562`), 
 - `OnInjected` runs when `Inject` is applied, on the dispatch step, before the entry is queued (`RakPeer.cpp:2826-2843`).
 - The plugin lists are copy-on-write arrays, so dispatch allocates nothing.
 
-### 11.4 Network observers (`UsesReliabilityLayer() == true`)
+### 11.4 Network observers
 
-```csharp
-public interface INetworkObserver     // runs in the I/O cycle; must not block
-{
-    void OnDatagramSent(ReadOnlySpan<byte> datagram, SystemAddress remote) { }      // OnDirectSocketSend
-    void OnDatagramReceived(ReadOnlySpan<byte> datagram, SystemAddress remote) { }  // OnDirectSocketReceive
-    void OnFrame(in FrameInfo frame) { }                                            // OnInternalPacket
-    void OnAck(uint messageNumber, SystemAddress remote, ulong timeMs) { }          // OnAck
-    void OnReliabilityNotification(ReadOnlySpan<char> message, int bitLength,
-                                   SystemAddress remote, bool isError) { }          // OnReliabilityLayerNotification
-    void OnUpdateCycle() { }                                                        // SetUserUpdateThread callback
-}
-
-public readonly ref struct FrameInfo   // the InternalPacket fields PacketLogger prints
-{
-    public bool IsSend { get; }               public uint FrameNumber { get; }        public ulong TimeMs { get; }
-    public SystemAddress Remote { get; }      public RakConnection? Connection { get; }
-    public Reliability Reliability { get; }   public Priority Priority { get; }       public byte OrderingChannel { get; }
-    public UInt24 MessageNumber { get; }      public UInt24 OrderingIndex { get; }    public UInt24 SequencingIndex { get; }
-    public bool IsSplit { get; }              public ushort SplitId { get; }          public uint SplitIndex { get; }
-    public uint SplitCount { get; }           public ulong CreationTimeUs { get; }
-    public ReadOnlySpan<byte> Data { get; }   public int BitLength { get; }
-}
-```
-
-Addresses are passed as `SystemAddress` values, so nothing an observer receives is invalidated when the callback returns, other than the spans. Observers that are not plugins attach through `peer.LowLevel.Observers`. PacketLogger uses `OnFrame` and the datagram hooks, and prints what RakNet's PacketLogger prints.
+`INetworkObserver` and `FrameInfo` (`src/RakDotNet/INetworkObserver.cs`) are the reliability-layer hooks (`UsesReliabilityLayer() == true`). They run in the I/O cycle and must not block. Addresses are passed as `SystemAddress` values, so nothing an observer receives is invalidated when the callback returns, other than the spans. Observers that are not plugins attach through `peer.LowLevel.Observers`. PacketLogger uses `OnFrame` and the datagram hooks, and prints what RakNet's PacketLogger prints.
 
 ### 11.5 What milestone 8 plugins need, and where it is
 
@@ -813,177 +297,22 @@ Addresses are passed as `SystemAddress` values, so nothing an observer receives 
 
 ## 12. Options, limits and statistics
 
-```csharp
-public sealed record RakPeerOptions
-{
-    public required int MaxConnections { get; init; }                     // > 0, else ArgumentOutOfRangeException
-    public int MaxIncomingConnections { get; init; }                      // 0 (RakPeer.cpp:208)
-    public IReadOnlyList<SocketBinding> Bindings { get; init; } = [SocketBinding.AnyIPv4];
-    public PeerThreading Threading { get; init; } = PeerThreading.Background;
-    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
-    public IDatagramTransportFactory Transport { get; init; } = UdpTransportFactory.Instance;
-    public RakNetGuid? Guid { get; init; }                                // fixed GUID for tests; default random
-    public RandomSource Random { get; init; } = RandomSource.Shared;      // GUIDs and non-security randomness
-    public ReadOnlyMemory<byte> IncomingPassword { get; init; }
-    public ReadOnlyMemory<byte> OfflinePingResponse { get; init; }        // at most 400 bytes (RakPeer.cpp:127)
-    public TimeSpan DefaultTimeout { get; init; } = TimeSpan.FromSeconds(10);        // RakPeer.cpp:249 (release builds)
-    public TimeSpan UnreliableTimeout { get; init; } = TimeSpan.FromMilliseconds(1000); // RakPeer.cpp:238
-    public bool OccasionalPing { get; init; }                             // false (RakPeer.cpp:228)
-    public int SplitMessageProgressInterval { get; init; }                // 0 (RakPeer.cpp:236): no ID_DOWNLOAD_PROGRESS
-    public bool LimitIpConnectionFrequency { get; init; }                 // false (RakPeer.cpp:312)
-    public bool AllowConnectionResponseIpMigration { get; init; }         // false (RakPeer.cpp:233)
-    public long PerConnectionOutgoingBandwidthLimit { get; init; }        // 0 (RakPeer.cpp:239)
-    public ServerSecurity? Security { get; init; }                        // InitializeSecurity; null = DisableSecurity
-    public IReadOnlyList<string> SecurityExceptions { get; init; } = [];
-    public IReadOnlyList<IRakPlugin> Plugins { get; init; } = [];
-    public NetworkSimulatorOptions? NetworkSimulator { get; init; }
-    public PeerLimits Limits { get; init; } = PeerLimits.Default;
-    public TimeSpan PluginUpdateInterval { get; init; } = TimeSpan.FromMilliseconds(10);
-    public TimeSpan ShutdownBlockDuration { get; init; } = TimeSpan.FromMilliseconds(100);   // used by DisposeAsync
-}
-
-public sealed record SocketBinding(IPEndPoint LocalEndPoint)          // SocketDescriptor; family from the address
-{
-    public static SocketBinding AnyIPv4 { get; }                       // 0.0.0.0:0
-    public static SocketBinding Port(int port);                        // SocketDescriptor(port, 0)
-    public int? ReceiveBufferSize { get; init; }
-    public int? SendBufferSize { get; init; }
-    public IDatagramTransport? Transport { get; init; }                // adopt a transport created elsewhere
-}
-
-/// Hardening limits from plan.md. Defaults accept everything stock RakNet sends.
-public sealed record PeerLimits
-{
-    public static PeerLimits Default { get; }
-    public int MaxSplitCount { get; init; }
-    public int MaxSplitMessageBytes { get; init; }
-    public int MaxConcurrentSplitsPerConnection { get; init; }
-    public TimeSpan SplitReassemblyTimeout { get; init; }
-    public int MaxOrderingBufferMessagesPerChannel { get; init; }
-    public int EventQueueCapacity { get; init; } = 65_536;
-}
-
-public sealed record NetworkSimulatorOptions(float PacketLoss, TimeSpan MinExtraPing, TimeSpan ExtraPingVariance, int Seed = 0);
-
-public abstract class RandomSource
-{
-    public static RandomSource Shared { get; }                         // thread-safe, unseeded
-    public static RandomSource FromSeed(int seed);                     // deterministic tests
-    public abstract ulong NextUInt64();                                // Get64BitUniqueRandomNumber
-}
-```
+`RakPeerOptions` (`src/RakDotNet/RakPeerOptions.cs`) holds the arguments of `Startup` and the initial runtime settings, with RakNet's release-build defaults (decision 18.15). `SocketBinding` (`src/RakDotNet/SocketBinding.cs`) is `SocketDescriptor`. `PeerLimits` (`src/RakDotNet/PeerLimits.cs`) holds the hardening limits of [plan.md](plan.md), whose defaults accept everything stock RakNet sends. `NetworkSimulatorOptions` and `RandomSource` are in their own files.
 
 **Event queue backpressure.** When the stream holds `EventQueueCapacity` entries, the I/O cycle stops reading datagrams until the consumer drains it below half. The kernel then queues or drops datagrams and the reliability layer recovers them. Locally generated control entries (disconnects, receipts, connection failures) use reserved headroom above the cap, so they are never dropped or reordered. Memory stays bounded and nothing delivered is discarded.
 
-**Statistics.**
-
-```csharp
-public enum RnsPerSecondMetric : byte
-{ UserMessageBytesPushed, UserMessageBytesSent, UserMessageBytesResent, UserMessageBytesReceivedProcessed,
-  UserMessageBytesReceivedIgnored, ActualBytesSent, ActualBytesReceived }
-
-[InlineArray(7)] public struct MetricValues { private ulong _e; public readonly ulong this[RnsPerSecondMetric m] { get; } }
-[InlineArray(4)] public struct PriorityValues<T> where T : unmanaged { private T _e; public readonly T this[Priority p] { get; } }
-
-public readonly struct RakNetStatistics      // RakNetStatistics, by value, no arrays
-{
-    public MetricValues ValueOverLastSecond { get; }
-    public MetricValues RunningTotal { get; }
-    public ulong ConnectionStartTimeUs { get; }         // on the peer's TimeProvider
-    public bool IsLimitedByCongestionControl { get; }
-    public ulong BpsLimitByCongestionControl { get; }
-    public bool IsLimitedByOutgoingBandwidthLimit { get; }
-    public ulong BpsLimitByOutgoingBandwidthLimit { get; }
-    public PriorityValues<uint> MessagesInSendBuffer { get; }
-    public PriorityValues<double> BytesInSendBuffer { get; }
-    public uint MessagesInResendBuffer { get; }
-    public ulong BytesInResendBuffer { get; }
-    public float PacketLossLastSecond { get; }
-    public float PacketLossTotal { get; }
-    public static RakNetStatistics operator +(in RakNetStatistics a, in RakNetStatistics b);   // operator+=
-    public string ToString(StatisticsVerbosity verbosity);                                     // StatisticsToString
-    public bool TryFormat(Span<char> destination, out int charsWritten, StatisticsVerbosity verbosity);
-}
-
-public enum StatisticsVerbosity : byte { Low, Medium, High, CongestionControl }   // verbosityLevel 0..3
-public readonly record struct ConnectionStatistics(RakConnection Connection, RakNetStatistics Statistics);
-
-public readonly record struct PoolStatistics(long SegmentsOutstanding, long OwnedEventsOutstanding, long Misses);
-```
-
-The I/O cycle publishes each connection's statistics block under a sequence lock every cycle; readers copy it without blocking the cycle or allocating. The field set covers the interop `stats` command, so `RakDotNetPeerDriver` maps it field for field. Peer-wide totals are also published through `System.Diagnostics.Metrics` (`Meter("RakDotNet")`, observable instruments over the snapshots).
+**Statistics.** `RakNetStatistics` (`src/RakDotNet/RakNetStatistics.cs`) is a value with fixed-size `[InlineArray]` fields, so a snapshot is copied without arrays or allocation. The I/O cycle publishes each connection's statistics block under a sequence lock every cycle; readers copy it without blocking the cycle. The field set covers the interop `stats` command, so `RakDotNetPeerDriver` maps it field for field. Peer-wide totals are also published through `System.Diagnostics.Metrics` (`Meter("RakDotNet")`, observable instruments over the snapshots).
 
 ## 13. Security configuration
 
-```csharp
-namespace RakDotNet.Security;
-
-public sealed class RakPublicKey : IEquatable<RakPublicKey>
-{
-    public const int Length = 64;                                   // cat::EasyHandshake::PUBLIC_KEY_BYTES
-    public static bool TryCreate(ReadOnlySpan<byte> bytes, [NotNullWhen(true)] out RakPublicKey? key);
-    public ReadOnlySpan<byte> Bytes { get; }
-}
-
-/// The 32-byte private key (PRIVATE_KEY_BYTES) lives in a pinned array zeroed on Dispose.
-public sealed class RakKeyPair : IDisposable
-{
-    public const int PrivateKeyLength = 32;
-    public static RakKeyPair Generate();                            // EasyHandshake::GenerateServerKey, CSPRNG
-    public static bool TryImport(ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> privateKey,
-                                 [NotNullWhen(true)] out RakKeyPair? keyPair);   // validated as the cat responder validates
-    public RakPublicKey PublicKey { get; }
-    public void ExportPrivateKey(Span<byte> destination);
-    public void Dispose();                                          // CryptographicOperations.ZeroMemory
-}
-
-public sealed record ServerSecurity(RakKeyPair Keys)               // InitializeSecurity
-{
-    public bool RequireClientKey { get; init; }                     // bRequireClientKey
-}
-
-public enum PublicKeyMode : byte { InsecureConnection, AcceptAnyPublicKey, UseKnownPublicKey, UseTwoWayAuthentication }
-
-public sealed class ConnectSecurity                                 // PublicKey + PublicKeyMode
-{
-    public static ConnectSecurity Insecure { get; }                                       // PKM_INSECURE_CONNECTION
-    public static ConnectSecurity AcceptAnyPublicKey { get; }                             // PKM_ACCEPT_ANY_PUBLIC_KEY
-    public static ConnectSecurity KnownServerKey(RakPublicKey serverPublicKey);           // PKM_USE_KNOWN_PUBLIC_KEY
-    public static ConnectSecurity TwoWayAuthentication(RakPublicKey serverPublicKey,
-                                                       RakKeyPair clientIdentity);        // PKM_USE_TWO_WAY_AUTHENTICATION
-    public PublicKeyMode Mode { get; }
-    public RakPublicKey? ServerPublicKey { get; }
-    public RakKeyPair? ClientIdentity { get; }
-}
-```
-
-```csharp
-namespace RakDotNet;
-
-public sealed class AddressPatternList : IReadOnlyCollection<string>   // security exception list
-{
-    public void Add(string pattern);          // '*' wildcards per octet, as RakNet; validated on Add
-    public bool Remove(string pattern);
-    public void Clear();                      // RemoveFromSecurityExceptionList(0)
-    public bool Contains(IPAddress address);
-    public bool Contains(string address);
-}
-
-public sealed class BanList
-{
-    public void Add(string pattern, TimeSpan duration = default);    // AddToBanList; default = forever; expiry on the TimeProvider
-    public bool Remove(string pattern);
-    public void Clear();
-    public bool IsBanned(IPAddress address);
-    public bool IsBanned(string address);
-}
-```
+The key and connect-security types are in `src/RakDotNet/Security/`. The admission lists, `AddressPatternCollection` (the security exception list) and `BanList`, are in `src/RakDotNet/AdmissionLists.cs`.
 
 - **Server security is fixed at start** through `RakPeerOptions.Security`. RakNet accepts `InitializeSecurity` and `DisableSecurity` only while the peer is stopped (`RakPeer.cpp:765-766`), and a `RakPeer` is never stopped and then reused, so the options are the only place it can be set. Key material is validated when the `RakKeyPair` is created, so `Start` cannot fail on it.
 - **The security exception list** is mutable at run time and applies to incoming connections only.
 - **Client security** is `ConnectOptions.Security`. An invalid client configuration returns `ConnectAttemptResult.SecurityInitializationFailed` (`RakPeer.cpp:3296-3298`). Handshake rejections arrive as `RemoteSystemRequiresPublicKey`, `OurSystemRequiresSecurity` or `PublicKeyMismatch`.
 - **Identity.** `connection.IsSecure` reports whether the link is encrypted; `connection.RemoteIdentityKey` is the client's key in two-way mode.
 - **Encryption** of every datagram is invisible to the API, except that `Mtu` accounts for the authenticated-encryption overhead.
+- **Key material** lives in pinned arrays zeroed on dispose.
 - **Randomness.** Key generation, cookies and handshake randomness always come from `RandomNumberGenerator`. `RakPeerOptions.Random` covers GUIDs and non-security randomness only, so no test seam can weaken production cryptography. Primitive-level known-answer tests run below the public API.
 
 ## 14. Error model
@@ -1002,90 +331,19 @@ public sealed class BanList
 | Transient socket errors (ICMP-induced `ConnectionReset` on Windows) | ignored, as in RakNet |
 | Fatal transport failure | `Events.Completion` faults with `RakTransportException`; pending async operations fault with it; no events are synthesised |
 
-```csharp
-public sealed class RakStartupException : Exception
-{ public StartupError Error { get; } public int BindingIndex { get; } public SocketError SocketError { get; } }
-
-public enum StartupError : byte          // StartupResult values that describe the environment
-{
-    SocketFamilyNotSupported,            // SOCKET_FAMILY_NOT_SUPPORTED
-    SocketPortAlreadyInUse,              // SOCKET_PORT_ALREADY_IN_USE
-    SocketFailedToBind,                  // SOCKET_FAILED_TO_BIND
-    SocketFailedTestSend,                // SOCKET_FAILED_TEST_SEND
-    FailedToCreateNetworkThread,         // FAILED_TO_CREATE_NETWORK_THREAD
-    OtherFailure,                        // STARTUP_OTHER_FAILURE
-}
-
-public sealed class RakConnectException : Exception { public ConnectResult Result { get; } }
-public sealed class RakTransportException : Exception { public int SocketIndex { get; } public SocketError SocketError { get; } }
-```
-
-`RAKNET_STARTED` is `Start` returning. `RAKNET_ALREADY_STARTED` cannot happen because a peer starts once. `INVALID_SOCKET_DESCRIPTORS` and `INVALID_MAX_CONNECTIONS` are argument validation. `PORT_CANNOT_BE_ZERO` applies only to console platforms RakDotNet does not target. `COULD_NOT_GENERATE_GUID` (`RakPeer.cpp:382`) cannot happen because the GUID is redrawn until it is neither 0 nor unassigned.
+The exceptions and `StartupError` are in `src/RakDotNet/Exceptions.cs`. `RAKNET_STARTED` is `Start` returning. `RAKNET_ALREADY_STARTED` cannot happen because a peer starts once. `INVALID_SOCKET_DESCRIPTORS` and `INVALID_MAX_CONNECTIONS` are argument validation. `PORT_CANNOT_BE_ZERO` applies only to console platforms RakDotNet does not target. `COULD_NOT_GENERATE_GUID` (`RakPeer.cpp:382`) cannot happen because the GUID is redrawn until it is neither 0 nor unassigned.
 
 ## 15. BitStream for application payloads
 
 Bit packing stays in `RakDotNet.Protocol.Wire`, as [conventions.md](conventions.md) requires.
 
-```csharp
-namespace RakDotNet.Protocol.Wire;
+- `BitStreamWriter(Span<byte>, int bitPosition)` resumes a writer at a bit position, so a writer can be recreated from a stored position.
+- `BitStream` (`src/RakDotNet.Protocol/Wire/BitStream.cs`) is a growable, poolable stream over `ArrayPool<byte>.Shared`. A `BitStreamWriter` is a `ref struct` and cannot be held by a class, so the stream keeps a bit position and hands out writers with `BeginWrite`/`EndWrite`; every `Write*` forwards through them and the stream never packs bits itself.
+- `TimestampHeader` and `OutOfBandHeader` (`src/RakDotNet.Protocol/Wire/Messages/ApplicationHeaders.cs`) are codecs for the `ID_TIMESTAMP` prefix and `WriteOutOfBandHeader`.
+- The RakNet encodings that application and plugin payloads use (`WriteCompressed`, `WriteBitsFromIntegerRange`, `WriteFloat16`, `WriteNormVector`, `WriteVector`, `WriteNormQuat`, `WriteOrthMatrix`, `WriteDelta`, `WriteCasted`, `WriteRakString`, `WriteCompressedString` and their readers) are extension methods on `ref BitStreamWriter` and `ref BitStreamReader` in `src/RakDotNet.Protocol/Wire/BitStreamEncodings.cs`, so they work for stack buffers and `BitStream` alike. Integer encodings are generic over `IBinaryInteger<T>`; vectors use `System.Numerics`. Each encoding is checked against native output with golden vectors.
+- `BitSerializer`, in the same file, covers RakNet's `Serialize(bool writeToBitstream, ...)` idiom. A `ref struct` cannot hold a `ref` to another `ref struct`, so it owns its writer or reader by value and returns the advanced copy.
 
-// BitStreamWriter gains a resume constructor:
-public BitStreamWriter(Span<byte> buffer, int bitPosition);
-
-/// Growable, poolable BitStream. Every Write* delegates to BitStreamWriter; it never packs bits itself.
-public sealed class BitStream : IBufferWriter<byte>, IDisposable
-{
-    public BitStream(int initialCapacityBytes = 256);         // ArrayPool<byte>.Shared
-    public static BitStream Rent(int initialCapacityBytes = 256);
-    public int BitsWritten { get; }
-    public int BytesWritten { get; }
-    public ReadOnlySpan<byte> Written { get; }
-    public void Reset();                                      // keeps the buffer
-    public BitStreamWriter BeginWrite(int sizeHintBytes);     // a writer at the current bit position, capacity ensured
-    public void EndWrite(in BitStreamWriter writer);
-    public void Write<T>(in T message) where T : IWireMessage<T>;
-    // plus every BitStreamWriter primitive, forwarding through BeginWrite/EndWrite
-    public BitStreamReader CreateReader();
-    public void Dispose();
-}
-
-public readonly record struct TimestampHeader(ulong Time) : IWireMessage<TimestampHeader>;        // ID_TIMESTAMP + big-endian u64
-public readonly record struct OutOfBandHeader(RakNetGuid Sender) : IWireMessage<OutOfBandHeader>; // WriteOutOfBandHeader
-```
-
-The RakNet encodings that application and plugin payloads use are extension methods on `ref BitStreamWriter` and `ref BitStreamReader`, so they work for stack buffers and `BitStream` alike: `WriteCompressed`/`TryReadCompressed`, `WriteBitsFromIntegerRange`, `WriteFloat16`, `WriteNormVector`, `WriteVector`, `WriteNormQuat`, `WriteOrthMatrix`, `WriteDelta`, `WriteCasted`, `WriteRakString`, `WriteCompressedString` (StringCompressor) and their readers. A `ref struct BitSerializer` with `IsWriting` covers RakNet's `Serialize(bool writeToBitstream, ...)` idiom. Each encoding is checked against native output with golden vectors.
-
-```csharp
-// Stack buffer, zero allocation, bit-exact length
-Span<byte> buffer = stackalloc byte[64];
-var w = new BitStreamWriter(buffer);
-new TimestampHeader(peer.GetTime()).Write(ref w);
-w.WriteByte((byte)GameIds.Move);
-w.WriteCompressed(x);
-connection.Send(w, Reliability.UnreliableSequenced, Priority.High, orderingChannel: 1);
-
-// Writing straight into the outgoing segment
-peer.Send(target, Reliability.UnreliableSequenced, Priority.High, 1, sizeHint: 32, (Pos: pos, Time: peer.GetTime()),
-    static (ref BitStreamWriter w, (Vector3 Pos, ulong Time) s) =>
-    {
-        new TimestampHeader(s.Time).Write(ref w);
-        w.WriteByte((byte)GameIds.Move);
-        w.WriteVector(s.Pos);
-    });
-
-// A reused growable stream
-_stream.Reset();
-var bw = _stream.BeginWrite(256);
-bw.WriteByte((byte)GameIds.Snapshot);
-snapshot.Serialize(ref bw);
-_stream.EndWrite(in bw);
-peer.Broadcast(_stream, Reliability.ReliableOrdered);
-
-// Receive: positioned after the ID and any timestamp header; Timestamp already in local time
-if (e.Id == GameIds.Move) { var r = e.GetBodyReader(); r.TryReadVector(out var pos); var sentAt = e.Timestamp; }
-```
-
-User message IDs are `(MessageId)((byte)MessageId.UserPacketEnum + n)`.
+Received payloads are read with `e.GetBodyReader()`, positioned after the ID and any timestamp header, with `e.Timestamp` already in local time. User message IDs are `(MessageId)((byte)MessageId.UserPacketEnum + n)`.
 
 ## 16. Testability, allocation and AOT
 
@@ -1093,25 +351,9 @@ User message IDs are `(MessageId)((byte)MessageId.UserPacketEnum + n)`.
 
 - Every timer reads `RakPeerOptions.TimeProvider`: retransmits, RTO, pings, timeouts, connection attempts, ban expiry, split reassembly, receipt timeouts and statistics. Layers 0 to 2 take time as input.
 - `PeerThreading.Manual` plus `FakeTimeProvider` gives fully deterministic runs: a test advances the clock, calls `Update` on each peer and asserts on `TryRead`.
-- The datagram transport is the only I/O seam:
-
-```csharp
-public interface IDatagramTransport : IDisposable
-{
-    SystemAddress LocalAddress { get; }
-    bool TryReceive(Span<byte> buffer, out int length, out SystemAddress remote);   // non-blocking
-    bool TrySend(ReadOnlySpan<byte> datagram, in SystemAddress remote, int ttl = 0); // non-blocking; 0 = default TTL
-    void SetReadySignal(Action signal);    // called when a datagram becomes available (Background mode wake)
-}
-
-public interface IDatagramTransportFactory
-{
-    bool TryBind(SocketBinding binding, [NotNullWhen(true)] out IDatagramTransport? transport, out StartupError error, out SocketError socketError);
-}
-```
-
-- `RakDotNet.Testing.InMemoryNetwork` is a hand-written fake for I/O, with seeded loss, delay, duplication and reordering scheduled on the peers' `TimeProvider`. Several real `RakPeer`s then run sociable tests in one process with no sockets. The same seam carries RakNet over other datagram media and implements the network simulator as a decorator.
-- `RakPeerOptions.Guid` and `RandomSource.FromSeed` make GUIDs reproducible.
+- The datagram transport is the only I/O seam: `IDatagramTransport` and `IDatagramTransportFactory` (`src/RakDotNet/IDatagramTransport.cs`), with `UdpTransportFactory` as the default. Every operation is non-blocking, and the transport signals the peer when a datagram becomes available.
+- `RakDotNet.Testing.InMemoryNetwork` (`src/RakDotNet.Testing/InMemoryNetwork.cs`) is a hand-written fake for I/O, with seeded loss, delay, duplication and reordering scheduled on the peers' `TimeProvider`. Several real `RakPeer`s then run sociable tests in one process with no sockets. The same seam carries RakNet over other datagram media and implements the network simulator as a decorator.
+- `RakPeerOptions.RakNetGuid` and `RandomSource.FromSeed` make GUIDs reproducible.
 
 ### 16.2 Zero allocations per message in steady state
 
@@ -1160,8 +402,8 @@ All library projects set `IsAotCompatible`, which enables the trim, AOT and sing
 | `GetConnectionState` | `peer.GetConnectionState(AddressOrGuid)` / `connection.State` |
 | `CancelConnectionAttempt` | `peer.CancelConnectionAttempt(address)`, or cancel the `ConnectAsync` token |
 | `GetIndexFromSystemAddress` | `peer.TryGetConnection(address, out c)` → `c.SystemIndex` |
-| `GetSystemAddressFromIndex` / `GetGUIDFromIndex` | `peer.TryGetConnectionByIndex(i, out c)` → `c.Address` / `c.Guid` |
-| `GetSystemList` | `peer.Connections` (each `Address` and `Guid`) |
+| `GetSystemAddressFromIndex` / `GetGUIDFromIndex` | `peer.TryGetConnectionByIndex(i, out c)` → `c.Address` / `c.RakNetGuid` |
+| `GetSystemList` | `peer.Connections` (each `Address` and `RakNetGuid`) |
 | `AddToBanList` / `RemoveFromBanList` / `ClearBanList` / `IsBanned` | `peer.BanList.Add(pattern, duration)` / `Remove` / `Clear` / `IsBanned` |
 | `SetLimitIPConnectionFrequency` | `peer.LimitIpConnectionFrequency` |
 | `Ping(SystemAddress)` | `connection.Ping()` |
@@ -1173,11 +415,11 @@ All library projects set `IsAotCompatible`, which enables the trim, AOT and sing
 | `GetInternalID(UNASSIGNED, i)` / `GetInternalID(target, i)` | `peer.InternalAddresses[i]` / `connection.RemoteInternalAddresses[i]` |
 | `SetInternalID` | `peer.SetInternalAddress(address, i)` |
 | `GetExternalID(target)` | `connection.ExternalAddress`; `peer.ExternalAddress` for `UNASSIGNED` |
-| `GetMyGUID` | `peer.Guid` |
+| `GetMyGUID` | `peer.RakNetGuid` |
 | `GetMyBoundAddress(i)` | `peer.Sockets[i].LocalAddress` |
 | `Get64BitUniqueRandomNumber` | `RandomSource.Shared.NextUInt64()` |
 | `GetGuidFromSystemAddress` | `peer.GetGuidFromAddress(address)` (own GUID for `Unassigned`) |
-| `GetSystemAddressFromGuid` | `peer.GetAddressFromGuid(guid)` |
+| `GetSystemAddressFromGuid` | `peer.GetAddressFromGuid(rakNetGuid)` |
 | `GetClientPublicKeyFromSystemAddress` | `connection.RemoteIdentityKey` |
 | `SetTimeoutTime(ms, UNASSIGNED)` | `peer.DefaultTimeout` (default and every live connection) |
 | `SetTimeoutTime(ms, target)` / `GetTimeoutTime(target)` | `connection.Timeout` |
@@ -1190,12 +432,12 @@ All library projects set `IsAotCompatible`, which enables the trim, AOT and sing
 | `SetUnreliableTimeout` | `peer.UnreliableTimeout` |
 | `SendTTL` | `peer.LowLevel.SendTtl(address, ttl, i)` |
 | `AttachPlugin` / `DetachPlugin` | `peer.Plugins.Attach` / `Detach` (`IRakPlugin`; also implementing `INetworkObserver` puts it in the reliability-layer list) |
-| `PushBackPacket(packet, pushAtHead)` | `peer.Inject(OwnedPeerEvent, atHead)` (consumes) or `Inject(span, address, guid, atHead)` (copies) |
-| `ChangeSystemAddress(guid, address)` | `peer.LowLevel.ChangeSystemAddress(guid, address)` |
+| `PushBackPacket(packet, pushAtHead)` | `peer.Inject(OwnedPeerEvent, atHead)` (consumes) or `Inject(span, address, rakNetGuid, atHead)` (copies) |
+| `ChangeSystemAddress(guid, address)` | `peer.LowLevel.ChangeSystemAddress(rakNetGuid, address)` |
 | `AllocatePacket` | not needed: build the bytes with `BitStream` or `BitStreamWriter` and `Inject` them |
 | `GetSocket(target)` | `connection.Socket`; `peer.Sockets[0]` for `UNASSIGNED` |
 | `GetSockets` / `ReleaseSockets` | `peer.Sockets`; nothing to release (`IsOpen` becomes false at shutdown) |
-| `WriteOutOfBandHeader` | `peer.LowLevel.WriteOutOfBandHeader(ref writer)`, or Wire `new OutOfBandHeader(peer.Guid).Write(ref writer)` |
+| `WriteOutOfBandHeader` | `peer.LowLevel.WriteOutOfBandHeader(ref writer)`, or Wire `new OutOfBandHeader(peer.RakNetGuid).Write(ref writer)` |
 | `SendOutOfBand` | `peer.LowLevel.SendOutOfBand(address, payload, i)` / `SendOutOfBandAsync(host, port, ...)`; received as `OutOfBand` |
 | `SetUserUpdateThread` | `INetworkObserver.OnUpdateCycle`, or drive the cycle in `PeerThreading.Manual` |
 | `SetIncomingDatagramEventHandler` | `peer.LowLevel.IncomingDatagramFilter` |
@@ -1207,7 +449,7 @@ All library projects set `IsAotCompatible`, which enables the trim, AOT and sing
 | `RunUpdateCycle` | `peer.Update()` in `PeerThreading.Manual` |
 | `StatisticsToString` | `RakNetStatistics.ToString(StatisticsVerbosity)` |
 
-`Packet` fields map to `PeerEvent` as: `data`/`length` → `Data`, `bitSize` → `BitLength`, `systemAddress` → `Address`, `guid` → `Guid`, `wasGeneratedLocally` → `IsLocal`.
+`Packet` fields map to `PeerEvent` as: `data`/`length` → `Data`, `bitSize` → `BitLength`, `systemAddress` → `Address`, `guid` → `RakNetGuid`, `wasGeneratedLocally` → `IsLocal`.
 
 ### 17.1 `PluginInterface2`
 
@@ -1227,7 +469,7 @@ All library projects set `IsAotCompatible`, which enables the trim, AOT and sing
 | `OnAck` | `INetworkObserver.OnAck` |
 | `OnPushBackPacket` | `IRakPlugin.OnInjected` |
 | `GetRakPeerInterface` / `SetRakPeerInterface` / `SetTCPInterface` | the `IPluginHost` passed to `OnAttached`; `host.Peer` |
-| `GetMyGUIDUnified` | `host.Guid` |
+| `GetMyGUIDUnified` | `host.RakNetGuid` |
 | `SendUnified` / `SendListUnified` | `host.Send` / `host.Broadcast` with any `OutgoingMessage` |
 | `AllocatePacketUnified` / `PushBackPacketUnified` / `DeallocPacketUnified` | `host.Inject` / `OwnedPeerEvent.Dispose` |
 
@@ -1238,18 +480,18 @@ All library projects set `IsAotCompatible`, which enables the trim, AOT and sing
 | `StartupAsync` | `RakPeer.Start(new() { MaxConnections, MaxIncomingConnections, Bindings = [new(endPoint)] })` |
 | `ConnectAsync` | `peer.Connect(remote, options)`, reporting the `ConnectAttemptResult` name in RakNet's spelling |
 | `SendAsync` | `peer.Send` / `Broadcast` → `Receipt.Value` |
-| `CloseAsync` | `peer.Close(guid, notify)` |
+| `CloseAsync` | `peer.Close(rakNetGuid, notify)` |
 | `PingAsync` | `peer.PingUnconnected` |
 | `SetOfflinePingResponseAsync` | `peer.OfflinePingResponse = data` |
-| `GetConnectionStateAsync` | `peer.GetConnectionState(guid)` |
+| `GetConnectionStateAsync` | `peer.GetConnectionState(rakNetGuid)` |
 | `ShutdownAsync` | `peer.ShutdownAsync(blockMs)` |
-| `Packets` | a pump over `WaitToReadAsync`/`TryRead` that skips events with `IsRakNetPacket == false` and writes `ReceivedPacket` from `Data`, `Guid`, `Address`, `ReceivedTime` and `Timestamp` |
+| `Packets` | a pump over `WaitToReadAsync`/`TryRead` that skips events with `IsRakNetPacket == false` and writes `ReceivedPacket` from `Data`, `RakNetGuid`, `Address`, `ReceivedTime` and `Timestamp` |
 
 ## 18. Decisions
 
 ### 18.1 Compatibility facade: provided, as the separate layer 4 assembly `RakDotNet.Compatibility`
 
-`RakPeerInterface` in `RakDotNet.Compatibility` holds one `RakPeer` and implements the mapping table in reverse, with RakNet's names and shapes: `Receive()` runs `Update()` in Manual mode, reads with `TryRead`, skips events with `IsRakNetPacket == false`, detaches the rest and returns a managed `Packet` class. `DeallocatePacket` disposes it, is idempotent, and is optional, because an undisposed packet is collected. Use after deallocation throws. `PushBackPacket` consumes the owned event. Hostnames are `string`.
+`RakPeerInterface` (`src/RakDotNet.Compatibility/RakPeerInterface.cs`) holds one `RakPeer` and implements the mapping table in reverse, with RakNet's names and shapes: `Receive()` runs `Update()` in Manual mode, reads with `TryRead`, skips events with `IsRakNetPacket == false`, detaches the rest and returns a managed `Packet` class. `DeallocatePacket` disposes it, is idempotent, and is optional, because an undisposed packet is collected. Use after deallocation throws. `PushBackPacket` consumes the owned event. Hostnames are `string`. RakNet's `StartupResult` and `ConnectionAttemptResult`, including `INVALID_PARAMETER`, are returned as RakNet returns them.
 
 Reasons:
 
@@ -1321,3 +563,7 @@ Adopting an externally created socket happens through `SocketBinding.Transport` 
 ### 18.15 RakNet's release-build defaults
 
 Defaults are those of a RakNet release build: `DefaultTimeout` 10 s (`RakPeer.cpp:249`), `UnreliableTimeout` 1000 ms (`RakPeer.cpp:238`), occasional ping off (`RakPeer.cpp:228`), `MaxIncomingConnections` 0 (`RakPeer.cpp:208`), 12 connection attempts 500 ms apart (`RakPeerInterface.h:139`). Reason: receipt-loss timing, timeout detection and admission must match a native peer configured the same way.
+
+### 18.16 GUID members are named `RakNetGuid`
+
+Properties and parameters that hold a GUID are named `RakNetGuid` and `rakNetGuid`, not `Guid`, as RakNet's `AddressOrGUID::rakNetGuid` is. Reason: a member named `Guid` reads as `System.Guid`, which is a different 128-bit type, and the analyzers reject it (CA1720).
