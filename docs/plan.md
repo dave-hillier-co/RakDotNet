@@ -23,8 +23,8 @@ Each layer depends only on the layers below it.
 | # | Layer | Responsibility | I/O |
 |---|---|---|---|
 | 0 | Wire | `BitStream` reader/writer, `UInt24`, offline magic, message IDs, per-message encode/decode, datagram header, encapsulated message, ACK/NAK range lists | none |
-| 1 | Session | Per-connection state machine: reliability, ordering and sequencing, split and reassembly, ACK/NAK, sliding-window congestion control, RTO, connected handshake, pings | none; time is an input |
-| 2 | Peer | Offline handshake, MTU discovery, connection table, ban list and rate limits, timer wheel; routes `(endpoint, bytes)` | none |
+| 1 | Session | Per-connection reliability state machine: ordering and sequencing, split and reassembly, ACK/NAK, sliding-window congestion control, RTO | none; time is an input |
+| 2 | Peer | Offline and connected handshakes, connected pings, MTU discovery, connection table, ban list and rate limits, timer wheel; routes `(endpoint, bytes)` and produces the ordered event stream | none; time is an input |
 | 3 | Transport + API | `Socket` loops, `TimeProvider`, `Channel<T>`, `RakPeer`, `RakConnection`, `ConnectAsync`, ordered per-peer event stream, options, statistics | yes |
 | 4 | Plugins and utilities | Every RakNet plugin and utility, built on the public API; optional compatibility facade | via layer 3 |
 
