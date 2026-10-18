@@ -53,7 +53,7 @@ public class NewIncomingConnectionTests
     }
 
     [Fact]
-    public void Internal_address_count_is_a_parameter_for_other_protocol_profiles()
+    public void Internal_address_count_is_configurable()
     {
         var bytes = Codec.Encode(new NewIncomingConnection(Server, InternalAddressList.CreateUnassigned(1), 1, 2));
         var reader = new BitStreamReader(bytes);

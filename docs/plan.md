@@ -25,7 +25,7 @@ Each layer depends only on the layers below it.
 | 1 | Session | Per-connection state machine: reliability, ordering and sequencing, split and reassembly, ACK/NAK, sliding-window congestion control, RTO, connected handshake, pings | none; time is an input |
 | 2 | Peer | Offline handshake, MTU discovery, connection table, ban list and rate limits, timer wheel; routes `(endpoint, bytes)` | none |
 | 3 | Transport + API | `Socket` loops, `TimeProvider`, `Channel<T>`, `RakPeer`, `RakConnection`, `ConnectAsync`, ordered per-peer event stream, options, statistics | yes |
-| 4 | Extras | Compatibility facade, plugins, protocol profiles (e.g. Bedrock) | via layer 3 |
+| 4 | Extras | Compatibility facade, plugins | via layer 3 |
 
 Projects:
 
@@ -113,7 +113,7 @@ Each milestone has an exit criterion that is a passing test. Milestones build a 
    - Connected pings, `ID_TIMESTAMP` and clock differential, timeout detection.
 5. **Public API.** Designed alongside milestones 3 and 4 (several independent proposals judged against the Brutal.RakNet surface and the ordered event stream), implemented once the core is stable. `RakDotNetPeerDriver` moves onto it. Exit: the full scenario table (excluding security) passes against the public API.
 6. **Performance.** BenchmarkDotNet suite and an allocation budget per datagram on the hot path, compared with RakNet's LoopbackPerformanceTest. Exit: benchmarks run in CI and the allocation budget is enforced by a test.
-7. **Extras, as needed.** Compatibility facade, protocol profiles, plugins in priority order: ReplicaManager3, RPC4, FullyConnectedMesh2 + ConnectionGraph2, NatPunchthrough, FileListTransfer.
+7. **Extras, as needed.** Compatibility facade, plugins in priority order: ReplicaManager3, RPC4, FullyConnectedMesh2 + ConnectionGraph2, NatPunchthrough, FileListTransfer.
 
 ## Platforms and CI
 
@@ -133,8 +133,6 @@ Work that is tightly coupled or design-heavy (such as the first pass through the
 
 ## Open questions
 
-- Who is the first consumer? This sets the priority of the questions below.
 - Is a source-compatible facade for existing RakNet or Brutal.RakNet users needed? If so, it should be designed alongside the public API.
 - Should layer 2 (Peer) be public for consumers with their own I/O, or internal until requested?
 - Is RakNet security (`cat` library) wire compatibility required, or is a modern AEAD/DTLS acceptable?
-- Which protocol profiles beyond stock RakNet 6? Bedrock 10/11 has no complete reference implementation and would need captures from real Bedrock clients and servers.

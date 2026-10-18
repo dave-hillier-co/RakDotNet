@@ -67,7 +67,7 @@ public class UnconnectedPongTests
     }
 
     [Fact]
-    public void Pong_response_limit_can_be_raised_for_other_protocol_profiles()
+    public void Pong_response_limit_is_configurable()
     {
         var bytes = Codec.Encode(new UnconnectedPong(1, 2, new byte[1000]));
         var reader = new BitStreamReader(bytes);

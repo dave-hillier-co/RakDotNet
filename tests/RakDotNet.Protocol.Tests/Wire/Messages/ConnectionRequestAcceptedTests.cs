@@ -70,7 +70,7 @@ public class ConnectionRequestAcceptedTests
     }
 
     [Fact]
-    public void Internal_address_count_is_a_parameter_for_other_protocol_profiles()
+    public void Internal_address_count_is_configurable()
     {
         // MAXIMUM_NUMBER_OF_INTERNAL_IDS is #ifndef-guarded (RakNetDefines.h:75), so builds may change it.
         var accepted = new ConnectionRequestAccepted(Client, 0, InternalAddressList.CreateUnassigned(20), 1, 2);
