@@ -39,7 +39,7 @@ internal sealed class PeerTransport : IAsyncDisposable
     private readonly long _startTimestamp;
     private readonly Lock _gate = new();
     private readonly EndPointCache _endPoints = new();
-    private readonly Channel<PeerEvent> _events = Channel.CreateUnbounded<PeerEvent>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
+    private readonly Channel<Protocol.Peer.PeerEvent> _events = Channel.CreateUnbounded<Protocol.Peer.PeerEvent>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
     private readonly CancellationTokenSource _stopping = new();
     private readonly PeriodicTimer _timer;
     private Task _receiveLoop = Task.CompletedTask;
@@ -62,7 +62,7 @@ internal sealed class PeerTransport : IAsyncDisposable
     public ulong Guid => _core.Guid;
 
     /// <summary>The peer's ordered event stream. It completes when the transport stops.</summary>
-    public ChannelReader<PeerEvent> Events => _events.Reader;
+    public ChannelReader<Protocol.Peer.PeerEvent> Events => _events.Reader;
 
     /// <summary>Milliseconds since the transport started, the clock every time on the wire is read from.</summary>
     public long NowMs => NowUs / 1000;

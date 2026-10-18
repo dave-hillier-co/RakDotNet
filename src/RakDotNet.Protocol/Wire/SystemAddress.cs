@@ -80,9 +80,6 @@ public readonly struct SystemAddress : IEquatable<SystemAddress>, ISpanFormattab
         return new SystemAddress(endPoint.Address, endPoint.Port);
     }
 
-    /// <summary>Creates a <see cref="SystemAddress"/> from an <see cref="IPEndPoint"/>.</summary>
-    public static SystemAddress FromIPEndPoint(IPEndPoint endPoint) => endPoint;
-
     /// <summary>Converts to an <see cref="IPEndPoint"/> for BCL interop. Allocates.</summary>
     public IPEndPoint ToIPEndPoint()
     {

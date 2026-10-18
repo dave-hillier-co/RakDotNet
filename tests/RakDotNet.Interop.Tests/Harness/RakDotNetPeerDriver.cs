@@ -128,7 +128,7 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
     /// The packet interop-peer would report for <paramref name="peerEvent"/>: its ID (the one after the timestamp for
     /// ID_TIMESTAMP), C++ name, sender and data (tools/interop-peer/src/PacketEvent.cpp).
     /// </summary>
-    internal static ReceivedPacket ToReceivedPacket(PeerEvent peerEvent, long timeMs)
+    internal static ReceivedPacket ToReceivedPacket(Protocol.Peer.PeerEvent peerEvent, long timeMs)
     {
         ArgumentNullException.ThrowIfNull(peerEvent);
         const int timeSize = sizeof(ulong);
@@ -153,15 +153,15 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
     };
 
     // RakNetTypes.h:69-85, as interop-peer names them.
-    internal static string ToProtocolName(ConnectionState state) => state switch
+    internal static string ToProtocolName(Protocol.Peer.ConnectionState state) => state switch
     {
-        ConnectionState.IsPending => "IS_PENDING",
-        ConnectionState.IsConnecting => "IS_CONNECTING",
-        ConnectionState.IsConnected => "IS_CONNECTED",
-        ConnectionState.IsDisconnecting => "IS_DISCONNECTING",
-        ConnectionState.IsSilentlyDisconnecting => "IS_SILENTLY_DISCONNECTING",
-        ConnectionState.IsDisconnected => "IS_DISCONNECTED",
-        ConnectionState.IsNotConnected => "IS_NOT_CONNECTED",
+        Protocol.Peer.ConnectionState.IsPending => "IS_PENDING",
+        Protocol.Peer.ConnectionState.IsConnecting => "IS_CONNECTING",
+        Protocol.Peer.ConnectionState.IsConnected => "IS_CONNECTED",
+        Protocol.Peer.ConnectionState.IsDisconnecting => "IS_DISCONNECTING",
+        Protocol.Peer.ConnectionState.IsSilentlyDisconnecting => "IS_SILENTLY_DISCONNECTING",
+        Protocol.Peer.ConnectionState.IsDisconnected => "IS_DISCONNECTED",
+        Protocol.Peer.ConnectionState.IsNotConnected => "IS_NOT_CONNECTED",
         _ => throw new ArgumentOutOfRangeException(nameof(state), state, null),
     };
 
