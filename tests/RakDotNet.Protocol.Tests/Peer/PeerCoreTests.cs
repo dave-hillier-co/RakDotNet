@@ -181,6 +181,30 @@ public class PeerCoreTests
     }
 
     [Fact]
+    public void Sending_to_the_unassigned_guid_returns_receipt_zero_without_using_a_number()
+    {
+        // RakPeer.cpp:1323-1324: an undefined target returns 0 before IncrementNextSendReceipt.
+        Connect();
+
+        Assert.Equal(0u, _client.Send(RakNetConstants.UnassignedGuid, [134], Reliability.Reliable, Priority.High, 0, _link.NowUs));
+        Assert.Equal(1u, _client.Send(ServerGuid, [134], Reliability.Reliable, Priority.High, 0, _link.NowUs));
+    }
+
+    [Fact]
+    public void Notifying_for_shutdown_closes_every_connection_once_the_notification_is_delivered()
+    {
+        // RakPeer::Shutdown (RakPeer.cpp:1050-1082) calls NotifyAndFlagForShutdown for every active system, then waits
+        // until none is active.
+        Connect();
+        Assert.Equal(1, _client.ActiveSystemCount);
+
+        _client.NotifyAllForShutdown(channel: 0, Priority.Low, _link.NowUs);
+        _link.RunUntil(() => _client.ActiveSystemCount == 0, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(ClientGuid, ServerEvents.OfType<Disconnected>().Single().Guid);
+    }
+
+    [Fact]
     public void Closing_with_notification_disconnects_both_sides_after_the_last_message_arrives()
     {
         Connect();

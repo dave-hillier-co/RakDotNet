@@ -140,7 +140,8 @@ internal sealed class PeerCore
     /// <summary>Sends to the system with <paramref name="guid"/>.</summary>
     public uint Send(ulong guid, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, long nowUs)
     {
-        if (data.IsEmpty)
+        // RakPeer.cpp:1323-1324: an undefined target returns 0 without using a receipt number.
+        if (data.IsEmpty || guid == RakNetConstants.UnassignedGuid)
             return 0;
         var system = FindActive(guid);
         if (system is null)
@@ -181,6 +182,20 @@ internal sealed class PeerCore
         var system = FindActive(guid);
         if (system is not null)
             CloseConnection(system.Address, sendDisconnectionNotification, channel, priority, nowUs);
+    }
+
+    /// <summary>The number of remote systems with an active slot, in any connect mode.</summary>
+    public int ActiveSystemCount => _active.Count;
+
+    /// <summary>
+    /// The first half of RakPeer::Shutdown (RakPeer.cpp:1050-1058): NotifyAndFlagForShutdown for every active system,
+    /// so each closes once its ID_DISCONNECTION_NOTIFICATION is delivered. The caller keeps updating until
+    /// <see cref="ActiveSystemCount"/> is 0 or its block time runs out.
+    /// </summary>
+    public void NotifyAllForShutdown(byte channel, Priority priority, long nowUs)
+    {
+        foreach (var system in _active.ToList())
+            CloseConnection(system.Address, sendDisconnectionNotification: true, channel, priority, nowUs);
     }
 
     /// <summary>RakPeer::GetConnectionState for an address (RakPeer.cpp:1717-1770).</summary>
