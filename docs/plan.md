@@ -6,6 +6,7 @@ A modern C# implementation of the RakNet protocol, wire-compatible with the orig
 
 | Area | Decision |
 |---|---|
+| Scope | Full parity with RakNet 4.081: the core, the secure handshake and encryption (`LIBCAT_SECURITY`), and every feature enabled by default in `NativeFeatureIncludes.h` (listed under milestone 8). |
 | Wire protocol | Exact compatibility with C++ RakNet 4.081 (protocol version 6). Verified by interop tests, not by reading code. |
 | Semantics | Keep RakNet's concepts: 8 reliability types, 4 priorities, 32 ordering channels, sequenced messages sharing the channel's ordering index, send receipts, message IDs with user IDs from `ID_USER_PACKET_ENUM`, `ID_TIMESTAMP`, offline ping response. |
 | API shape | Modern .NET first. No 1:1 mirror of `RakPeerInterface`. A compatibility facade is optional and layered on top. |
@@ -25,7 +26,7 @@ Each layer depends only on the layers below it.
 | 1 | Session | Per-connection state machine: reliability, ordering and sequencing, split and reassembly, ACK/NAK, sliding-window congestion control, RTO, connected handshake, pings | none; time is an input |
 | 2 | Peer | Offline handshake, MTU discovery, connection table, ban list and rate limits, timer wheel; routes `(endpoint, bytes)` | none |
 | 3 | Transport + API | `Socket` loops, `TimeProvider`, `Channel<T>`, `RakPeer`, `RakConnection`, `ConnectAsync`, ordered per-peer event stream, options, statistics | yes |
-| 4 | Extras | Compatibility facade, plugins | via layer 3 |
+| 4 | Plugins and utilities | Every RakNet plugin and utility, built on the public API; optional compatibility facade | via layer 3 |
 
 Projects:
 
@@ -95,7 +96,7 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | CrossConnectionTest, `CrossConnectionConvertTest` | Simultaneous connect in both directions |
 | `MaximumConnectTest`, `ManyClientsOneServer*`, `PeerConnectDisconnect*` | Connection limits, `ID_NO_FREE_INCOMING_CONNECTIONS`, connect/cancel churn |
 | `SystemAddressAndGuidTest`, `PacketAndLowLevelTestsTest` | Address and GUID handling, low-level packet cases |
-| `SecurityFunctionsTest`, Encryption | Only if RakNet security support is in scope |
+| `SecurityFunctionsTest`, Encryption | Secure handshake, identity keys, security exceptions, encrypted delivery |
 
 ## Milestones
 
@@ -111,9 +112,17 @@ Each milestone has an exit criterion that is a passing test. Milestones build a 
    - Hardening limits and timeouts from the list above.
    - MTU discovery and rejection replies.
    - Connected pings, `ID_TIMESTAMP` and clock differential, timeout detection.
-5. **Public API.** Designed alongside milestones 3 and 4 (several independent proposals judged against the Brutal.RakNet surface and the ordered event stream), implemented once the core is stable. `RakDotNetPeerDriver` moves onto it. Exit: the full scenario table (excluding security) passes against the public API.
+5. **Public API.** Designed alongside milestones 3 and 4 (several independent proposals judged against the Brutal.RakNet surface and the ordered event stream), implemented once the core is stable. The design also settles whether a `RakPeerInterface`-shaped compatibility facade is provided and whether layer 2 (Peer) is public. `RakDotNetPeerDriver` moves onto the public API. Exit: every non-security scenario in the table passes against the public API.
 6. **Performance.** BenchmarkDotNet suite and an allocation budget per datagram on the hot path, compared with RakNet's LoopbackPerformanceTest. Exit: benchmarks run in CI and the allocation budget is enforced by a test.
-7. **Extras, as needed.** Compatibility facade, plugins in priority order: ReplicaManager3, RPC4, FullyConnectedMesh2 + ConnectionGraph2, NatPunchthrough, FileListTransfer.
+7. **Security.** RakNet's secure connection: cookie and public key in the offline handshake, challenge and answer, client identity keys, the security exception list, and authenticated encryption of every datagram. Port the parts of `DependentExtensions/cat` that RakNet uses (EasyHandshake, Tunnel key agreement, AuthenticatedEncryption and the primitives beneath them) so output is bit-exact. `interop-peer` gains a build with `LIBCAT_SECURITY=1`. Primitive tests use known-answer vectors computed by the native `cat` code; handshakes are randomised, so interop is checked by scenarios. Exit: `SecurityFunctionsTest`-derived and Encryption scenarios pass in all four matrix combinations.
+8. **Plugins and utilities.** Each is ported on the public API, and `interop-peer` gains commands to drive the native counterpart. Exit for each: its sample-derived scenarios pass in all four matrix combinations. Order follows dependencies:
+   1. Diagnostics and small plugins: PacketLogger, MessageFilter, StatisticsHistory, ReadyEvent, TwoWayAuthentication.
+   2. Object replication and RPC: NetworkIDManager, ReplicaManager3, RPC4Plugin.
+   3. Topology and teams: ConnectionGraph2, FullyConnectedMesh, FullyConnectedMesh2, TeamManager, TeamBalancer.
+   4. NAT traversal and relaying: NatPunchthroughClient/Server, NatTypeDetectionClient/Server, UDPProxyClient/Server/Coordinator, UDPForwarder, Router2, RelayPlugin.
+   5. Files and cloud: FileOperations, FileListTransfer, DirectoryDeltaTransfer, CloudClient, CloudServer.
+   6. TCP, HTTP and console: TCPInterface, PacketizedTCP, HTTPConnection, HTTPConnection2, ConsoleServer, RakNetTransport, TelnetTransport, LogCommandParser, RakNetCommandParser.
+   7. External services: EmailSender, DynDNS, Rackspace.
 
 ## Platforms and CI
 
@@ -130,9 +139,3 @@ Parallel work runs as waves of agents, each in its own git worktree and branch:
 4. Branches are merged one at a time, and the full suite including native scenarios runs after each merge.
 
 Work that is tightly coupled or design-heavy (such as the first pass through the Session layer) is done serially rather than split across agents.
-
-## Open questions
-
-- Is a source-compatible facade for existing RakNet or Brutal.RakNet users needed? If so, it should be designed alongside the public API.
-- Should layer 2 (Peer) be public for consumers with their own I/O, or internal until requested?
-- Is RakNet security (`cat` library) wire compatibility required, or is a modern AEAD/DTLS acceptable?
