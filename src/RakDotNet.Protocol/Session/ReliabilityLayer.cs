@@ -14,7 +14,7 @@ namespace RakDotNet.Protocol.Session;
 /// nothing reads a clock.
 /// </para>
 /// <para>
-/// Inputs: <see cref="Send(ReadOnlyMemory{byte}, int, Reliability, Priority, byte, uint, long)"/> queues a message,
+/// Inputs: <see cref="Send(ReadOnlySpan{byte}, int, Reliability, Priority, byte, uint, long)"/> queues a message,
 /// <see cref="Receive"/> handles one datagram from the remote system (HandleSocketReceiveFromConnectedPlayer), and
 /// <see cref="Update"/> runs one tick: it sends due acknowledgements, then packs queued messages into datagrams as the
 /// window allows. Outputs: <see cref="TryDequeueDatagram"/> and <see cref="TryDequeueEvent"/>.
@@ -104,7 +104,7 @@ internal sealed class ReliabilityLayer
     private int MaxPayloadBits => DatagramLimits.MaxPayloadBits(_mtu);
 
     /// <summary>A message to send. The bit length is the whole payload.</summary>
-    public bool Send(ReadOnlyMemory<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs) =>
+    public bool Send(ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs) =>
         Send(data, data.Length * 8, reliability, priority, channel, receipt, nowUs);
 
     /// <summary>
@@ -118,7 +118,7 @@ internal sealed class ReliabilityLayer
     /// <param name="channel">The ordering channel; out-of-range channels become 0, as in the C++.</param>
     /// <param name="receipt">The serial reported by <see cref="ReceiptAcknowledged"/> or <see cref="ReceiptLost"/>.</param>
     /// <param name="nowUs">The current time.</param>
-    public bool Send(ReadOnlyMemory<byte> data, int bitLength, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs)
+    public bool Send(ReadOnlySpan<byte> data, int bitLength, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs)
     {
         // Fix any bad parameters, ReliabilityLayer.cpp:1556-1564.
         if (reliability > Reliability.ReliableOrderedWithAckReceipt)

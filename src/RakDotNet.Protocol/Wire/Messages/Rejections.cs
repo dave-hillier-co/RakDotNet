@@ -120,3 +120,27 @@ public readonly record struct IncompatibleProtocolVersion(byte ProtocolVersion, 
         return true;
     }
 }
+
+/// <summary>
+/// ID_INVALID_PASSWORD: ID, server GUID (RakPeer.cpp:3527-3529). Unlike the offline rejections it is sent reliably
+/// over the new connection and carries no magic; the client checks only the ID (RakPeer.cpp:6108-6126).
+/// </summary>
+public readonly record struct InvalidPassword(ulong ServerGuid) : IWireMessage<InvalidPassword>
+{
+    public void Write(ref BitStreamWriter writer)
+    {
+        MessageIdField.Write(ref writer, MessageId.InvalidPassword);
+        writer.WriteUInt64(ServerGuid);
+    }
+
+    public static bool TryRead(ref BitStreamReader reader, out InvalidPassword value)
+    {
+        value = default;
+        var r = reader;
+        if (!MessageIdField.TryRead(ref r, MessageId.InvalidPassword) || !r.TryReadUInt64(out var guid))
+            return false;
+        value = new InvalidPassword(guid);
+        reader = r;
+        return true;
+    }
+}
