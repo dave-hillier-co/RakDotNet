@@ -12,7 +12,13 @@ public enum PeerKind
 /// </summary>
 public static class PeerMatrix
 {
-    public const string RakDotNetUnavailable = "RakDotNet driver not implemented";
+    /// <summary>Milestone 4 items of docs/plan.md that scenarios wait for before they run against RakDotNet.</summary>
+    public static class Milestone4
+    {
+        public const string Loss = "Loss: resends, NAKs, RTO and sliding-window congestion control";
+
+        public const string SplitMessages = "Split messages and reassembly";
+    }
 
     public static TheoryData<PeerKind, PeerKind> ClientServer
     {
@@ -33,7 +39,7 @@ public static class PeerMatrix
     /// <summary>Why a driver of this kind cannot run here, or null when it can.</summary>
     public static string? UnavailableReason(PeerKind kind) => kind switch
     {
-        PeerKind.RakDotNet => RakDotNetUnavailable,
+        PeerKind.RakDotNet => null,
         PeerKind.Native when NativePeerDriver.FindBinary() is null =>
             $"Native interop peer not found at {NativePeerDriver.ResolveBinaryPath()}. Build tools/interop-peer or set {NativePeerDriver.BinaryEnvironmentVariable}.",
         PeerKind.Native => null,
@@ -52,12 +58,31 @@ public static class PeerMatrix
         }
     }
 
+    /// <summary>
+    /// Why a scenario cannot run yet in this combination: one needing <paramref name="milestone4Item"/> skips whenever
+    /// a RakDotNet peer takes part. Null when the combination can run.
+    /// </summary>
+    public static string? PendingReason(PeerKind client, PeerKind server, string milestone4Item) =>
+        client == PeerKind.RakDotNet || server == PeerKind.RakDotNet
+            ? $"RakDotNet waits for milestone 4: {milestone4Item}"
+            : null;
+
+    /// <summary>Skips the current test while <see cref="PendingReason"/> gives a reason.</summary>
+    public static void SkipUntilImplemented(PeerKind client, PeerKind server, string milestone4Item)
+    {
+        if (PendingReason(client, server, milestone4Item) is { } reason)
+        {
+            Assert.Skip(reason);
+        }
+    }
+
     public static async Task<IPeerDriver> LaunchAsync(PeerKind kind, CancellationToken cancellationToken = default)
     {
         SkipUnlessAvailable(kind);
         return kind switch
         {
             PeerKind.Native => await NativePeerDriver.LaunchAsync(cancellationToken).ConfigureAwait(false),
+            PeerKind.RakDotNet => RakDotNetPeerDriver.Launch(),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
     }

@@ -18,9 +18,22 @@ public sealed class PeerMatrixTests
     }
 
     [Fact]
-    public void RakDotNet_peers_are_reported_as_not_implemented()
+    public void RakDotNet_peers_are_always_available()
     {
-        Assert.Equal("RakDotNet driver not implemented", PeerMatrix.UnavailableReason(PeerKind.RakDotNet));
+        Assert.Null(PeerMatrix.UnavailableReason(PeerKind.RakDotNet));
+    }
+
+    [Fact]
+    public void A_scenario_waiting_for_milestone_4_is_pending_in_every_combination_with_a_RakDotNet_peer_and_names_the_item()
+    {
+        var reasons = PeerMatrix.ClientServer
+            .Select(row => row.Data)
+            .ToDictionary(c => c, c => PeerMatrix.PendingReason(c.Item1, c.Item2, PeerMatrix.Milestone4.SplitMessages));
+
+        Assert.Null(reasons[(PeerKind.Native, PeerKind.Native)]);
+        Assert.All(
+            reasons.Where(r => r.Key != (PeerKind.Native, PeerKind.Native)),
+            r => Assert.Equal("RakDotNet waits for milestone 4: Split messages and reassembly", r.Value));
     }
 
     [Fact]
