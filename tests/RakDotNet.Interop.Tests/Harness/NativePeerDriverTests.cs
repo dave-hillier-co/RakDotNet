@@ -233,6 +233,37 @@ public sealed class NativePeerDriverTests
         Assert.Contains(driver.Diagnostics, d => d.Contains("this is not json", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("""{"event":"packet","guid":"1","data":"10"}""")]
+    [InlineData("""{"event":"packet","messageId":16,"guid":"1","data":"zz"}""")]
+    [InlineData("""{"event":"packet","messageId":16,"guid":"1","data":"10","timestamp":"not a number"}""")]
+    [InlineData("""{"seq":"abc","ok":true}""")]
+    public async Task Malformed_protocol_messages_are_kept_as_diagnostics_without_breaking_the_session(string line)
+    {
+        var driver = await LaunchFakeAsync();
+        var token = TestContext.Current.CancellationToken;
+
+        await driver.SendCommandAsync("emit", new JsonObject { ["line"] = line }, token);
+        var state = await driver.GetConnectionStateAsync(5, token);
+
+        Assert.Equal("IS_CONNECTED", state);
+        Assert.Contains(driver.Diagnostics, d => d.Contains(line, StringComparison.Ordinal));
+        await driver.DisposeAsync().AsTask().WaitAsync(Timeout, token);
+    }
+
+    [Fact]
+    public async Task A_command_cancelled_before_it_is_written_is_not_left_pending()
+    {
+        await using var driver = await LaunchFakeAsync();
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => driver.SendCommandAsync("delayed", new JsonObject { ["ms"] = 0 }, cancelled.Token));
+
+        Assert.Equal(0, driver.PendingCommandCount);
+    }
+
     [Fact]
     public async Task Log_events_are_kept_as_diagnostics()
     {

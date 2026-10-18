@@ -58,6 +58,9 @@ public sealed class NativePeerDriver : IPeerDriver
     /// <summary>Log events and stdout lines that were not valid protocol messages.</summary>
     public IReadOnlyCollection<string> Diagnostics => _diagnostics.ToArray();
 
+    /// <summary>Commands sent and still waiting for a reply.</summary>
+    internal int PendingCommandCount => _pending.Count;
+
     /// <summary>
     /// The native peer binary: <see cref="BinaryEnvironmentVariable"/> when set, otherwise
     /// tools/interop-peer/build/interop-peer under the repo root.
@@ -138,29 +141,29 @@ public sealed class NativePeerDriver : IPeerDriver
 
         var pending = new PendingCommand(command);
         _pending[seq] = pending;
-        if (_exited)
-        {
-            FailPending();
-        }
-        else
-        {
-            await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
-            {
-                await _process.StandardInput.WriteLineAsync(message.ToJsonString()).ConfigureAwait(false);
-            }
-            catch (IOException)
-            {
-                // The process is gone; the stdout loop fails pending commands with the exit code.
-            }
-            finally
-            {
-                _writeLock.Release();
-            }
-        }
-
         try
         {
+            if (_exited)
+            {
+                FailPending();
+            }
+            else
+            {
+                await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await _process.StandardInput.WriteLineAsync(message.ToJsonString()).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    // The process is gone; the stdout loop fails pending commands with the exit code.
+                }
+                finally
+                {
+                    _writeLock.Release();
+                }
+            }
+
             var reply = await pending.Reply.Task.WaitAsync(CommandTimeout, cancellationToken).ConfigureAwait(false);
             if ((bool?)reply["ok"] != true)
             {
@@ -307,9 +310,16 @@ public sealed class NativePeerDriver : IPeerDriver
             }
         }
 
-        await Task.WhenAll(_stdoutLoop, _stderrLoop).ConfigureAwait(false);
-        _process.Dispose();
-        _writeLock.Dispose();
+        try
+        {
+            // The loops catch their own failures; this only waits for them to drain.
+            await Task.WhenAll(_stdoutLoop, _stderrLoop).ConfigureAwait(false);
+        }
+        finally
+        {
+            _process.Dispose();
+            _writeLock.Dispose();
+        }
     }
 
     private async Task ReadStandardOutputAsync()
@@ -327,13 +337,15 @@ public sealed class NativePeerDriver : IPeerDriver
         catch (ObjectDisposedException)
         {
         }
-
-        await _process.WaitForExitAsync().ConfigureAwait(false);
-        // stderr may still be draining; give it a moment so failures carry the peer's last words.
-        await _stderrLoop.WaitAsync(TimeSpan.FromSeconds(1)).ContinueWith(_ => { }, TaskScheduler.Default).ConfigureAwait(false);
-        _exited = true;
-        FailPending();
-        _packets.Writer.TryComplete();
+        finally
+        {
+            await _process.WaitForExitAsync().ConfigureAwait(false);
+            // stderr may still be draining; give it a moment so failures carry the peer's last words.
+            await _stderrLoop.WaitAsync(TimeSpan.FromSeconds(1)).ContinueWith(_ => { }, TaskScheduler.Default).ConfigureAwait(false);
+            _exited = true;
+            FailPending();
+            _packets.Writer.TryComplete();
+        }
     }
 
     private void FailPending()
@@ -353,20 +365,24 @@ public sealed class NativePeerDriver : IPeerDriver
             return;
         }
 
-        JsonObject message;
         try
         {
-            message = JsonNode.Parse(line) as JsonObject ?? throw new JsonException("not an object");
+            HandleMessage(line);
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is JsonException or FormatException or InvalidOperationException or OverflowException)
         {
-            _diagnostics.Enqueue($"unparsed stdout: {line}");
-            return;
+            // A line that does not follow docs/interop-protocol.md must not stop the reader: later replies still arrive.
+            _diagnostics.Enqueue($"unparsed stdout ({exception.GetType().Name}: {exception.Message}): {line}");
         }
+    }
+
+    private void HandleMessage(string line)
+    {
+        var message = JsonNode.Parse(line) as JsonObject ?? throw new JsonException("not an object");
 
         if (message["seq"] is { } seqNode)
         {
-            if (_pending.TryGetValue((long)seqNode, out var pending))
+            if (seqNode is JsonValue seqValue && seqValue.TryGetValue<long>(out var seq) && _pending.TryGetValue(seq, out var pending))
             {
                 pending.Reply.TrySetResult(message);
             }
@@ -422,7 +438,7 @@ public sealed class NativePeerDriver : IPeerDriver
             ? ulong.Parse((string)timestampNode!, NumberStyles.None, CultureInfo.InvariantCulture)
             : (ulong?)null;
         return new ReceivedPacket(
-            (byte)(int)message["messageId"]!,
+            (byte)((int?)message["messageId"] ?? throw new FormatException("packet event has no messageId")),
             (string?)message["messageName"] ?? "",
             ParseGuid(message["guid"]),
             address,

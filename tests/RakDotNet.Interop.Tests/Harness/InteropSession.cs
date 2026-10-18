@@ -93,11 +93,24 @@ public sealed class InteropSession : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        await Client.DisposeAsync().ConfigureAwait(false);
-        await Server.DisposeAsync().ConfigureAwait(false);
-        await Proxy.DisposeAsync().ConfigureAwait(false);
-        ClientInbox.Dispose();
-        ServerInbox.Dispose();
+        // Each part is disposed even when an earlier one throws, so a failing client cannot leak the server or proxy.
+        try
+        {
+            await Client.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                await Server.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                await Proxy.DisposeAsync().ConfigureAwait(false);
+                ClientInbox.Dispose();
+                ServerInbox.Dispose();
+            }
+        }
 
         if (TestContext.Current.TestOutputHelper is { } output)
         {
