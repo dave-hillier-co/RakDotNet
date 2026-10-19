@@ -118,10 +118,17 @@ internal readonly record struct ReceiptRecord(SendReceipt Receipt, RakConnection
 /// The pooled value-task source behind SendAndTrackAsync. A version guards against completing a later use of the
 /// same source after it went back to the pool.
 /// </summary>
+/// <remarks>
+/// The claim to complete a use is one compare-exchange on <see cref="_claim"/>, which holds the version of the current
+/// use and a claimed bit. A late completion of an earlier use therefore cannot pass the version check and then claim a
+/// later use that <see cref="GetResult"/> has reset in between.
+/// </remarks>
 internal sealed class TrackedSend(Action<TrackedSend> returnToPool) : IValueTaskSource<DeliveryOutcome>
 {
+    private const int Claimed = 1 << 16;
+
     private ManualResetValueTaskSourceCore<DeliveryOutcome> _source = new() { RunContinuationsAsynchronously = true };
-    private int _completed;
+    private int _claim;
 
     public CancellationTokenRegistration Registration { get; set; }
 
@@ -131,7 +138,7 @@ internal sealed class TrackedSend(Action<TrackedSend> returnToPool) : IValueTask
 
     public bool TryComplete(short version, DeliveryOutcome outcome)
     {
-        if (version != _source.Version || Interlocked.Exchange(ref _completed, 1) != 0)
+        if (!TryClaim(version))
             return false;
         Registration.Unregister();
         _source.SetResult(outcome);
@@ -140,7 +147,7 @@ internal sealed class TrackedSend(Action<TrackedSend> returnToPool) : IValueTask
 
     public bool TryFail(short version, Exception exception)
     {
-        if (version != _source.Version || Interlocked.Exchange(ref _completed, 1) != 0)
+        if (!TryClaim(version))
             return false;
         Registration.Unregister();
         _source.SetException(exception);
@@ -157,9 +164,15 @@ internal sealed class TrackedSend(Action<TrackedSend> returnToPool) : IValueTask
         {
             _source.Reset();
             Registration = default;
-            Volatile.Write(ref _completed, 0);
+            Volatile.Write(ref _claim, (ushort)_source.Version);
             returnToPool(this);
         }
+    }
+
+    private bool TryClaim(short version)
+    {
+        var unclaimed = (int)(ushort)version;
+        return Interlocked.CompareExchange(ref _claim, unclaimed | Claimed, unclaimed) == unclaimed;
     }
 
     public ValueTaskSourceStatus GetStatus(short token) => _source.GetStatus(token);
