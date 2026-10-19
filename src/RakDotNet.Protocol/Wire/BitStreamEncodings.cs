@@ -104,6 +104,25 @@ public static partial class BitStreamEncodings
     {
         if (maximum < minimum)
             throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        writer.WriteBitsFromIntegerRange(value, minimum, maximum, RequiredBits(minimum, maximum), allowOutsideRange);
+    }
+
+    /// <summary>
+    /// BitStream::WriteBitsFromIntegerRange with the bit count given by the caller (BitStream.h:1758-1784): the offset
+    /// from <paramref name="minimum"/> in <paramref name="requiredBits"/> bits, laid out as the other overload lays it out.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="maximum"/> is less than <paramref name="minimum"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value is outside the range and that is not allowed, or <paramref name="requiredBits"/> is negative or wider
+    /// than <typeparamref name="T"/>.
+    /// </exception>
+    public static void WriteBitsFromIntegerRange<T>(this ref BitStreamWriter writer, T value, T minimum, T maximum, int requiredBits, bool allowOutsideRange = false)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        if (maximum < minimum)
+            throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        ArgumentOutOfRangeException.ThrowIfNegative(requiredBits);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(requiredBits, Unsafe.SizeOf<T>() * 8);
         var outside = value < minimum || value > maximum;
         if (allowOutsideRange)
         {
@@ -121,7 +140,7 @@ public static partial class BitStreamEncodings
 
         Span<byte> bytes = stackalloc byte[Unsafe.SizeOf<T>()];
         (value - minimum).WriteLittleEndian(bytes);
-        writer.WriteBits(bytes, RequiredBits(minimum, maximum));
+        writer.WriteBits(bytes, requiredBits);
     }
 
     /// <summary>
@@ -131,9 +150,23 @@ public static partial class BitStreamEncodings
     public static bool TryReadBitsFromIntegerRange<T>(this ref BitStreamReader reader, T minimum, T maximum, out T value, bool allowOutsideRange = false)
         where T : unmanaged, IBinaryInteger<T>
     {
+        if (maximum < minimum)
+            throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        return reader.TryReadBitsFromIntegerRange(minimum, maximum, RequiredBits(minimum, maximum), out value, allowOutsideRange);
+    }
+
+    /// <summary>
+    /// BitStream::ReadBitsFromIntegerRange with the bit count given by the caller (BitStream.h:1886-1904); the range, bit
+    /// count and flag must match the writer's. A bit count of 0 reads as <paramref name="minimum"/>.
+    /// </summary>
+    public static bool TryReadBitsFromIntegerRange<T>(this ref BitStreamReader reader, T minimum, T maximum, int requiredBits, out T value, bool allowOutsideRange = false)
+        where T : unmanaged, IBinaryInteger<T>
+    {
         value = default;
         if (maximum < minimum)
             throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        ArgumentOutOfRangeException.ThrowIfNegative(requiredBits);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(requiredBits, Unsafe.SizeOf<T>() * 8);
         var r = reader;
         if (allowOutsideRange)
         {
@@ -150,9 +183,44 @@ public static partial class BitStreamEncodings
 
         Span<byte> bytes = stackalloc byte[Unsafe.SizeOf<T>()];
         bytes.Clear();
-        if (!r.TryReadBits(bytes, RequiredBits(minimum, maximum)))
+        if (!r.TryReadBits(bytes, requiredBits))
             return false;
         value = FromBytes<T>(bytes, bigEndian: false) + minimum;
+        reader = r;
+        return true;
+    }
+
+    /// <summary>
+    /// BitStream::WriteAlignedBytesSafe (BitStream.cpp:355-365): the whole length of <paramref name="source"/> as a
+    /// compressed u32, then at most <paramref name="maxBytes"/> of its bytes aligned to a byte. An empty source writes the
+    /// compressed 0 only.
+    /// </summary>
+    public static void WriteAlignedBytesSafe(this ref BitStreamWriter writer, scoped ReadOnlySpan<byte> source, int maxBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        if (source.IsEmpty)
+        {
+            writer.WriteCompressed(0u);
+            return;
+        }
+        writer.WriteCompressed((uint)source.Length);
+        writer.WriteAlignedBytes(source[..Math.Min(source.Length, maxBytes)]);
+    }
+
+    /// <summary>
+    /// BitStream::ReadAlignedBytesSafe (BitStream.cpp:384-394): a compressed u32 length capped at
+    /// <paramref name="maxBytes"/>, then that many aligned bytes as a slice of the input. A length of 0 does not align.
+    /// </summary>
+    public static bool TryReadAlignedBytesSafe(this ref BitStreamReader reader, int maxBytes, out ReadOnlySpan<byte> value)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        value = default;
+        var r = reader;
+        if (!r.TryReadCompressed(out uint length))
+            return false;
+        var count = (int)Math.Min(length, (uint)maxBytes);
+        if (count > 0 && !r.TryReadAlignedBytes(count, out value))
+            return false;
         reader = r;
         return true;
     }
