@@ -100,6 +100,9 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
             return true;
         if (_disposed || Volatile.Read(ref _armed) != 0)
             return false;
+        // The receive may have completed between the first take and reading _armed; its datagram comes first.
+        if (TryTakeSlot(buffer, out length, out remote))
+            return true;
 
         while (true)
         {
@@ -187,9 +190,13 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         return true;
     }
 
-    private void Arm()
+    /// <summary>
+    /// Issues the outstanding receive. Never while the slot holds an unread datagram: the next receive would write into
+    /// the same slot.
+    /// </summary>
+    internal void Arm()
     {
-        if (_signal is null || _disposed || Interlocked.CompareExchange(ref _armed, 1, 0) != 0)
+        if (_signal is null || _disposed || _slotReady || Interlocked.CompareExchange(ref _armed, 1, 0) != 0)
             return;
         try
         {
