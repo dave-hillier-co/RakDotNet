@@ -11,6 +11,7 @@ internal sealed class InMemoryLink
 {
     private readonly Dictionary<IPEndPoint, PeerCore> _peers = [];
     private readonly Dictionary<PeerCore, List<PeerEvent>> _events = [];
+    private readonly Dictionary<PeerCore, long> _clockOffsetsUs = [];
 
     public InMemoryLink(long startUs = 1_000_000_000)
     {
@@ -30,12 +31,21 @@ internal sealed class InMemoryLink
     /// <summary>When it returns true for a datagram, the datagram is dropped.</summary>
     public Func<IPEndPoint, IPEndPoint, byte[], bool>? Drop { get; set; }
 
-    public PeerCore Attach(IPEndPoint address, PeerCore peer)
+    /// <summary>Attaches <paramref name="peer"/> at <paramref name="address"/>.</summary>
+    /// <param name="clockOffsetUs">How far the peer's clock is ahead of the link's.</param>
+    public PeerCore Attach(IPEndPoint address, PeerCore peer, long clockOffsetUs = 0)
     {
         _peers.Add(address, peer);
         _events.Add(peer, []);
+        _clockOffsetsUs.Add(peer, clockOffsetUs);
         return peer;
     }
+
+    /// <summary>The time on <paramref name="peer"/>'s own clock.</summary>
+    public long NowUsOf(PeerCore peer) => NowUs + _clockOffsetsUs[peer];
+
+    /// <summary>Moves <paramref name="peer"/>'s clock by <paramref name="us"/>.</summary>
+    public void ShiftClock(PeerCore peer, long us) => _clockOffsetsUs[peer] += us;
 
     public IReadOnlyList<PeerEvent> EventsOf(PeerCore peer) => _events[peer];
 
@@ -56,11 +66,11 @@ internal sealed class InMemoryLink
                 continue;
             Delivered.Add((from, datagram.Remote, datagram.Data));
             if (_peers.TryGetValue(datagram.Remote, out var to))
-                to.Receive(from, datagram.Data, NowUs);
+                to.Receive(from, datagram.Data, NowUsOf(to));
         }
         foreach (var peer in _peers.Values)
         {
-            peer.Update(NowUs);
+            peer.Update(NowUsOf(peer));
             while (peer.TryDequeueEvent(out var e))
                 _events[peer].Add(e);
         }

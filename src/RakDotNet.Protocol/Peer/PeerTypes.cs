@@ -123,14 +123,28 @@ internal sealed class RemoteSystem(int index, IPEndPoint address, ulong guid, Re
     /// <summary>65535 until the first pong (RakPeer.cpp:3748).</summary>
     public ushort LowestPing { get; set; } = ushort.MaxValue;
 
-    public ushort LastPing { get; set; } = ushort.MaxValue;
+    /// <summary>
+    /// pingAndClockDifferential (RakPeer.h:671): the last <see cref="PingHistoryLength"/> pongs, written round
+    /// robin from <see cref="PingWriteIndex"/>. Unused entries have a ping of 65535 (RakPeer.cpp:3740-3744).
+    /// </summary>
+    public PingSample[] PingHistory { get; } = Enumerable.Repeat(new PingSample(ushort.MaxValue, 0), PingHistoryLength).ToArray();
 
-    public long ClockDifferential { get; set; }
+    /// <summary>pingAndClockDifferentialWriteIndex.</summary>
+    public int PingWriteIndex { get; set; }
+
+    /// <summary>PING_TIMES_ARRAY_SIZE, RakNetTypes.h:462.</summary>
+    public const int PingHistoryLength = 5;
 
     public IPEndPoint MyExternalAddress { get; set; } = InternalAddressList.Unassigned;
 
     public IReadOnlyList<IPEndPoint> TheirInternalAddresses { get; set; } = [];
 }
+
+/// <summary>
+/// PingAndClockDifferential (RakPeer.h:654-659): one pong's round trip in milliseconds and the remote clock's lead,
+/// a RakNet::Time difference that wraps for a remote clock behind the local one.
+/// </summary>
+internal readonly record struct PingSample(ushort PingTime, ulong ClockDifferential);
 
 /// <summary>RequestedConnectionStruct (RakPeer.h:831): a Connect call waiting for the offline handshake.</summary>
 internal sealed class ConnectionAttempt(IPEndPoint address, byte[] password, int attemptCount, int intervalMs, long timeoutMs, ClientSecurity? security, long nowMs)

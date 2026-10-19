@@ -147,3 +147,35 @@ internal sealed record ConnectionLost(IPEndPoint Remote, ulong Guid) : PeerEvent
 {
     public override ReadOnlyMemory<byte> Packet => new[] { (byte)MessageId.ConnectionLost };
 }
+
+/// <summary>
+/// ID_ADVERTISE_SYSTEM arrived out of band (RakPeer.cpp:4719-4724): the packet is the ID followed by
+/// <see cref="Data"/>, with the out-of-band header removed.
+/// </summary>
+/// <param name="Remote">The advertising system.</param>
+/// <param name="Guid">Its GUID, from the out-of-band header.</param>
+/// <param name="Data">What it advertised.</param>
+internal sealed record AdvertiseSystemReceived(IPEndPoint Remote, ulong Guid, ReadOnlyMemory<byte> Data) : PeerEvent(Remote, Guid)
+{
+    public override ReadOnlyMemory<byte> Packet => Prefixed(MessageId.AdvertiseSystem, Data.Span);
+
+    internal static byte[] Prefixed(MessageId id, ReadOnlySpan<byte> data)
+    {
+        var packet = new byte[1 + data.Length];
+        packet[0] = (byte)id;
+        data.CopyTo(packet.AsSpan(1));
+        return packet;
+    }
+}
+
+/// <summary>
+/// Out-of-band data other than ID_ADVERTISE_SYSTEM arrived (RakPeer.cpp:4726-4729): the packet is
+/// ID_OUT_OF_BAND_INTERNAL followed by <see cref="Payload"/>.
+/// </summary>
+/// <param name="Remote">The sender.</param>
+/// <param name="Guid">Its GUID, from the out-of-band header.</param>
+/// <param name="Payload">The data sent, starting with its own message ID.</param>
+internal sealed record OutOfBandReceived(IPEndPoint Remote, ulong Guid, ReadOnlyMemory<byte> Payload) : PeerEvent(Remote, Guid)
+{
+    public override ReadOnlyMemory<byte> Packet => AdvertiseSystemReceived.Prefixed(MessageId.OutOfBandInternal, Payload.Span);
+}

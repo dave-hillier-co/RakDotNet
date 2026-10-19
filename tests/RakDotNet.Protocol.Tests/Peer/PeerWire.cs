@@ -1,5 +1,6 @@
 using RakDotNet.Protocol.Peer;
 using RakDotNet.Protocol.Wire;
+using RakDotNet.Protocol.Wire.Datagrams;
 using RakDotNet.Protocol.Wire.Messages;
 
 namespace RakDotNet.Protocol.Tests.Peer;
@@ -37,5 +38,19 @@ internal static class PeerWire
         while (peer.TryDequeueEvent(out var e))
             events.Add(e);
         return events;
+    }
+
+    /// <summary>The messages carried by the connected (reliability-layer) datagrams among <paramref name="datagrams"/>.</summary>
+    public static List<EncapsulatedMessage> ConnectedMessages(IEnumerable<byte[]> datagrams)
+    {
+        var messages = new List<EncapsulatedMessage>();
+        foreach (var datagram in datagrams.Where(d => (d[0] & 0x80) != 0))
+        {
+            if (!EncapsulatedMessageReader.TryOpenDatagram(datagram, out _, out var reader))
+                continue;
+            while (reader.TryReadNext(out var message))
+                messages.Add(message);
+        }
+        return messages;
     }
 }
