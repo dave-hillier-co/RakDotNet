@@ -357,13 +357,15 @@ internal sealed class PeerCore
     /// <summary>
     /// RakPeer::Ping(SystemAddress) (RakPeer.cpp:2073-2076, PingInternal at 4103-4115): an unreliable ID_CONNECTED_PING
     /// to a connected system, whose pong adds to its ping and clock differential history. Nothing is sent to an
-    /// address that is not connected.
+    /// address that is not connected. Like RakPeer, which sends the ping through Send, it uses up a send receipt
+    /// number either way (RakPeer.cpp:1385-1389).
     /// </summary>
     public void PingConnected(IPEndPoint remote, long nowUs)
     {
         ArgumentNullException.ThrowIfNull(remote);
+        var receipt = NextSendReceipt();
         if (FindActive(remote) is { } system)
-            PingInternal(system, Reliability.Unreliable, nowUs);
+            PingInternal(system, Reliability.Unreliable, nowUs, receipt);
     }
 
     /// <summary>
@@ -780,8 +782,8 @@ internal sealed class PeerCore
     }
 
     // PingInternal, RakPeer.cpp:4103-4115.
-    private static void PingInternal(RemoteSystem system, Reliability reliability, long nowUs) =>
-        SendImmediate(system, Encode(new ConnectedPing((ulong)(nowUs / 1000))), reliability, Priority.Immediate, 0, 0, nowUs);
+    private static void PingInternal(RemoteSystem system, Reliability reliability, long nowUs, uint receipt = 0) =>
+        SendImmediate(system, Encode(new ConnectedPing((ulong)(nowUs / 1000))), reliability, Priority.Immediate, 0, receipt, nowUs);
 
     // SendImmediate for one system, RakPeer.cpp:4286-4384.
     private static void SendImmediate(RemoteSystem system, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs)
@@ -963,6 +965,12 @@ internal sealed class PeerCore
         }
         var attempt = FindAttempt(from);
         if (attempt is null)
+            return;
+        // RakPeer.cpp:4966-4992: a request made with a ClientSecurity always processes the server's handshake answer,
+        // which an insecure reply does not carry, and returns before ID_CONNECTION_REQUEST with the request still
+        // queued. Otherwise a forged insecure reply would downgrade a secure connect. (The C++ assigns the slot before
+        // reading the uninitialised answer; here nothing is assigned for a reply that can never complete.)
+        if (attempt.Security is not null)
             return;
 
         // A cross connection may already have made this system (RakPeer.cpp:4941-4954).

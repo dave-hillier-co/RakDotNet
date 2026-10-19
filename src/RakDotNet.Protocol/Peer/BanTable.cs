@@ -6,7 +6,8 @@ namespace RakDotNet.Protocol.Peer;
 /// </summary>
 internal sealed class BanTable
 {
-    // RakPeer.cpp:1866: patterns and addresses longer than this are ignored, so IPv6 addresses are never banned.
+    // RakPeer.cpp:1866 and 1985: patterns and addresses longer than this are ignored, so most IPv6 addresses cannot be
+    // banned; short ones such as ::1 can.
     private const int MaxAddressLength = 15;
 
     private readonly List<Ban> _bans = [];

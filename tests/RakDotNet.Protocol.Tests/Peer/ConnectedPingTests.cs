@@ -93,6 +93,23 @@ public class ConnectedPingTests
     }
 
     [Fact]
+    public void Pinging_uses_up_a_send_receipt_number_whether_or_not_the_address_is_connected()
+    {
+        Connect();
+        var nobody = new IPEndPoint(IPAddress.Parse("10.0.0.9"), 9);
+
+        // RakPeer::Ping goes through Send, which always takes a new receipt (RakPeer.cpp:2073-2076, 4111-4114, 1385-1389).
+        var first = _client.Send(ServerAddress, [(byte)MessageId.UserPacketEnum], Reliability.Reliable, Priority.High, 0, ClientNowUs);
+        _client.PingConnected(ServerAddress, ClientNowUs);
+        var second = _client.Send(ServerAddress, [(byte)MessageId.UserPacketEnum], Reliability.Reliable, Priority.High, 0, ClientNowUs);
+        _client.PingConnected(nobody, ClientNowUs);
+        var third = _client.Send(ServerAddress, [(byte)MessageId.UserPacketEnum], Reliability.Reliable, Priority.High, 0, ClientNowUs);
+
+        Assert.Equal(first + 2, second);
+        Assert.Equal(second + 2, third);
+    }
+
+    [Fact]
     public void The_average_covers_the_last_five_pings()
     {
         Connect();
@@ -139,6 +156,55 @@ public class ConnectedPingTests
         var unreliablePings = ConnectedMessages(SentFrom(ClientAddress, sentBefore))
             .Count(m => m.Payload.Span[0] == (byte)MessageId.ConnectedPing && m.Reliability == Reliability.Unreliable);
         Assert.InRange(unreliablePings, 3, 4);
+    }
+
+    [Fact]
+    public void A_later_pong_with_a_lower_round_trip_lowers_the_lowest_ping()
+    {
+        Connect(stepUs: 20_000);
+        _link.Run(TimeSpan.FromMilliseconds(400), stepUs: 20_000);
+        var slowest = _client.GetLowestPing(ServerAddress);
+
+        var fast = PingOnce(stepUs: 1_000);
+
+        // OnConnectedPong, RakPeer.cpp:4410-4411.
+        Assert.True(fast < slowest, $"{fast} should be below {slowest}");
+        Assert.Equal(fast, _client.GetLowestPing(ServerAddress));
+    }
+
+    [Fact]
+    public void The_history_holds_five_pings()
+    {
+        Connect();
+        _link.Run(TimeSpan.FromMilliseconds(50));
+
+        // PING_TIMES_ARRAY_SIZE is 5 (RakNetTypes.h:462): each ping writes the next slot, wrapping after the fifth.
+        var pings = new List<int>();
+        for (var i = 1; i <= 6; i++)
+            pings.Add(PingOnce(stepUs: i * 5_000));
+
+        Assert.Equal(pings.Order().Distinct(), pings);
+        Assert.Equal(pings.Skip(1).Sum() / 5, _client.GetAveragePing(ServerAddress));
+    }
+
+    [Fact]
+    public void Of_samples_with_equal_round_trips_the_clock_differential_comes_from_the_first_slot()
+    {
+        Connect();
+        _link.Run(TimeSpan.FromMilliseconds(50));
+
+        // The handshake fills slots 0 and 1 (the request's round trip and the ping that follows it), so these five
+        // pings land in slots 2, 3, 4, 0 and 1. The server's clock jumps a second before each, so every slot holds a
+        // different differential with the same round trip, and RakPeer.cpp:2245-2253 keeps slot 0's: the fourth ping's.
+        var pings = new List<int>();
+        for (var i = 1; i <= 5; i++)
+        {
+            _link.ShiftClock(_server, 1_000_000);
+            pings.Add(PingOnce(stepUs: 10_000));
+        }
+
+        Assert.Single(pings.Distinct());
+        Assert.InRange(_client.GetClockDifferential(ServerAddress), ServerClockAheadMs + 4_000 - 15, ServerClockAheadMs + 4_000 + 15);
     }
 
     // Clock differential and ID_TIMESTAMP.
@@ -191,6 +257,29 @@ public class ConnectedPingTests
         Assert.InRange((long)shifted, _link.NowMs - 10, _link.NowMs);
         Assert.Equal(message[..1], received[..1]);
         Assert.Equal(message[9..], received[9..]);
+    }
+
+    [Fact]
+    public void A_timestamp_dequeued_after_its_sender_disconnected_is_not_shifted()
+    {
+        Connect();
+        Assert.NotEqual(0, _client.GetClockDifferential(ServerAddress));
+        byte[] message = [(byte)MessageId.Timestamp, .. BigEndian(1_234_567), (byte)MessageId.UserPacketEnum];
+        _server.Send(ClientAddress, message, Reliability.ReliableOrdered, Priority.Immediate, 0, _link.NowUsOf(_server));
+        // Deliver by hand for 10 ms, leaving the client's events queued.
+        for (var us = 1_000; us <= 10_000; us += 1_000)
+        {
+            _server.Update(_link.NowUsOf(_server) + us);
+            foreach (var datagram in Datagrams(_server))
+                _client.Receive(ServerAddress, datagram.Data, ClientNowUs + us);
+            _client.Update(ClientNowUs + us);
+        }
+
+        _client.CloseConnection(ServerAddress, false, 0, Priority.Low, ClientNowUs);
+
+        // GetBestClockDifferential looks up only active systems (RakPeer.cpp:3793), so the time is shifted by 0.
+        var received = Events(_client).OfType<MessageReceived>().Single().Packet.ToArray();
+        Assert.Equal(message, received);
     }
 
     [Fact]
@@ -256,13 +345,22 @@ public class ConnectedPingTests
         Assert.InRange(_link.NowMs - silentFromMs, 3_000, 4_600);
     }
 
-    private void Connect()
+    private void Connect(long stepUs = 1_000)
     {
         Assert.Equal(ConnectionAttemptResult.ConnectionAttemptStarted, _client.Connect(ServerAddress, default, 12, 500, 0, ClientNowUs));
         _link.RunUntil(
             () => ClientEvents.OfType<OutgoingConnectionCompleted>().Any() && _link.EventsOf(_server).OfType<IncomingConnectionCompleted>().Any(),
-            TimeSpan.FromSeconds(1)
+            TimeSpan.FromSeconds(1),
+            stepUs
         );
+    }
+
+    // One ping whose round trip grows with stepUs, as each hop takes a step; returns the round trip measured.
+    private int PingOnce(long stepUs)
+    {
+        _client.PingConnected(ServerAddress, ClientNowUs);
+        _link.Run(TimeSpan.FromMicroseconds(stepUs * 20), stepUs);
+        return _client.GetLastPing(ServerAddress);
     }
 
     private IEnumerable<byte[]> SentFrom(IPEndPoint from, int skip) => _link.Sent.Skip(skip).Where(d => d.From.Equals(from)).Select(d => d.Data);

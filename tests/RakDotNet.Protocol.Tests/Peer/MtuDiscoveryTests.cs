@@ -141,6 +141,18 @@ public class MtuDiscoveryTests
         Assert.Equal(576, _client.GetMtuSize(Nobody));
     }
 
+    [Fact]
+    public void The_mtu_of_a_disconnected_system_is_the_default_576()
+    {
+        Connect(attempts: 12, intervalMs: 500);
+        Assert.Equal(1492, _client.GetMtuSize(ServerAddress));
+
+        _client.CloseConnection(ServerAddress, false, 0, Priority.Low, _link.NowUs);
+
+        // GetMTUSize looks up only active systems (RakPeer.cpp:2575), though the slot still holds the address.
+        Assert.Equal(576, _client.GetMtuSize(ServerAddress));
+    }
+
     [Theory]
     [InlineData(1492, 1492)]
     [InlineData(1200, 1200)]

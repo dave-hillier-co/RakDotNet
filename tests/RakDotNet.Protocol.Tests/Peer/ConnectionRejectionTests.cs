@@ -139,6 +139,17 @@ public class ConnectionRejectionTests
         Assert.False(_server.IsBanned(address, _link.NowUs));
     }
 
+    [Theory]
+    [InlineData("::1")]
+    [InlineData("fe80::1")]
+    public void An_ipv6_address_of_15_characters_or_fewer_can_be_banned(string address)
+    {
+        // RakPeer.cpp:1866 and 1985 check only the length.
+        _server.AddToBanList(address, 0, _link.NowUs);
+
+        Assert.True(_server.IsBanned(address, _link.NowUs));
+    }
+
     [Fact]
     public void An_unverified_sender_that_sends_anything_but_a_connection_request_is_banned_for_the_timeout()
     {
@@ -187,6 +198,42 @@ public class ConnectionRejectionTests
         second.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs);
         _link.RunUntil(() => _link.EventsOf(second).Count > 0, TimeSpan.FromSeconds(1));
 
+        Assert.IsType<OutgoingConnectionCompleted>(Assert.Single(_link.EventsOf(second)));
+    }
+
+    [Theory]
+    [InlineData(99, MessageId.IpRecentlyConnected)]
+    [InlineData(100, MessageId.OpenConnectionReply2)]
+    public void The_frequency_limit_refuses_a_second_connection_only_within_100_ms(int afterMs, MessageId answer)
+    {
+        // RakPeer.cpp:3612: refused while timeMS - connectionTime < 100.
+        _server.LimitIpConnectionFrequency = true;
+        _server.Receive(ClientAddress, Encode(new OpenConnectionRequest2(ServerAddress, 1492, ClientGuid)), _link.NowUs);
+        Assert.Equal((byte)MessageId.OpenConnectionReply2, Assert.Single(Datagrams(_server)).Data[0]);
+
+        _server.Receive(SecondClientAddress, Encode(new OpenConnectionRequest2(ServerAddress, 1492, ClientGuid + 1)), _link.NowUs + afterMs * 1000L);
+
+        Assert.Equal((byte)answer, Assert.Single(Datagrams(_server)).Data[0]);
+    }
+
+    [Fact]
+    public void The_frequency_limit_does_not_apply_to_the_address_the_first_remote_system_saw()
+    {
+        // RakPeer.cpp:4024-4025: IsLoopbackAddress(systemAddress, false) also matches firstExternalID, which the hub's
+        // own first connection records (RakPeer.cpp:6035-6042).
+        var hubAddress = new IPEndPoint(IPAddress.Parse("10.0.0.5"), 5);
+        var hub = _link.Attach(hubAddress, new PeerCore(new PeerOptions { Guid = 5, MaxIncomingConnections = 8, LimitIpConnectionFrequency = true }));
+        hub.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs);
+        _link.RunUntil(() => _link.EventsOf(hub).OfType<OutgoingConnectionCompleted>().Any(), TimeSpan.FromSeconds(1));
+        var first = _link.Attach(new IPEndPoint(hubAddress.Address, 6), new PeerCore(new PeerOptions { Guid = 6 }));
+        var second = _link.Attach(new IPEndPoint(hubAddress.Address, 7), new PeerCore(new PeerOptions { Guid = 7 }));
+
+        first.Connect(hubAddress, default, 12, 500, 0, _link.NowUs);
+        _link.Step();
+        second.Connect(hubAddress, default, 12, 500, 0, _link.NowUs);
+        _link.RunUntil(() => _link.EventsOf(first).Count > 0 && _link.EventsOf(second).Count > 0, TimeSpan.FromSeconds(1));
+
+        Assert.IsType<OutgoingConnectionCompleted>(Assert.Single(_link.EventsOf(first)));
         Assert.IsType<OutgoingConnectionCompleted>(Assert.Single(_link.EventsOf(second)));
     }
 
@@ -321,6 +368,31 @@ public class ConnectionRejectionTests
         Assert.Equal(ServerGuid, failed.Guid);
         Assert.Equal([(byte)MessageId.RemoteSystemRequiresPublicKey, 0], failed.Packet.ToArray());
         Assert.Equal(ConnectionState.IsPending, _client.GetConnectionState(ServerAddress));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_secure_client_ignores_an_insecure_open_connection_reply_2(bool acceptAnyKey)
+    {
+        // RakPeer.cpp:4966-4992: a request with a client handshake always checks the server's answer, which an insecure
+        // reply lacks, so it returns before ID_CONNECTION_REQUEST and the request stays queued until it runs out.
+        _link.Drop = (from, _, _) => from.Equals(ClientAddress);
+        var security = acceptAnyKey ? ClientSecurity.AcceptAnyPublicKey : new ClientSecurity { ServerPublicKey = ServerKey };
+        _client.Connect(ServerAddress, default, 3, 100, 0, _link.NowUs, security);
+        _link.Step();
+        Assert.Equal((byte)MessageId.OpenConnectionRequest1, Assert.Single(Datagrams(_client)).Data[0]);
+        var sentBefore = _link.Sent.Count;
+
+        _client.Receive(ServerAddress, Encode(new OpenConnectionReply2(ServerGuid, ClientAddress, 1492)), _link.NowUs);
+
+        Assert.Empty(Datagrams(_client));
+        Assert.Empty(Events(_client));
+        Assert.Equal(ConnectionState.IsPending, _client.GetConnectionState(ServerAddress));
+        _link.RunUntil(() => ClientEvents.Any(), TimeSpan.FromSeconds(2));
+        var failed = Assert.IsType<ConnectionAttemptFailed>(Assert.Single(ClientEvents));
+        Assert.Equal(MessageId.ConnectionAttemptFailed, failed.Reason);
+        Assert.All(_link.Sent.Skip(sentBefore), d => Assert.Equal((byte)MessageId.OpenConnectionRequest1, d.Data[0]));
     }
 
     [Fact]
