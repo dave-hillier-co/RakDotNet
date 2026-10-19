@@ -369,6 +369,94 @@ public class ReliabilityLayerLossTests
         Assert.NotEmpty(lost);
     }
 
+    [Fact]
+    public void A_resend_during_a_continuous_send_backs_the_window_off_to_half_for_the_following_updates()
+    {
+        var (now, lastRound) = GrowTheWindowInAContinuousSend();
+        Assert.True(lastRound.Count > 4, $"Only {lastRound.Count} datagrams went out in the last round.");
+
+        // Acknowledge all but the first datagram of the round so only its message waits for a resend.
+        _sender.Update(now);
+        var round = TakeDatagrams(_sender);
+        Assert.True(round.Count > 4, $"Only {round.Count} datagrams went out.");
+        Assert.True(_sender.Receive(RangeDatagram(DatagramHeader.ForAck(), Range(NumberOf(round[1]), NumberOf(round[^1]))), now + 10_000));
+
+        // The bandwidth for new data is taken before the resend loop runs (ReliabilityLayer.cpp:1894-1895), so the update
+        // that resends still fills the old window.
+        var resendAt = now + InitialRtoUs;
+        _sender.Update(resendAt);
+        var resendRound = TakeDatagrams(_sender);
+        var firstMessage = Decode(round[0]).Messages[0].ReliableMessageNumber;
+        Assert.Single(resendRound, d => Decode(d).Messages.Any(m => m.ReliableMessageNumber == firstMessage));
+        Assert.True(_sender.Receive(RangeDatagram(DatagramHeader.ForAck(), Range(NumberOf(resendRound[0]), NumberOf(resendRound[^1]))), resendAt + 10_000));
+
+        // OnResend dropped cwnd to one datagram payload and ssThresh to half the old window (CCRakNetSlidingWindow.cpp:
+        // 162-183), so the acknowledgements regrow it only to about half: the next update sends half as much.
+        _sender.Update(resendAt + 20_000);
+        var next = TakeDatagrams(_sender);
+        Assert.InRange(next.Count, 1, resendRound.Count * 6 / 10);
+    }
+
+    [Fact]
+    public void A_nak_during_a_continuous_send_ends_slow_start()
+    {
+        var (now, lastRound) = GrowTheWindowInAContinuousSend();
+        Assert.All(lastRound, d => Assert.True(Decode(d).Header.NeedsBAndAs));
+
+        _sender.Update(now);
+        var round = TakeDatagrams(_sender);
+        Assert.True(_sender.Receive(RangeDatagram(DatagramHeader.ForAck(), Range(NumberOf(round[1]), NumberOf(round[^1]))), now + 10_000));
+        Assert.True(_sender.Receive(RangeDatagram(DatagramHeader.ForNak(), Range(NumberOf(round[0]), NumberOf(round[0]))), now + 10_000));
+
+        // OnNAK halves ssThresh below cwnd (CCRakNetSlidingWindow.cpp:185-198), so the next datagrams no longer ask for
+        // B and AS (ReliabilityLayer.cpp:1828).
+        _sender.Update(now + 11_000);
+        var afterNak = TakeDatagrams(_sender);
+        Assert.NotEmpty(afterNak);
+        Assert.All(afterNak, d => Assert.False(Decode(d).Header.NeedsBAndAs));
+    }
+
+    [Fact]
+    public void An_unreliable_receipt_sent_after_a_resend_in_the_same_update_is_acknowledged_through_its_own_datagram()
+    {
+        _sender.Send("r"u8.ToArray(), Reliability.Reliable, Priority.High, 0, 0, Start);
+        _sender.Update(Start + 1_000);
+        Assert.Single(TakeDatagrams(_sender));
+
+        var resendAt = Start + 1_000 + InitialRtoUs;
+        _sender.Send("u"u8.ToArray(), Reliability.UnreliableWithAckReceipt, Priority.High, 0, receipt: 9, resendAt);
+        _sender.Update(resendAt);
+        var datagrams = TakeDatagrams(_sender);
+
+        // The resend fills datagram 1 and the new message goes in datagram 2 (ReliabilityLayer.cpp:1905-2137).
+        Assert.Equal([1u, 2u], datagrams.Select(d => Decode(d).Header.DatagramNumber.Value));
+        Assert.Equal("u"u8.ToArray(), Assert.Single(Decode(datagrams[1]).Messages).Payload.ToArray());
+
+        Assert.True(_sender.Receive(RangeDatagram(DatagramHeader.ForAck(), Range(2, 2)), resendAt + 5_000));
+        Assert.Equal([new ReceiptAcknowledged(9)], TakeEvents(_sender));
+    }
+
+    // A backlog sent in rounds 20 ms apart, each acknowledged by hand 10 ms after it went, so the window grows in slow
+    // start during a continuous send. Returns the time of the next round and the datagrams of the last.
+    private (long Now, List<byte[]> LastRound) GrowTheWindowInAContinuousSend()
+    {
+        for (var i = 0; i < 2_000; i++)
+            _sender.Send(new byte[1000], Reliability.Reliable, Priority.High, 0, 0, Start);
+
+        var now = Start + 10_000;
+        var round = new List<byte[]>();
+        for (var r = 0; r < 4; r++, now += 20_000)
+        {
+            _sender.Update(now);
+            round = TakeDatagrams(_sender);
+            Assert.True(_sender.Receive(RangeDatagram(DatagramHeader.ForAck(), Range(NumberOf(round[0]), NumberOf(round[^1]))), now + 10_000));
+        }
+        Assert.True(_sender.IsOutgoingDataWaiting);
+        return (now, round);
+    }
+
+    private static uint NumberOf(byte[] datagram) => Decode(datagram).Header.DatagramNumber.Value;
+
     // Three datagrams of one reliable message each, numbered 0 to 2.
     private List<byte[]> SendThreeDatagrams()
     {

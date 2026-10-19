@@ -38,7 +38,8 @@ public sealed record PeerLimits
 
     /// <summary>
     /// The longest message a remote system may send split into parts. Default 134,217,728 (128 MiB): the largest message
-    /// in any RakNet sample is BigPacketTest's 83,296,256 bytes (BigPacketTest.cpp:27).
+    /// in any RakNet sample is BigPacketTest's 83,296,256 bytes (BigPacketTest.cpp:27). At most 268,435,455, so that
+    /// the message's length in bits fits RakNet's 32-bit BitSize_t.
     /// </summary>
     public int MaxSplitMessageBytes { get; init; } = SessionLimits.Default.MaxSplitMessageBytes;
 
@@ -67,9 +68,12 @@ public sealed record PeerLimits
 
     /// <summary>
     /// The most bytes one connection may hold in partly received split messages and ordering buffers together, each
-    /// message or part charged its length plus 64 bytes for its bookkeeping. Default 268,435,456 (256 MiB), twice
-    /// <see cref="MaxSplitMessageBytes"/>: room for a complete maximal message waiting on its ordering channel while the
-    /// next is reassembled. This is the bound on what a remote system can make a connection buffer.
+    /// message or part charged its length plus 64 bytes for its bookkeeping. Default 268,435,456 (256 MiB). Reassembling
+    /// a message of <see cref="MaxSplitMessageBytes"/> costs about 140 MB at MTU 1492 and 151 MB at MTU 576, with the
+    /// charge for each part. Besides that, a RakNet sender can leave at most 511 messages waiting behind a missing one,
+    /// because it holds at most 512 unacknowledged reliable messages (RESEND_BUFFER_ARRAY_LENGTH, RakNetDefines.h:105)
+    /// and every message or split part it sends is at most one MTU; so a complete maximal message never waits on its
+    /// ordering channel. This is the bound on what a remote system can make a connection buffer.
     /// </summary>
     public int MaxReceiveBufferBytesPerConnection { get; init; } = (int)SessionLimits.Default.MaxReceiveBufferBytes;
 

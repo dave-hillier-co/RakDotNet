@@ -185,6 +185,34 @@ public class ReliabilityLayerLimitsTests
     }
 
     [Fact]
+    public void A_split_message_limit_too_large_for_a_bit_length_to_hold_is_rejected()
+    {
+        // A whole message's bit length is an int, as BitSize_t is a uint32 in the C++ (RakNetTypes.h:101).
+        const int largest = int.MaxValue / 8;
+        _ = new ReliabilityLayer(Mtu, Start, SessionLimits.Default with { MaxSplitMessageBytes = largest });
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ReliabilityLayer(Mtu, Start, SessionLimits.Default with { MaxSplitMessageBytes = largest + 1 }));
+    }
+
+    [Fact]
+    public void A_connection_closed_by_a_limit_frees_its_receive_buffers()
+    {
+        const int payload = 200;
+        var limits = SessionLimits.Default with { MaxReceiveBufferBytes = 2 * (payload + SessionLimits.BufferedEntryOverheadBytes) };
+        var receiver = new ReliabilityLayer(Mtu, Start, limits);
+        var remote = new RemoteSender();
+        receiver.Receive(remote.Datagram(remote.Ordered(channel: 0, orderingIndex: 1, length: payload)), Start + 1);
+        receiver.Receive(remote.Datagram(remote.Part(id: 7, count: 2, index: 0, length: payload)), Start + 2);
+        Assert.Equal(limits.MaxReceiveBufferBytes, receiver.BufferedReceiveBytes);
+
+        receiver.Receive(remote.Datagram(remote.Ordered(channel: 1, orderingIndex: 1, length: 1)), Start + 3);
+
+        Assert.True(receiver.IsDead);
+        Assert.Equal(0, receiver.BufferedReceiveBytes);
+        Assert.Equal(0, receiver.IncompleteSplitMessages);
+    }
+
+    [Fact]
     public void A_split_part_over_the_receive_buffer_limit_closes_the_connection()
     {
         const int payload = 300;

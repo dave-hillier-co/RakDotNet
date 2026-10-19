@@ -174,7 +174,9 @@ internal sealed class SplitMessageAssembler
     // BuildPacketFromSplitPacketList, ReliabilityLayer.cpp:3195-3220: the bit lengths add up, and each part is copied
     // at the byte its predecessors' bits round up to. Parts from RakNet are whole bytes except the last, so the copies
     // tile the message; parts that are not would run past its end in the C++, and the buffer here is sized to hold them.
-    private static ReceivedMessage? Build(PartialMessage message)
+    // A part's bit length is at most eight times its bytes, so with MaxSplitMessageBytes capped at
+    // SessionLimits.LargestSplitMessageBytes both the bit length and the buffer fit an int.
+    private static ReceivedMessage Build(PartialMessage message)
     {
         var indexes = message.Parts.Keys.Order().ToList();
         long bitLength = 0;
@@ -185,9 +187,6 @@ internal sealed class SplitMessageAssembler
             bufferLength = Math.Max(bufferLength, ((bitLength + 7) >> 3) + part.Data.Length);
             bitLength += part.BitLength;
         }
-        if (bitLength > int.MaxValue || bufferLength > Array.MaxLength)
-            return null;
-
         var data = new byte[bufferLength];
         long offset = 0;
         foreach (var index in indexes)

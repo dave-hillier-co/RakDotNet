@@ -26,12 +26,18 @@ internal sealed record SessionLimits
     /// </summary>
     public const int MaxPendingNakRanges = 4_096;
 
+    /// <summary>The largest <see cref="MaxSplitMessageBytes"/>: a message's bit length is a BitSize_t, a uint32 (RakNetTypes.h:101).</summary>
+    public const int LargestSplitMessageBytes = int.MaxValue / 8;
+
     public static SessionLimits Default { get; } = new();
 
     /// <summary>The most parts a split message may declare.</summary>
     public int MaxSplitCount { get; init; } = 262_144;
 
-    /// <summary>The longest message split parts may add up to.</summary>
+    /// <summary>
+    /// The longest message split parts may add up to. At most <see cref="LargestSplitMessageBytes"/>, so that the
+    /// reassembled message's bit length fits an int.
+    /// </summary>
     public int MaxSplitMessageBytes { get; init; } = 128 * 1024 * 1024;
 
     /// <summary>The most split messages that may be incomplete at once.</summary>
@@ -49,11 +55,12 @@ internal sealed record SessionLimits
     /// </summary>
     public long MaxReceiveBufferBytes { get; init; } = 256L * 1024 * 1024;
 
-    /// <summary>Throws when a limit is below one.</summary>
+    /// <summary>Throws when a limit is below one, or <see cref="MaxSplitMessageBytes"/> is over <see cref="LargestSplitMessageBytes"/>.</summary>
     public SessionLimits Validated()
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSplitCount, nameof(MaxSplitCount));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxSplitMessageBytes, nameof(MaxSplitMessageBytes));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(MaxSplitMessageBytes, LargestSplitMessageBytes, nameof(MaxSplitMessageBytes));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxConcurrentSplits, nameof(MaxConcurrentSplits));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(SplitReassemblyTimeoutUs, nameof(SplitReassemblyTimeoutUs));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxOrderingBufferMessagesPerChannel, nameof(MaxOrderingBufferMessagesPerChannel));
