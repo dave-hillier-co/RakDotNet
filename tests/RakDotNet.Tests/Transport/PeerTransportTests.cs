@@ -110,7 +110,7 @@ public sealed class PeerTransportTests : IAsyncLifetime
 
     // Skips events of other types, as a scenario waiting for one packet would.
     private static async Task<T> NextAsync<T>(PeerTransport transport)
-        where T : PeerEvent
+        where T : Protocol.Peer.PeerEvent
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(Token);
         deadline.CancelAfter(Timeout);

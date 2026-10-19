@@ -9,7 +9,7 @@ A modern C# implementation of the RakNet protocol, wire-compatible with the orig
 | Scope | Full parity with RakNet 4.081: the core, the secure handshake and encryption (`LIBCAT_SECURITY`), and every feature enabled by default in `NativeFeatureIncludes.h` (listed under milestone 8). |
 | Wire protocol | Exact compatibility with C++ RakNet 4.081 (protocol version 6). Verified by interop tests, not by reading code. |
 | Semantics | Keep RakNet's concepts: 8 reliability types, 4 priorities, 32 ordering channels, sequenced messages sharing the channel's ordering index, send receipts, message IDs with user IDs from `ID_USER_PACKET_ENUM`, `ID_TIMESTAMP`, offline ping response. |
-| API shape | Modern .NET first. No 1:1 mirror of `RakPeerInterface`. A compatibility facade is optional and layered on top. |
+| API shape | Modern .NET first. No 1:1 mirror of `RakPeerInterface` in the core. A `RakPeerInterface`-shaped compatibility facade is provided as `RakDotNet.Compatibility` (layer 4), layered on the public API. |
 | Target framework | net10.0. No netstandard, no Mono/legacy Unity. |
 | Core design | Sans-IO: protocol and reliability logic take bytes and time as input and produce bytes, messages and events as output. No sockets or clocks inside. |
 | Testing | Classic TDD, sociable tests. Golden vectors captured from native RakNet. Cross-implementation interop matrix. |
@@ -25,14 +25,18 @@ Each layer depends only on the layers below it.
 | 0 | Wire | `BitStream` reader/writer, `UInt24`, offline magic, message IDs, per-message encode/decode, datagram header, encapsulated message, ACK/NAK range lists | none |
 | 1 | Session | Per-connection reliability state machine: ordering and sequencing, split and reassembly, ACK/NAK, sliding-window congestion control, RTO | none; time is an input |
 | 2 | Peer | Offline and connected handshakes, connected pings, MTU discovery, connection table, ban list and rate limits, timer wheel; routes `(endpoint, bytes)` and produces the ordered event stream | none; time is an input |
-| 3 | Transport + API | `Socket` loops, `TimeProvider`, `Channel<T>`, `RakPeer`, `RakConnection`, `ConnectAsync`, ordered per-peer event stream, options, statistics | yes |
-| 4 | Plugins and utilities | Every RakNet plugin and utility, built on the public API; optional compatibility facade | via layer 3 |
+| 3 | Transport + API | `Socket` loops, `TimeProvider`, `RakPeer`, `RakConnection`, `ConnectAsync`, ordered per-peer event stream, options, statistics, security configuration | yes |
+| 4 | Plugins and utilities | Every RakNet plugin and utility, the compatibility facade, per-connection demultiplexing and test support, all built on the public API | via layer 3 |
 
 Projects:
 
-- `RakDotNet.Protocol`: layers 0 to 2, no dependencies. Layer boundaries are namespaces with `internal` visibility; split into assemblies only when needed.
-- `RakDotNet`: layer 3.
+- `RakDotNet.Protocol`: layers 0 to 2, no dependencies. Layer 0 (Wire) is public. Layers 1 and 2 are namespaces with `internal` visibility; layer 2 stays internal so the public API is the only surface ([api-design.md](api-design.md), decision 11.2).
+- `RakDotNet`: layer 3, the public API, with `RakDotNet.Security` for key and connect-security types. Designed in [api-design.md](api-design.md).
+- `RakDotNet.Connections`: layer 4, `ConnectionDemultiplexer`.
+- `RakDotNet.Testing`: layer 4, `InMemoryNetwork` for sociable multi-peer tests.
+- `RakDotNet.Compatibility`: layer 4, the `RakPeerInterface`-shaped facade. Nothing else depends on it.
 - A test project per library, plus `RakDotNet.Interop.Tests`.
+- `samples/`: console projects showing the public API in use.
 - `tools/interop-peer`: native C++ test peer.
 
 ### Ordered event stream
@@ -105,14 +109,13 @@ Each milestone has an exit criterion that is a passing test. Milestones build a 
 1. **Harness.** Native `interop-peer`, C# driver, recording and fault-injecting proxy, scenario matrix. Exit: native-native scenarios pass through the proxy, and golden vectors are captured.
 2. **Wire layer.** `UInt24`, `BitStream`, message IDs, offline and connected control messages, datagram header, encapsulated message, ACK ranges. Exit: every golden vector decodes and re-encodes byte-for-byte, and decoded fields match the captured peers' values.
 3. **Thin end-to-end path.** Offline handshake at a fixed MTU, connected handshake, reliable ordered delivery on one channel without loss, ACKs, disconnect. Minimal Session and Peer layers, a thin internal transport, and `RakDotNetPeerDriver`. Built serially with classic TDD. Exit: unconnected ping and connect/send/disconnect scenarios pass in all four matrix combinations.
-4. **Deepening.** Independent items, each extending the working core and turning on its scenarios in all four combinations through the lossy proxy:
-   - Loss: resends, NAKs, RTO and sliding-window congestion control (including sending ACKs immediately while RTT is unknown).
-   - Split messages and reassembly.
-   - Sequenced delivery, all 32 channels, priorities, send receipts.
-   - Hardening limits and timeouts from the list above.
-   - MTU discovery and rejection replies.
-   - Connected pings, `ID_TIMESTAMP` and clock differential, timeout detection.
-5. **Public API.** Designed alongside milestones 3 and 4 (several independent proposals judged against the Brutal.RakNet surface and the ordered event stream), implemented once the core is stable. The design also settles whether a `RakPeerInterface`-shaped compatibility facade is provided and whether layer 2 (Peer) is public. `RakDotNetPeerDriver` moves onto the public API. Exit: every non-security scenario in the table passes against the public API.
+4. **Deepening.** Three tracks run in parallel, each extending the working core and turning on scenarios in all four combinations through the lossy proxy:
+   - **Session track**, serial in one branch because every item changes `ReliabilityLayer`: resends, NAKs, RTO and sliding-window congestion control (including sending ACKs immediately while RTT is unknown); then split messages and reassembly; then the hardening limits from the list above, choosing the `PeerLimits` values and bounding the receive ordering buffers.
+   - **Peer track**: MTU discovery and rejection replies; connected pings, `ID_TIMESTAMP` and clock differential, timeout detection; ban list, `AdvertiseSystem`, connection limits and cross-connection.
+   - **Scenarios track**: the remaining sample-derived scenarios in the harness, passing native-native first, each turned on for RakDotNet when its feature lands.
+
+   Sequenced delivery, all 32 channels, priorities and send receipts are built in the core; their scenarios are turned on with the others. Exit: every non-security scenario in the table passes in all four matrix combinations through the lossy proxy.
+5. **Public API.** The public API is designed as compiling code: [api-design.md](api-design.md) holds the rules, mappings and decisions, and the source and its XML comments hold the members. Implementation runs in parallel with milestone 4, on the stable core interfaces: `RakPeer` and the event stream, test-first against the stubs; then `RakDotNetPeerDriver` moves onto the public API, the internal transport is retired and command batching is added; then the compatibility facade, `ConnectionDemultiplexer` and `InMemoryNetwork`. Exit: every non-security scenario in the table passes against the public API.
 6. **Performance.** BenchmarkDotNet suite and an allocation budget per datagram on the hot path, compared with RakNet's LoopbackPerformanceTest. Exit: benchmarks run in CI and the allocation budget is enforced by a test.
 7. **Security.** RakNet's secure connection: cookie and public key in the offline handshake, challenge and answer, client identity keys, the security exception list, and authenticated encryption of every datagram. Port the parts of `DependentExtensions/cat` that RakNet uses (EasyHandshake, Tunnel key agreement, AuthenticatedEncryption and the primitives beneath them) so output is bit-exact. `interop-peer` gains a build with `LIBCAT_SECURITY=1`. Primitive tests use known-answer vectors computed by the native `cat` code; handshakes are randomised, so interop is checked by scenarios. Exit: `SecurityFunctionsTest`-derived and Encryption scenarios pass in all four matrix combinations.
 8. **Plugins and utilities.** Each is ported on the public API, and `interop-peer` gains commands to drive the native counterpart. Exit for each: its sample-derived scenarios pass in all four matrix combinations. Order follows dependencies:
