@@ -34,3 +34,10 @@ internal sealed record ReceiptLost(uint Receipt) : SessionEvent;
 /// (ReliabilityLayer.cpp:1799-1808), or it was killed. Raised once; nothing is sent afterwards.
 /// </summary>
 internal sealed record ConnectionDied : SessionEvent;
+
+/// <summary>
+/// An UNRELIABLE_WITH_ACK_RECEIPT message was discarded unsent because it waited in the send queue longer than the
+/// unreliable timeout (ReliabilityLayer.cpp:1745-1793). RakNet reports nothing for it; this event lets the peer
+/// complete the receipt without inventing an ID_SND_RECEIPT_LOSS RakNet would not send.
+/// </summary>
+internal sealed record ReceiptDiscarded(uint Receipt) : SessionEvent;

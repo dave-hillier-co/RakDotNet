@@ -719,7 +719,7 @@ internal sealed class PeerCore
             return null;
         // The C++ asserts the MTU is at most MAXIMUM_MTU_SIZE (RakPeer.cpp:3644); larger values are clamped here.
         var mtu = Math.Clamp(incomingMtu, DefaultMtu, RakNetConstants.MaximumMtuSize);
-        var session = new ReliabilityLayer(mtu, nowUs) { TimeoutMs = _options.TimeoutMs };
+        var session = new ReliabilityLayer(mtu, nowUs) { TimeoutMs = _options.TimeoutMs, UnreliableTimeoutMs = ReliabilityLayer.RakPeerUnreliableTimeoutMs };
         var system = new RemoteSystem(index, address, guid, session, mode, nowUs / 1000);
         _slots[index] = system;
         _active.Add(system);

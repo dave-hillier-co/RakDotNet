@@ -16,13 +16,21 @@ namespace RakDotNet.Protocol.Session;
 /// <para>
 /// Inputs: <see cref="Send(ReadOnlySpan{byte}, int, Reliability, Priority, byte, uint, long)"/> queues a message,
 /// <see cref="Receive"/> handles one datagram from the remote system (HandleSocketReceiveFromConnectedPlayer), and
-/// <see cref="Update"/> runs one tick: it sends due acknowledgements, then packs queued messages into datagrams as the
-/// window allows. Outputs: <see cref="TryDequeueDatagram"/> and <see cref="TryDequeueEvent"/>.
+/// <see cref="Update"/> runs one tick: it discards unreliable messages past the unreliable timeout, sends due
+/// acknowledgements and NAKs, resends reliable messages whose retransmission time has come, then packs queued messages
+/// into datagrams as the congestion window and the bandwidth limit allow. Outputs: <see cref="TryDequeueDatagram"/>
+/// and <see cref="TryDequeueEvent"/>.
 /// </para>
 /// <para>
-/// Resends, NAKs, split messages and the unreliable send timeout are not implemented yet. The places they attach are
-/// marked: sent reliable messages already sit in the resend list with their next action time, received datagram gaps
-/// are reported by <see cref="SlidingWindow.OnGotPacket"/>, and split headers are decoded by the wire layer.
+/// Loss recovery follows the C++ exactly. Every sent reliable message joins the tail of the resend list with a next
+/// action time one RTO ahead (<see cref="SlidingWindow.GetRtoForRetransmission"/>). Each update resends from the head
+/// while the head is due, putting each resent message back at the tail with a fresh RTO. A NAK makes the messages of
+/// the NAKed datagrams due at once, but they still wait for their turn at the head. A receiver NAKs every datagram
+/// number it skipped (<see cref="SlidingWindow.OnGotPacket"/>). Resends and NAKs feed the sliding window's backoff.
+/// </para>
+/// <para>
+/// Split messages are not implemented yet; <see cref="Send(ReadOnlySpan{byte}, int, Reliability, Priority, byte, uint, long)"/>
+/// refuses messages that would need splitting and split fragments that arrive are dropped.
 /// </para>
 /// </remarks>
 internal sealed class ReliabilityLayer
@@ -30,21 +38,34 @@ internal sealed class ReliabilityLayer
     /// <summary>defaultTimeoutTime of a release build, RakPeer.cpp:247-250.</summary>
     public const long DefaultTimeoutMs = 10_000;
 
+    /// <summary>RakPeer's unreliableTimeout (RakPeer.cpp:238), which it gives every connection (RakPeer.cpp:3647).</summary>
+    public const long RakPeerUnreliableTimeoutMs = 1_000;
+
     /// <summary>RESEND_BUFFER_ARRAY_LENGTH, RakNetDefines.h:105.</summary>
     private const int ResendBufferLength = 512;
 
     private const int ChannelCount = OrderingChannels.ChannelCount;
+    private const int PriorityCount = 4;
+    private const int MetricCount = 7;
+
+    // ReliabilityLayer.cpp:1741-1742.
+    private const long MaxTimeSinceLastTickUs = 100_000;
+
+    // ReliabilityLayer.cpp:1844-1850.
+    private const long BpsClearIntervalUs = 100_000;
 
     // AllocateFromInternalPacketPool sets reliableMessageNumber to (uint32_t)-1 (ReliabilityLayer.cpp:3678).
     private static readonly UInt24 UnassignedMessageNumber = UInt24.MaxValue;
 
     private readonly int _mtu;
+    private readonly long _connectionStartTimeUs;
     private readonly SlidingWindow _window;
 
     // Sending.
     private readonly UInt24[] _orderedWriteIndex = new UInt24[ChannelCount];
     private readonly UInt24[] _sequencedWriteIndex = new UInt24[ChannelCount];
     private readonly SendQueue<OutgoingMessage> _outgoing = new();
+    private readonly LinkedList<OutgoingMessage> _unreliable = new();
     private readonly OutgoingMessage?[] _resendBuffer = new OutgoingMessage?[ResendBufferLength];
     private readonly LinkedList<OutgoingMessage> _resendList = new();
     private readonly DatagramHistory _datagramHistory = new();
@@ -53,13 +74,33 @@ internal sealed class ReliabilityLayer
     private int _unacknowledgedBytes;
     private bool _bandwidthExceeded;
     private long _lastUpdateUs;
+    private long _unreliableTimeoutUs;
+    private long _timeToNextUnreliableCullUs;
+
+    // The datagrams being filled this update: packetsToSendThisUpdate, packetsToSendThisUpdateDatagramBoundaries,
+    // datagramSizeSoFar and allDatagramSizesSoFar (ReliabilityLayer.cpp:3452-3506).
+    private readonly List<OutgoingMessage> _packetsThisUpdate = [];
+    private readonly List<int> _datagramBoundaries = [];
+    private int _datagramBits;
+    private int _allDatagramBits;
 
     // Receiving.
-    private readonly List<UInt24> _acknowledgements = [];
+    private readonly RangeList _acknowledgements = new();
+    private readonly RangeList _naks = new();
     private readonly ReceivedMessageNumbers _receivedMessageNumbers = new();
     private readonly OrderingChannels _orderingChannels = new();
     private readonly List<EncapsulatedMessage> _released = [];
     private long _timeLastDatagramArrivedMs;
+
+    // Statistics.
+    private readonly BpsTracker[] _metrics = new BpsTracker[MetricCount];
+    private readonly uint[] _messagesInSendBuffer = new uint[PriorityCount];
+    private readonly double[] _bytesInSendBuffer = new double[PriorityCount];
+    private ulong _bytesInResendBuffer;
+    private long _lastBpsClearUs;
+    private bool _isLimitedByCongestionControl;
+    private bool _isLimitedByOutgoingBandwidthLimit;
+    private ulong _bpsLimitByOutgoingBandwidthLimit;
 
     // Outputs.
     private readonly Queue<byte[]> _datagrams = new();
@@ -74,12 +115,29 @@ internal sealed class ReliabilityLayer
         ArgumentOutOfRangeException.ThrowIfGreaterThan(mtu, DatagramLimits.MaximumMtuSize);
         _mtu = mtu;
         _window = new SlidingWindow(mtu - DatagramLimits.UdpHeaderBytes);
+        _connectionStartTimeUs = nowUs;
         _lastUpdateUs = nowUs;
         _timeLastDatagramArrivedMs = nowUs / 1000;
+        for (var i = 0; i < MetricCount; i++)
+            _metrics[i] = new BpsTracker();
     }
 
     /// <summary>SetTimeoutTime: how long reliable messages may go unacknowledged with nothing heard.</summary>
     public long TimeoutMs { get; set; } = DefaultTimeoutMs;
+
+    /// <summary>
+    /// SetUnreliableTimeout (ReliabilityLayer.cpp:2383-2390): unreliable messages still queued this long after they
+    /// were sent are discarded. 0, the layer's own default (ReliabilityLayer.cpp:404), keeps them until sent.
+    /// </summary>
+    public long UnreliableTimeoutMs
+    {
+        get => _unreliableTimeoutUs / 1000;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _unreliableTimeoutUs = value * 1000;
+        }
+    }
 
     public int Mtu => _mtu;
 
@@ -127,13 +185,15 @@ internal sealed class ReliabilityLayer
 
         if (bitLength <= 0)
             return false;
-        var byteLength = (bitLength + 7) / 8;
+        var byteLength = BitsToBytes(bitLength);
         ArgumentOutOfRangeException.ThrowIfLessThan(data.Length, byteLength, nameof(data));
 
         // ReliabilityLayer.cpp:1604-1606.
-        var maxDataSizeBytes = MaxPayloadBits / 8 - (EncapsulatedMessage.MaxHeaderLengthBits + 7) / 8;
+        var maxDataSizeBytes = MaxPayloadBits / 8 - BitsToBytes(EncapsulatedMessage.MaxHeaderLengthBits);
         if (byteLength > maxDataSizeBytes)
             return false; // Needs SplitPacket (ReliabilityLayer.cpp:1659-1669), not implemented yet.
+
+        _metrics[(int)SessionMetric.UserMessageBytesPushed].Push(nowUs, (ulong)byteLength);
 
         var message = new OutgoingMessage(data[..byteLength].ToArray(), bitLength, reliability, priority, receipt, nowUs);
         if (reliability.IsSequenced())
@@ -149,7 +209,13 @@ internal sealed class ReliabilityLayer
             _sequencedWriteIndex[channel] = default;
         }
 
+        // AddToUnreliableLinkedList, ReliabilityLayer.cpp:3715-3736.
+        if (message.IsUnreliable)
+            message.UnreliableNode = _unreliable.AddLast(message);
+
         _outgoing.Enqueue(message, priority);
+        _messagesInSendBuffer[(int)priority]++;
+        _bytesInSendBuffer[(int)priority] += byteLength;
         return true;
     }
 
@@ -159,6 +225,8 @@ internal sealed class ReliabilityLayer
     /// </summary>
     public bool Receive(ReadOnlySpan<byte> datagram, long nowUs)
     {
+        _metrics[(int)SessionMetric.ActualBytesReceived].Push(nowUs, (ulong)datagram.Length);
+
         // A length of 1 or 2 is a connection request resend that is ignored (ReliabilityLayer.cpp:653).
         if (datagram.Length <= 2)
             return true;
@@ -175,8 +243,10 @@ internal sealed class ReliabilityLayer
             case DatagramKind.Ack:
                 return AckRangeList.TryRead(ref reader, out var acks) && ReceiveAcks(acks, nowUs);
             case DatagramKind.Nak:
-                // Resends on NAK are not implemented yet; the list is still validated (ReliabilityLayer.cpp:811-817).
-                return AckRangeList.TryRead(ref reader, out _);
+                if (!AckRangeList.TryRead(ref reader, out var naks))
+                    return false; // ReliabilityLayer.cpp:811-817.
+                ReceiveNaks(naks, nowUs);
+                return true;
             default:
                 ReceiveData(header, bytes.AsMemory(reader.BitPosition >> 3), nowUs);
                 return true;
@@ -184,11 +254,17 @@ internal sealed class ReliabilityLayer
     }
 
     /// <summary>
-    /// One tick of ReliabilityLayer::Update (ReliabilityLayer.cpp:1687-2242): kill the connection on an ack timeout,
-    /// send due acknowledgements, report lost unreliable receipts, then fill datagrams with queued messages while the
-    /// window allows.
+    /// One tick of ReliabilityLayer::Update (ReliabilityLayer.cpp:1687-2242): discard stale unreliable messages, kill
+    /// the connection on an ack timeout, send due acknowledgements and NAKs, report lost unreliable receipts, then
+    /// resend due reliable messages and fill datagrams with queued messages while the window allows.
     /// </summary>
-    public void Update(long nowUs)
+    /// <param name="nowUs">The current time.</param>
+    /// <param name="bitsPerSecondLimit">
+    /// RakPeer's maxOutgoingBPS (SetPerConnectionOutgoingBandwidthLimit, RakPeer.cpp:2961-2964): new user data stops
+    /// for the tick once more than this many bits' worth was sent in the last second. 0 is unlimited. Resends and
+    /// acknowledgements are not limited.
+    /// </param>
+    public void Update(long nowUs, uint bitsPerSecondLimit = 0)
     {
         if (IsDead)
             return;
@@ -199,9 +275,10 @@ internal sealed class ReliabilityLayer
             _lastUpdateUs = nowUs;
             return;
         }
-        // The unreliable send timeout (ReliabilityLayer.cpp:1745-1793), driven by the time since the last tick capped at
-        // 100 ms, is not implemented yet.
+        var timeSinceLastTickUs = Math.Min(nowUs - _lastUpdateUs, MaxTimeSinceLastTickUs);
         _lastUpdateUs = nowUs;
+
+        CullStaleUnreliableMessages(nowUs, timeSinceLastTickUs);
 
         if (MessagesInResendBuffer != 0 && AckTimeout(nowUs / 1000))
         {
@@ -210,17 +287,30 @@ internal sealed class ReliabilityLayer
         }
 
         if (_window.ShouldSendAcks(nowUs))
-            SendAcks();
+            SendAcks(nowUs);
+
+        if (_naks.Count > 0)
+            SendNak(nowUs);
 
         var needsBAndAs = _window.IsInSlowStart;
         var isContinuousSend = _bandwidthExceeded;
         _bandwidthExceeded = _outgoing.Count > 0;
         var hasDataToSendOrResend = _resendList.Count > 0 || _bandwidthExceeded;
 
+        _bpsLimitByOutgoingBandwidthLimit = BitsToBytes(bitsPerSecondLimit);
+
+        // ReliabilityLayer.cpp:1844-1858.
+        if (nowUs > _lastBpsClearUs + BpsClearIntervalUs)
+        {
+            foreach (var metric in _metrics)
+                metric.ClearExpired(nowUs);
+            _lastBpsClearUs = nowUs;
+        }
+
         ReportLostUnreliableReceipts(nowUs);
 
         if (hasDataToSendOrResend)
-            SendQueuedMessages(nowUs, needsBAndAs, isContinuousSend);
+            SendQueuedMessages(nowUs, bitsPerSecondLimit, needsBAndAs, isContinuousSend);
     }
 
     public bool TryDequeueDatagram([NotNullWhen(true)] out byte[]? datagram) => _datagrams.TryDequeue(out datagram);
@@ -235,6 +325,51 @@ internal sealed class ReliabilityLayer
     /// <summary>KillConnection: the connection is dead from now on.</summary>
     public void Kill() => Die();
 
+    /// <summary>GetStatistics (ReliabilityLayer.cpp:3378-3415).</summary>
+    public SessionStatistics GetStatistics(long nowUs)
+    {
+        _ = nowUs; // GetBPS1Threadsafe ignores the time (ReliabilityLayer.h:92).
+        var lastSecond = new ulong[MetricCount];
+        var total = new ulong[MetricCount];
+        for (var i = 0; i < MetricCount; i++)
+        {
+            lastSecond[i] = _metrics[i].LastSecond;
+            total[i] = _metrics[i].Total;
+        }
+
+        var sentLastSecond = lastSecond[(int)SessionMetric.UserMessageBytesSent];
+        var resentLastSecond = lastSecond[(int)SessionMetric.UserMessageBytesResent];
+        var lossLastSecond = sentLastSecond + resentLastSecond > 0
+            ? (float)(resentLastSecond / ((double)sentLastSecond + resentLastSecond))
+            : 0f;
+
+        // ReliabilityLayer.cpp:3398-3407, integer division and all: the total is nonzero only when nothing was resent,
+        // and then it is zero.
+        var lossTotal = 0f;
+        var sentTotal = total[(int)SessionMetric.UserMessageBytesSent];
+        var resentTotal = total[(int)SessionMetric.UserMessageBytesResent];
+        var denominator = sentTotal + resentTotal;
+        if (denominator != 0 && sentTotal / denominator > 0)
+            lossTotal = (float)(resentTotal / ((double)sentTotal + resentTotal));
+
+        return new SessionStatistics
+        {
+            ValueOverLastSecond = lastSecond,
+            RunningTotal = total,
+            ConnectionStartTimeUs = _connectionStartTimeUs,
+            IsLimitedByCongestionControl = _isLimitedByCongestionControl,
+            BpsLimitByCongestionControl = 0,
+            IsLimitedByOutgoingBandwidthLimit = _isLimitedByOutgoingBandwidthLimit,
+            BpsLimitByOutgoingBandwidthLimit = _bpsLimitByOutgoingBandwidthLimit,
+            MessagesInSendBuffer = [.. _messagesInSendBuffer],
+            BytesInSendBuffer = [.. _bytesInSendBuffer],
+            MessagesInResendBuffer = (uint)MessagesInResendBuffer,
+            BytesInResendBuffer = _bytesInResendBuffer,
+            PacketLossLastSecond = lossLastSecond,
+            PacketLossTotal = lossTotal,
+        };
+    }
+
     private void Die()
     {
         if (IsDead)
@@ -243,25 +378,57 @@ internal sealed class ReliabilityLayer
         _events.Enqueue(new ConnectionDied());
     }
 
+    // ReliabilityLayer.cpp:1745-1793. Messages are culled from the front of the unreliable list, which is in send
+    // order, stopping at the first that is young enough. A culled message stays queued with no data until the send
+    // loop pops it (ReliabilityLayer.cpp:2007-2016).
+    private void CullStaleUnreliableMessages(long nowUs, long timeSinceLastTickUs)
+    {
+        if (_unreliableTimeoutUs <= 0)
+            return;
+        if (timeSinceLastTickUs < _timeToNextUnreliableCullUs)
+        {
+            _timeToNextUnreliableCullUs -= timeSinceLastTickUs;
+            return;
+        }
+
+        while (_unreliable.First is { } node && nowUs > node.Value.CreationTimeUs + _unreliableTimeoutUs)
+        {
+            var message = node.Value;
+            _unreliable.RemoveFirst();
+            message.UnreliableNode = null;
+            message.IsDiscarded = true;
+            if (message.Reliability == Reliability.UnreliableWithAckReceipt)
+                _events.Enqueue(new ReceiptDiscarded(message.Receipt));
+        }
+        _timeToNextUnreliableCullUs = _unreliableTimeoutUs / 2;
+    }
+
     private void ReceiveData(DatagramHeader header, ReadOnlyMemory<byte> body, long nowUs)
     {
-        if (!_window.OnGotPacket(header.DatagramNumber, nowUs, out _))
+        if (!_window.OnGotPacket(header.DatagramNumber, nowUs, out var skippedMessageCount))
             return;
-        // The skipped count from OnGotPacket becomes NAKs (ReliabilityLayer.cpp:871-877) once resends exist.
+
+        // NAK every datagram number jumped over (ReliabilityLayer.cpp:871-877).
+        for (var offset = skippedMessageCount; offset > 0; offset--)
+            _naks.Insert(header.DatagramNumber - offset);
 
         // Every data datagram is acknowledged, reliable or not (ReliabilityLayer.cpp:880-886).
-        _acknowledgements.Add(header.DatagramNumber);
+        _acknowledgements.Insert(header.DatagramNumber);
 
         var messages = new EncapsulatedMessageReader(body);
         while (messages.TryReadNext(out var message))
-            ReceiveMessage(message);
+            ReceiveMessage(message, nowUs);
     }
 
     // The body of the parse loop, ReliabilityLayer.cpp:897-1494.
-    private void ReceiveMessage(EncapsulatedMessage message)
+    private void ReceiveMessage(EncapsulatedMessage message, long nowUs)
     {
         if (message.Reliability.IsReliable() && !_receivedMessageNumbers.TryAccept(message.ReliableMessageNumber))
+        {
+            // A duplicate, ReliabilityLayer.cpp:959-999.
+            _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
             return;
+        }
 
         if (message.Split is not null)
             return; // Reassembly (InsertIntoSplitPacketList, ReliabilityLayer.cpp:1221-1242) is not implemented yet.
@@ -269,7 +436,11 @@ internal sealed class ReliabilityLayer
         _released.Clear();
         _orderingChannels.Receive(message, _released);
         foreach (var released in _released)
+        {
+            // Counted as each message reaches the output queue (ReliabilityLayer.cpp:1346, 1412, 1481).
+            _metrics[(int)SessionMetric.UserMessageBytesReceivedProcessed].Push(nowUs, (ulong)BitsToBytes(released.PayloadBitLength));
             _events.Enqueue(new MessageDelivered(released.Payload, released.PayloadBitLength));
+        }
     }
 
     // The ACK branch of HandleSocketReceiveFromConnectedPlayer, ReliabilityLayer.cpp:696-806.
@@ -282,13 +453,38 @@ internal sealed class ReliabilityLayer
 
             // The C++ visits every number in the range; only numbers this layer could know about are visited here, in
             // the same ascending order, so a hostile range costs at most the history size.
-            foreach (var datagramNumber in KnownDatagramNumbersIn(range))
+            foreach (var datagramNumber in KnownDatagramNumbersIn(range, includeUnreliableReceipts: true))
                 AcknowledgeDatagram(datagramNumber, nowUs);
         }
         return true;
     }
 
-    private List<UInt24> KnownDatagramNumbersIn(AckRange range)
+    // The NAK branch of HandleSocketReceiveFromConnectedPlayer, ReliabilityLayer.cpp:807-857.
+    private void ReceiveNaks(AckRangeList naks, long nowUs)
+    {
+        foreach (var range in naks.Ranges)
+        {
+            // The C++ calls OnNAK once per number in the range (line 833). It only sets ssThresh from cwnd, which
+            // nothing in between changes, so once per range is the same.
+            _window.OnNak();
+
+            foreach (var datagramNumber in KnownDatagramNumbersIn(range, includeUnreliableReceipts: false))
+            {
+                if (!_datagramHistory.TryGet(datagramNumber, out _, out var messageNumbers))
+                    continue;
+                foreach (var messageNumber in messageNumbers)
+                {
+                    // Update timers so resends occur immediately (lines 843-851). The slot is not checked against the
+                    // message number, as in the C++.
+                    var message = _resendBuffer[(int)(messageNumber.Value % ResendBufferLength)];
+                    if (message is not null && message.NextActionTimeUs != 0)
+                        message.NextActionTimeUs = nowUs;
+                }
+            }
+        }
+    }
+
+    private List<UInt24> KnownDatagramNumbersIn(AckRange range, bool includeUnreliableReceipts)
     {
         var numbers = new List<UInt24>();
         for (var i = 0; i < _datagramHistory.Count; i++)
@@ -297,10 +493,13 @@ internal sealed class ReliabilityLayer
             if (range.Contains(number))
                 numbers.Add(number);
         }
-        foreach (var receipt in _unreliableReceipts)
+        if (includeUnreliableReceipts)
         {
-            if (range.Contains(receipt.DatagramNumber) && !numbers.Contains(receipt.DatagramNumber))
-                numbers.Add(receipt.DatagramNumber);
+            foreach (var receipt in _unreliableReceipts)
+            {
+                if (range.Contains(receipt.DatagramNumber) && !numbers.Contains(receipt.DatagramNumber))
+                    numbers.Add(receipt.DatagramNumber);
+            }
         }
         numbers.Sort((a, b) => a.Value.CompareTo(b.Value));
         return numbers;
@@ -343,32 +542,38 @@ internal sealed class ReliabilityLayer
             return;
 
         _resendBuffer[slot] = null;
-        _resendList.Remove(message.ResendNode!);
-        message.ResendNode = null;
-        _unacknowledgedBytes -= message.TotalBytes;
+        _bytesInResendBuffer -= (ulong)BitsToBytes(message.BitLength);
 
         if (message.Reliability >= Reliability.ReliableWithAckReceipt)
             _events.Enqueue(new ReceiptAcknowledged(message.Receipt));
+
+        // RemoveFromList(internalPacket, isReliable), ReliabilityLayer.cpp:3559-3579.
+        _resendList.Remove(message.ResendNode!);
+        message.ResendNode = null;
+        _unacknowledgedBytes -= message.UnacknowledgedBytes;
     }
 
     // SendACKs, ReliabilityLayer.cpp:3616-3656.
-    private void SendAcks()
+    private void SendAcks(long nowUs)
     {
-        if (_acknowledgements.Count == 0)
-            return;
-        var ranges = AckRangeList.FromNumbers(_acknowledgements);
-        _acknowledgements.Clear();
-        while (ranges.Ranges.Count > 0)
+        while (_acknowledgements.Count > 0)
         {
-            var buffer = new byte[_mtu];
-            var writer = new BitStreamWriter(buffer);
-            // Sliding window never sends B and AS (CCRakNetSlidingWindow.cpp:259-266).
+            var writer = new BitStreamWriter(new byte[_mtu]);
+            // Sliding window never sends B and AS (CCRakNetSlidingWindow.cpp:264-271).
             DatagramHeader.ForAck().Write(ref writer);
-            var written = ranges.Write(ref writer, MaxPayloadBits);
-            ranges = ranges.Skip(written);
-            _datagrams.Enqueue(writer.Written.ToArray());
+            _acknowledgements.Write(ref writer, MaxPayloadBits);
+            SendDatagram(writer.Written.ToArray(), nowUs);
             _window.OnSendAck();
         }
+    }
+
+    // One NAK datagram per update, ReliabilityLayer.cpp:1815-1825; what does not fit waits for the next.
+    private void SendNak(long nowUs)
+    {
+        var writer = new BitStreamWriter(new byte[_mtu]);
+        DatagramHeader.ForNak().Write(ref writer);
+        _naks.Write(ref writer, MaxPayloadBits);
+        SendDatagram(writer.Written.ToArray(), nowUs);
     }
 
     // ReliabilityLayer.cpp:1860-1881.
@@ -388,84 +593,217 @@ internal sealed class ReliabilityLayer
         }
     }
 
-    // The send half of Update, ReliabilityLayer.cpp:1883-2237, without resends.
-    private void SendQueuedMessages(long nowUs, bool needsBAndAs, bool isContinuousSend)
+    // The send half of Update, ReliabilityLayer.cpp:1883-2237.
+    private void SendQueuedMessages(long nowUs, uint bitsPerSecondLimit, bool needsBAndAs, bool isContinuousSend)
     {
+        ResetPacketsAndDatagrams();
+
         var transmissionBandwidth = _window.GetTransmissionBandwidth(_unacknowledgedBytes, isContinuousSend);
-        // Resends of messages whose next action time has passed go first here, limited by
-        // SlidingWindow.GetRetransmissionBandwidth (ReliabilityLayer.cpp:1894-1974); not implemented yet.
-
-        var datagrams = new List<List<OutgoingMessage>>();
-        var maxBits = MaxPayloadBits;
-        var allDatagramBits = 0;
-        while (!ResendBufferOverflow() && allDatagramBits / 8 < transmissionBandwidth)
+        var retransmissionBandwidth = SlidingWindow.GetRetransmissionBandwidth(_unacknowledgedBytes);
+        if (retransmissionBandwidth > 0 || transmissionBandwidth > 0)
         {
-            var datagram = new List<OutgoingMessage>();
-            var datagramBits = 0;
-            while (_outgoing.TryPeek(out var message))
+            _isLimitedByCongestionControl = false;
+            _allDatagramBits = 0;
+            // Keep filling datagrams until we exceed retransmission bandwidth (ReliabilityLayer.cpp:1902-1969).
+            while (BitsToBytes(_allDatagramBits) < retransmissionBandwidth)
             {
-                // The fit test uses exact bits, the running total whole bytes (ReliabilityLayer.cpp:2018-2020, 3464).
-                if (datagramBits + message.HeaderBits + message.BitLength > maxBits)
-                    break; // Hit the MTU.
-                var bits = message.TotalBytes * 8;
-
-                _outgoing.Dequeue();
-                var datagramNumber = _window.NextDatagramNumber + (uint)datagrams.Count;
-                if (message.Reliability.IsReliable())
-                {
-                    message.ReliableMessageNumber = _nextReliableMessageNumber++;
-                    message.NextActionTimeUs = _window.GetRtoForRetransmission() + nowUs;
-                    _resendBuffer[(int)(message.ReliableMessageNumber.Value % ResendBufferLength)] = message;
-                    message.ResendNode = _resendList.AddLast(message);
-                    _unacknowledgedBytes += message.TotalBytes;
-                }
-                else if (message.Reliability == Reliability.UnreliableWithAckReceipt)
-                {
-                    _unreliableReceipts.Add(new UnreliableReceipt(datagramNumber, message.Receipt, _window.GetRtoForRetransmission() + nowUs));
-                }
-
-                message.TimesSent++;
-                datagram.Add(message);
-                datagramBits += bits;
-                allDatagramBits += bits;
-                if (ResendBufferOverflow())
+                if (!PushDueResends(nowUs))
                     break;
             }
-
-            if (datagramBits == 0)
-                break;
-            datagrams.Add(datagram);
+        }
+        else
+        {
+            _isLimitedByCongestionControl = true;
         }
 
-        for (var i = 0; i < datagrams.Count; i++)
-            WriteDatagram(datagrams[i], nowUs, needsBAndAs, isContinuousSend || i > 0);
+        if (BitsToBytes(_allDatagramBits) < transmissionBandwidth)
+        {
+            _allDatagramBits = 0;
+            // Keep filling datagrams until we exceed transmission bandwidth (ReliabilityLayer.cpp:1976-2137). The
+            // packet-pair clause of the condition never holds: packet pairs are disabled (ReliabilityLayer.cpp:3495).
+            while (!ResendBufferOverflow() && BitsToBytes(_allDatagramBits) < transmissionBandwidth)
+            {
+                _isLimitedByOutgoingBandwidthLimit = bitsPerSecondLimit != 0
+                    && (ulong)BitsToBytes(bitsPerSecondLimit) < _metrics[(int)SessionMetric.UserMessageBytesSent].LastSecond;
+                if (!_isLimitedByOutgoingBandwidthLimit)
+                    PushNewMessages(nowUs);
+                if (_datagramBits == 0)
+                    break; // No datagrams pushed.
+                PushDatagram();
+            }
+        }
 
+        var datagramNumberCount = _datagramBoundaries.Count;
+        for (var i = 0; i < datagramNumberCount; i++)
+            WriteDatagram(i, nowUs, needsBAndAs, isContinuousSend || i > 0);
+
+        // Any data waiting to send after attempting to send means bandwidth is exceeded (ReliabilityLayer.cpp:2232).
         _bandwidthExceeded = _outgoing.Count > 0;
     }
 
-    // ReliabilityLayer.cpp:2140-2213.
-    private void WriteDatagram(List<OutgoingMessage> messages, long nowUs, bool needsBAndAs, bool isContinuousSend)
+    // One pass of the resend loop, ReliabilityLayer.cpp:1905-1968: fill one datagram from the head of the resend list
+    // while the head is due. Returns pushedAnything.
+    private bool PushDueResends(long nowUs)
+    {
+        var pushedAnything = false;
+        var maxBits = MaxPayloadBits;
+        while (_resendList.First is { } head)
+        {
+            var message = head.Value;
+            // "if ( time - internalPacket->nextActionTime < (((CCTimeType)-1)/2) )": due once the time reaches it.
+            if (nowUs < message.NextActionTimeUs)
+            {
+                PushDatagram(); // Filled one datagram.
+                break;
+            }
+            if (_datagramBits + message.HeaderBits + message.BitLength > maxBits)
+            {
+                PushDatagram();
+                break;
+            }
+
+            // PopListHead(false): the bytes stay unacknowledged.
+            _resendList.RemoveFirst();
+            _metrics[(int)SessionMetric.UserMessageBytesResent].Push(nowUs, (ulong)BitsToBytes(message.BitLength));
+            PushPacket(message);
+            message.TimesSent++;
+            _window.OnResend();
+            message.NextActionTimeUs = _window.GetRtoForRetransmission() + nowUs;
+            pushedAnything = true;
+
+            // InsertPacketIntoResendList(internalPacket, time, false, false): back at the tail.
+            _resendList.AddLast(head);
+        }
+        return pushedAnything;
+    }
+
+    // The inner loop of the new-data phase, ReliabilityLayer.cpp:1998-2124: fill one datagram from the send queue.
+    private void PushNewMessages(long nowUs)
+    {
+        var maxBits = MaxPayloadBits;
+        while (_outgoing.TryPeek(out var message))
+        {
+            if (message.IsDiscarded)
+            {
+                // Culled by the unreliable timeout (ReliabilityLayer.cpp:2007-2016).
+                _outgoing.Dequeue();
+                LeaveSendBuffer(message);
+                continue;
+            }
+
+            // The fit test uses exact bits, the running total whole bytes (ReliabilityLayer.cpp:2018-2020, 3464).
+            if (_datagramBits + message.HeaderBits + message.BitLength > maxBits)
+                break; // Hit the MTU.
+
+            _outgoing.Dequeue();
+            LeaveSendBuffer(message);
+            if (message.Reliability.IsReliable())
+            {
+                message.ReliableMessageNumber = _nextReliableMessageNumber;
+                message.NextActionTimeUs = _window.GetRtoForRetransmission() + nowUs;
+                _resendBuffer[(int)(message.ReliableMessageNumber.Value % ResendBufferLength)] = message;
+                _bytesInResendBuffer += (ulong)BitsToBytes(message.BitLength);
+                // InsertPacketIntoResendList(internalPacket, time, true, isReliable).
+                message.ResendNode = _resendList.AddLast(message);
+                _unacknowledgedBytes += message.UnacknowledgedBytes;
+                _nextReliableMessageNumber++;
+            }
+            else
+            {
+                if (message.Reliability == Reliability.UnreliableWithAckReceipt)
+                {
+                    var datagramNumber = _window.NextDatagramNumber + (uint)_datagramBoundaries.Count;
+                    var deadline = _window.GetRtoForRetransmission() + nowUs;
+                    _unreliableReceipts.Add(new UnreliableReceipt(datagramNumber, message.Receipt, deadline));
+                }
+                // ClearPacketsAndDatagrams removes sent unreliable messages from the unreliable list (line 3527).
+                if (message.UnreliableNode is { } node)
+                {
+                    _unreliable.Remove(node);
+                    message.UnreliableNode = null;
+                }
+            }
+
+            _metrics[(int)SessionMetric.UserMessageBytesSent].Push(nowUs, (ulong)BitsToBytes(message.BitLength));
+            PushPacket(message);
+            message.TimesSent++;
+
+            if (ResendBufferOverflow())
+                break;
+        }
+    }
+
+    private void LeaveSendBuffer(OutgoingMessage message)
+    {
+        _messagesInSendBuffer[(int)message.Priority]--;
+        _bytesInSendBuffer[(int)message.Priority] -= BitsToBytes(message.BitLength);
+    }
+
+    // ResetPacketsAndDatagrams, ReliabilityLayer.cpp:3452-3460.
+    private void ResetPacketsAndDatagrams()
+    {
+        _packetsThisUpdate.Clear();
+        _datagramBoundaries.Clear();
+        _datagramBits = 0;
+    }
+
+    // PushPacket, ReliabilityLayer.cpp:3462-3483.
+    private void PushPacket(OutgoingMessage message)
+    {
+        var bits = message.PushedBytes * 8;
+        _datagramBits += bits;
+        _allDatagramBits += bits;
+        _packetsThisUpdate.Add(message);
+    }
+
+    // PushDatagram, ReliabilityLayer.cpp:3485-3506.
+    private void PushDatagram()
+    {
+        if (_datagramBits > 0)
+        {
+            _datagramBoundaries.Add(_packetsThisUpdate.Count);
+            _datagramBits = 0;
+        }
+    }
+
+    // ReliabilityLayer.cpp:2140-2227.
+    private void WriteDatagram(int index, long nowUs, bool needsBAndAs, bool isContinuousSend)
     {
         var datagramNumber = _window.TakeNextDatagramNumber();
-        var buffer = new byte[_mtu];
-        var writer = new BitStreamWriter(buffer);
+        var writer = new BitStreamWriter(new byte[_mtu]);
         DatagramHeader.ForData(datagramNumber, isPacketPair: false, isContinuousSend, needsBAndAs).Write(ref writer);
 
+        var first = index == 0 ? 0 : _datagramBoundaries[index - 1];
+        var end = _datagramBoundaries[index];
         var messageNumbers = new List<UInt24>();
-        foreach (var message in messages)
+        for (var i = first; i < end; i++)
         {
+            var message = _packetsThisUpdate[i];
+            // Reliable or needs a receipt (line 2174): UNRELIABLE_WITH_ACK_RECEIPT records its unassigned number.
             if (message.Reliability is not (Reliability.Unreliable or Reliability.UnreliableSequenced))
                 messageNumbers.Add(message.ReliableMessageNumber);
             message.ToEncapsulated().Write(ref writer);
         }
 
         _datagramHistory.Add(nowUs, messageNumbers);
-        _datagrams.Enqueue(writer.Written.ToArray());
+        SendDatagram(writer.Written.ToArray(), nowUs);
+    }
+
+    // SendBitStream, ReliabilityLayer.cpp:2247-2340.
+    private void SendDatagram(byte[] datagram, long nowUs)
+    {
+        _metrics[(int)SessionMetric.ActualBytesSent].Push(nowUs, (ulong)datagram.Length);
+        _datagrams.Enqueue(datagram);
     }
 
     // ResendBufferOverflow, ReliabilityLayer.cpp:3758-3765.
     private bool ResendBufferOverflow() =>
         _resendBuffer[(int)(_nextReliableMessageNumber.Value % ResendBufferLength)] is not null;
+
+    // BITS_TO_BYTES, RakNetDefines.h.
+    private static int BitsToBytes(int bits) => (bits + 7) >> 3;
+
+    private static uint BitsToBytes(uint bits) => (uint)(((ulong)bits + 7) >> 3);
 
     private readonly record struct UnreliableReceipt(UInt24 DatagramNumber, uint Receipt, long DeadlineUs);
 
@@ -498,11 +836,23 @@ internal sealed class ReliabilityLayer
 
         public LinkedListNode<OutgoingMessage>? ResendNode { get; set; }
 
+        public LinkedListNode<OutgoingMessage>? UnreliableNode { get; set; }
+
+        /// <summary>Culled by the unreliable timeout: the C++ frees its data and sets it to 0 (line 1764-1765).</summary>
+        public bool IsDiscarded { get; set; }
+
+        /// <summary>The types kept on the unreliable list (AddToUnreliableLinkedList, ReliabilityLayer.cpp:3717-3722).</summary>
+        public bool IsUnreliable =>
+            Reliability is Reliability.Unreliable or Reliability.UnreliableSequenced or Reliability.UnreliableWithAckReceipt;
+
         /// <summary>GetMessageHeaderLengthBits (ReliabilityLayer.cpp:2555-2605).</summary>
         public int HeaderBits => EncapsulatedMessage.GetHeaderLengthBits(Reliability, isSplit: false);
 
         /// <summary>Header plus data, each rounded up to whole bytes (PushPacket, ReliabilityLayer.cpp:3464).</summary>
-        public int TotalBytes => (BitLength + 7) / 8 + (HeaderBits + 7) / 8;
+        public int PushedBytes => BitsToBytes(BitLength) + BitsToBytes(HeaderBits);
+
+        /// <summary>Header and data rounded up together (AddToListTail and RemoveFromList, ReliabilityLayer.cpp:3573, 3585).</summary>
+        public int UnacknowledgedBytes => BitsToBytes(HeaderBits + BitLength);
 
         public EncapsulatedMessage ToEncapsulated() =>
             new(

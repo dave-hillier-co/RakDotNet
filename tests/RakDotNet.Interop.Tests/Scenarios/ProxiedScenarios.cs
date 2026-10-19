@@ -39,7 +39,6 @@ public sealed class ProxiedScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Reliable_ordered_messages_arrive_complete_and_in_order_per_channel_under_loss_and_reordering(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.Loss);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var faults = new FaultOptions(Seed: 20261018, LossProbability: 0.2, Delay: TimeSpan.Zero, Jitter: TimeSpan.FromMilliseconds(30));
 
