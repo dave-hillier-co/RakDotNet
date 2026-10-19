@@ -160,7 +160,7 @@ public sealed class RakConnection
     internal RemoteSystem? System { get; set; }
 
     /// <summary>Copies what the core's slot holds. Called by the I/O cycle.</summary>
-    internal void Refresh(RemoteSystem system, ConnectionState state, long nowUs)
+    internal void Refresh(RemoteSystem system, ConnectionState state)
     {
         if (State != ConnectionState.Disconnected)
             _state = (int)state;
