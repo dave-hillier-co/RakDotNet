@@ -55,7 +55,8 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private readonly IDatagramTransport[] _transports;
     private readonly RakSocket[] _sockets;
     private readonly IPAddress[] _localAddresses;
-    private readonly SystemAddress[] _internalAddresses;
+    private readonly IPEndPoint[] _coreInternalAddresses;
+    private volatile SystemAddress[] _internalAddresses;
     private readonly ConcurrentQueue<PeerCommand> _commands = new();
     private readonly ConcurrentQueue<DispatchOp> _dispatchOps = new();
     private readonly EventPool _pool = new();
@@ -65,6 +66,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private readonly RakPeerLowLevel _lowLevel;
     private readonly int _eventCapacity;
     private readonly Lock _attemptsGate = new();
+    private readonly Lock _internalAddressesGate = new();
     private readonly Dictionary<SystemAddress, PendingConnect> _attempts = [];
     private readonly Lock _pingsGate = new();
     private readonly List<PendingPing> _pings = [];
@@ -83,7 +85,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private volatile SystemAddressBox _externalAddress = new(SystemAddress.Unassigned);
 
     private RakPeer(RakPeerOptions options, RakNetGuid guid, IDatagramTransport[] transports, IPAddress[] localAddresses,
-                    IReadOnlyList<IPEndPoint> internalAddresses, PeerCore core, int eventCapacity)
+                    IPEndPoint[] internalAddresses, PeerCore core, int eventCapacity)
     {
         _options = options;
         _time = options.TimeProvider;
@@ -93,6 +95,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         _sockets = [.. transports.Select((t, i) => new RakSocket(i, t))];
         _localAddresses = localAddresses;
         _core = core;
+        _coreInternalAddresses = internalAddresses;
         _internalAddresses = [.. internalAddresses.Select(a => (SystemAddress)a)];
         _eventCapacity = eventCapacity;
         _offlinePingResponse = options.OfflinePingResponse.ToArray();
@@ -100,6 +103,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         _reader = new PeerEventReader(this);
         _plugins = new PluginCollection(this);
         _lowLevel = new RakPeerLowLevel(this, options.NetworkSimulator);
+        _simulator.Configure(options.NetworkSimulator);
     }
 
     /// <summary>Binds every <see cref="RakPeerOptions.Bindings"/> entry, attaches the option plugins and starts the I/O cycle.</summary>
@@ -115,7 +119,9 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         {
             var guid = options.RakNetGuid ?? DrawGuid(options.Random);
             var localAddresses = HostAddresses();
-            var internalAddresses = LocalAddressList.Build(localAddresses, transports[0].LocalAddress.Port);
+            // The core reads ipList whenever it builds a handshake message, so SetInternalAddress changes this array in
+            // the I/O cycle.
+            var internalAddresses = LocalAddressList.Build(localAddresses, transports[0].LocalAddress.Port).ToArray();
             var core = new PeerCore(new PeerOptions
             {
                 Guid = guid.Value,
@@ -238,8 +244,23 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// <summary>GetInternalID(UNASSIGNED_SYSTEM_ADDRESS, i)</summary>
     public IReadOnlyList<SystemAddress> InternalAddresses => _internalAddresses;
 
-    /// <summary>SetInternalID</summary>
-    public void SetInternalAddress(SystemAddress address, int index = 0) => throw new NotImplementedException();
+    /// <summary>
+    /// SetInternalID: replaces ipList[<paramref name="index"/>] (RakPeer.cpp:2336-2340), the list later handshakes send
+    /// and <see cref="InternalAddresses"/> shows. Index 0 is also the loopback address.
+    /// </summary>
+    public void SetInternalAddress(SystemAddress address, int index = 0)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(index);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, RakNetConstants.MaximumNumberOfInternalIds);
+        ThrowIfStopped();
+        lock (_internalAddressesGate)
+        {
+            var updated = (SystemAddress[])_internalAddresses.Clone();
+            updated[index] = address;
+            _internalAddresses = updated;
+        }
+        Enqueue(new PeerCommand { Kind = CommandKind.SetInternalAddress, Target = address, Value = index });
+    }
 
     /// <summary>GetExternalID(UNASSIGNED_SYSTEM_ADDRESS): the first address a remote reported for this peer.</summary>
     public SystemAddress ExternalAddress => _externalAddress.Value;
@@ -625,14 +646,29 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>AdvertiseSystem; received as an AdvertiseSystem event.</summary>
-    public bool AdvertiseSystem(SystemAddress remote, ReadOnlySpan<byte> data = default, int socketIndex = 0) =>
-        throw new NotImplementedException();
+    /// <summary>
+    /// AdvertiseSystem: an out-of-band ID_ADVERTISE_SYSTEM followed by <paramref name="data"/> (RakPeer.cpp:2683-2689),
+    /// received as an AdvertiseSystem event. Sent on the next I/O cycle; false when the address cannot be reached
+    /// from the socket.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="data"/> is 399 bytes or more, which the receiver drops.</exception>
+    public bool AdvertiseSystem(SystemAddress remote, ReadOnlySpan<byte> data = default, int socketIndex = 0)
+    {
+        if (data.Length + 1 >= RakNetConstants.MaxOfflineDataLength)
+            throw new ArgumentException($"Advertised data must be under {RakNetConstants.MaxOfflineDataLength - 1} bytes (RakPeer.cpp:4708-4710).", nameof(data));
+        Span<byte> payload = stackalloc byte[data.Length + 1];
+        payload[0] = (byte)MessageId.AdvertiseSystem;
+        data.CopyTo(payload[1..]);
+        return SendOutOfBand(remote, payload, socketIndex);
+    }
 
     /// <inheritdoc cref="AdvertiseSystem"/>
-    public ValueTask<bool> AdvertiseSystemAsync(string host, int port, ReadOnlyMemory<byte> data = default,
-                                                int socketIndex = 0, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
+    public async ValueTask<bool> AdvertiseSystemAsync(string host, int port, ReadOnlyMemory<byte> data = default,
+                                                      int socketIndex = 0, CancellationToken cancellationToken = default)
+    {
+        var address = await ResolveAsync(host, port, cancellationToken).ConfigureAwait(false);
+        return address is { } remote && AdvertiseSystem(remote, data.Span, socketIndex);
+    }
 
     /// <summary>SetIncomingPassword. Copied on set; more than 255 bytes throws.</summary>
     /// <remarks>Set at start through <see cref="RakPeerOptions.IncomingPassword"/>; the core fixes it then.</remarks>
@@ -738,6 +774,34 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     internal void ThrowIfStopped() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _state) == Stopped, this);
 
+    /// <summary>SendOutOfBand (RakPeer.cpp:2997-3044): the out-of-band header and the payload, on the next cycle.</summary>
+    internal bool SendOutOfBand(SystemAddress remote, ReadOnlySpan<byte> payload, int socketIndex)
+    {
+        if (payload.Length >= RakNetConstants.MaxOfflineDataLength)
+            throw new ArgumentException($"An out-of-band payload must be under {RakNetConstants.MaxOfflineDataLength} bytes (RakPeer.cpp:4708-4710).", nameof(payload));
+        var datagram = ArrayPool<byte>.Shared.Rent(OutOfBandHeader.Length + payload.Length);
+        var writer = new BitStreamWriter(datagram);
+        new OutOfBandHeader(RakNetGuid).Write(ref writer);
+        writer.WriteBytes(payload);
+        return SendRaw(remote, datagram, writer.BytesWritten, ttl: 0, socketIndex);
+    }
+
+    /// <summary>SendTTL (RakPeer.cpp:2731-2753): two bytes that open a NAT mapping without reaching the host.</summary>
+    internal bool SendTtl(SystemAddress remote, int ttl, int socketIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(ttl);
+        var datagram = ArrayPool<byte>.Shared.Rent(2);
+        datagram[0] = 0;
+        datagram[1] = 1;
+        return SendRaw(remote, datagram, 2, ttl, socketIndex);
+    }
+
+    internal void SetNetworkSimulator(NetworkSimulatorOptions? options)
+    {
+        ThrowIfStopped();
+        Enqueue(new PeerCommand { Kind = CommandKind.SetNetworkSimulator, State = options });
+    }
+
     internal void SetConnectionTimeout(RakConnection connection, long timeoutMs)
     {
         ThrowIfStopped();
@@ -778,8 +842,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         // Features the peer core does not have yet.
         if (options.Security is not null || options.SecurityExceptions.Count > 0)
             throw new NotImplementedException("Secure connections are not implemented.");
-        if (options.NetworkSimulator is not null)
-            throw new NotImplementedException("The network simulator is not implemented.");
+        NetworkSimulator.Validate(options.NetworkSimulator, nameof(options));
         if (options.UnreliableTimeout != TimeSpan.FromMilliseconds(1000) || options.OccasionalPing || options.SplitMessageProgressInterval != 0
             || options.LimitIpConnectionFrequency || options.AllowConnectionResponseIpMigration || options.PerConnectionOutgoingBandwidthLimit != 0)
             throw new NotImplementedException("Only RakNet's default unreliable timeout, ping, progress, rate-limit, migration and bandwidth settings are implemented.");
@@ -851,7 +914,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         }
     }
 
-    private static async ValueTask<SystemAddress?> ResolveAsync(string host, int port, CancellationToken cancellationToken)
+    internal static async ValueTask<SystemAddress?> ResolveAsync(string host, int port, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(host);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(port);
@@ -1040,6 +1103,28 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         }
         Enqueue(new PeerCommand { Kind = CommandKind.Connect, Target = remote, State = pending });
         return ConnectAttemptResult.Started;
+    }
+
+    // Queues a datagram that bypasses the core; the payload is rented and returned once sent.
+    private bool SendRaw(SystemAddress remote, byte[] datagram, int length, int ttl, int socketIndex)
+    {
+        try
+        {
+            ValidateSocketIndex(socketIndex);
+            ThrowIfStopped();
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(datagram);
+            throw;
+        }
+        if (!remote.IsAssigned || remote.AddressFamily != _sockets[socketIndex].AddressFamily)
+        {
+            ArrayPool<byte>.Shared.Return(datagram);
+            return false;
+        }
+        Enqueue(new PeerCommand { Kind = CommandKind.SendRaw, Target = remote, Payload = datagram, BitLength = length * 8, Ttl = ttl, Value = socketIndex });
+        return true;
     }
 
     private void EndPing(PendingPing ping, Action<PendingPing> complete)

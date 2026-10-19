@@ -33,6 +33,7 @@ public sealed partial class RakPeer
     private readonly Dictionary<ulong, bool> _closedLocally = [];
     private readonly List<uint> _scratchReceipts = [];
     private readonly List<PendingConnect> _scratchAttempts = [];
+    private readonly NetworkSimulator _simulator = new();
     private Thread? _loop;
     private ManualResetEventSlim? _wake;
     private int _wakePending;
@@ -192,7 +193,7 @@ public sealed partial class RakPeer
                 _receivePaused = false;
             ReceiveDatagrams(nowUs);
             _core.Update(nowUs);
-            FlushDatagrams();
+            FlushDatagrams(nowUs);
             ProcessCoreEvents(nowUs);
             PollConnections(nowUs);
             _activeSystemCount = _core.ActiveSystemCount;
@@ -250,6 +251,16 @@ public sealed partial class RakPeer
             case CommandKind.SetConnectionTimeout:
                 if (_core.TryGetRemoteSystem(command.Target.RakNetGuid.Value, out var system))
                     system.Session.TimeoutMs = command.Value;
+                break;
+            case CommandKind.SendRaw:
+                SendRawNow(command);
+                break;
+            case CommandKind.SetInternalAddress:
+                var address = command.Target.Address;
+                _coreInternalAddresses[(int)command.Value] = address.IsAssigned ? ToEndPoint(address) : Protocol.Wire.Messages.InternalAddressList.Unassigned;
+                break;
+            case CommandKind.SetNetworkSimulator:
+                _simulator.Configure((NetworkSimulatorOptions?)command.State);
                 break;
         }
     }
@@ -420,19 +431,44 @@ public sealed partial class RakPeer
         }
     }
 
-    private void FlushDatagrams()
+    private void FlushDatagrams(long nowUs)
     {
+        while (_simulator.TryDequeueDue(nowUs, out var delayed))
+        {
+            SendDatagram(delayed.Data, delayed.Socket, delayed.Remote, ttl: 0);
+            NetworkSimulator.Release(delayed);
+        }
         while (_core.TryDequeueDatagram(out var datagram))
         {
             SystemAddress remote = datagram.Remote;
-            foreach (var observer in _lowLevel.Observers.Current)
-                observer.OnDatagramSent(datagram.Data, remote);
-            foreach (var observer in _plugins.Observers)
-                observer.OnDatagramSent(datagram.Data, remote);
-            _transports[SocketOf(remote)].TrySend(datagram.Data, remote);
-            if (_byAddress.TryGetValue(remote, out var connection))
-                connection.Counters.Add(RnsPerSecondMetric.ActualBytesSent, datagram.Data.Length);
+            var socket = SocketOf(remote);
+            if (_simulator.PassesNow(datagram.Data, socket, remote, nowUs))
+                SendDatagram(datagram.Data, socket, remote, ttl: 0);
         }
+    }
+
+    // RakPeer's direct socket sends: SendOutOfBand, AdvertiseSystem and SendTTL bypass the reliability layer.
+    private void SendRawNow(in PeerCommand command)
+    {
+        try
+        {
+            SendDatagram(command.Payload.AsSpan(0, command.ByteLength), (int)command.Value, command.Target.Address, command.Ttl);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(command.Payload!);
+        }
+    }
+
+    private void SendDatagram(ReadOnlySpan<byte> datagram, int socket, SystemAddress remote, int ttl)
+    {
+        foreach (var observer in _lowLevel.Observers.Current)
+            observer.OnDatagramSent(datagram, remote);
+        foreach (var observer in _plugins.Observers)
+            observer.OnDatagramSent(datagram, remote);
+        _transports[socket].TrySend(datagram, remote, ttl);
+        if (_byAddress.TryGetValue(remote, out var connection))
+            connection.Counters.Add(RnsPerSecondMetric.ActualBytesSent, datagram.Length);
     }
 
     private void ProcessCoreEvents(long nowUs)
@@ -937,6 +973,7 @@ public sealed partial class RakPeer
 
     private void EndEverything(Exception? fault)
     {
+        _simulator.Clear();
         foreach (var socket in _sockets)
             socket.Close();
         foreach (var transport in _transports)

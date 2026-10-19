@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\RakDotNet\RakDotNet.csproj" />
+    <ProjectReference Include="..\..\src\RakDotNet.Testing\RakDotNet.Testing.csproj" />
   </ItemGroup>
 
 </Project>

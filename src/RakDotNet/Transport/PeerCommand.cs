@@ -18,6 +18,9 @@ internal enum CommandKind : byte
     SetMaxIncoming,
     NotifyShutdown,
     SetConnectionTimeout,
+    SendRaw,
+    SetInternalAddress,
+    SetNetworkSimulator,
 }
 
 /// <summary>
@@ -38,6 +41,7 @@ internal struct PeerCommand
     public long Value;
     public object? State;
     public short Version;
+    public int Ttl;
 
     public readonly int ByteLength => (BitLength + 7) / 8;
 }
