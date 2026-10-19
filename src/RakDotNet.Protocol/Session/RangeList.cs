@@ -19,34 +19,51 @@ internal sealed class RangeList
 
     public IReadOnlyList<AckRange> Ranges => _ranges;
 
-    /// <summary>RangeList::Insert (DS_RangeList.h:159-218).</summary>
+    /// <summary>
+    /// RangeList::Insert (DS_RangeList.h:159-218), ported branch for branch. The lookup finds the first range whose
+    /// minimum is above the number (RangeNodeComp compares against minIndex only, DS_RangeList.h:39-46), and only that
+    /// range and, when joining, the one before it are examined. A number that extends or repeats the preceding range
+    /// therefore gets a range of its own unless it is past the last range, so the list can hold overlapping and
+    /// adjacent ranges after out-of-order or duplicate arrivals, exactly as RakNet's ACK and NAK lists do.
+    /// </summary>
     public void Insert(UInt24 number)
     {
         var n = number.Value;
-        var index = IndexOfFirstRangeEndingAtOrAfter(n);
+        if (_ranges.Count == 0)
+        {
+            _ranges.Add(new AckRange(number, number));
+            return;
+        }
 
-        if (index < _ranges.Count && _ranges[index].Min.Value <= n)
-            return; // Already present.
+        var index = IndexOfFirstRangeWithMinAtOrAbove(n, out var exists);
+        if (index == _ranges.Count)
+        {
+            var last = _ranges[index - 1];
+            var next = Wrap(last.Max.Value + 1);
+            if (n == next)
+                _ranges[index - 1] = new AckRange(last.Min, new UInt24(next)); // maxIndex++ (DS_RangeList.h:172-173).
+            else if (n > next)
+                _ranges.Add(new AckRange(number, number)); // Insert at end (DS_RangeList.h:174-178).
+            return;
+        }
 
-        var joinsLeft = index > 0 && _ranges[index - 1].Max.Value + 1 == n;
-        var joinsRight = index < _ranges.Count && n + 1 == _ranges[index].Min.Value;
-        if (joinsLeft && joinsRight)
+        var range = _ranges[index];
+        if (!exists && n < Wrap(range.Min.Value - 1))
         {
-            _ranges[index - 1] = new AckRange(_ranges[index - 1].Min, _ranges[index].Max);
-            _ranges.RemoveAt(index);
+            _ranges.Insert(index, new AckRange(number, number)); // Insert here (DS_RangeList.h:182-188).
         }
-        else if (joinsLeft)
+        else if (!exists && n == Wrap(range.Min.Value - 1))
         {
-            _ranges[index - 1] = new AckRange(_ranges[index - 1].Min, number);
+            // Decrease minIndex and join left (DS_RangeList.h:189-199).
+            _ranges[index] = new AckRange(number, range.Max);
+            if (index > 0 && Wrap(_ranges[index - 1].Max.Value + 1) == n)
+            {
+                _ranges[index - 1] = new AckRange(_ranges[index - 1].Min, range.Max);
+                _ranges.RemoveAt(index);
+            }
         }
-        else if (joinsRight)
-        {
-            _ranges[index] = new AckRange(number, _ranges[index].Max);
-        }
-        else
-        {
-            _ranges.Insert(index, new AckRange(number, number));
-        }
+        // Otherwise the number is the range's minimum, already present (DS_RangeList.h:200-204); the join-right branch
+        // that follows cannot be reached, because every number left here is below the range's minimum.
     }
 
     /// <summary>
@@ -63,17 +80,28 @@ internal sealed class RangeList
 
     public void Clear() => _ranges.Clear();
 
-    private int IndexOfFirstRangeEndingAtOrAfter(uint n)
+    private static uint Wrap(uint value) => value & UInt24.MaxValue.Value;
+
+    // OrderedList::GetIndexFromKey with RangeNodeComp (DS_OrderedList.h:119-170): the range whose minimum equals n, or
+    // the first whose minimum is above it.
+    private int IndexOfFirstRangeWithMinAtOrAbove(uint n, out bool exists)
     {
-        int low = 0, high = _ranges.Count;
-        while (low < high)
+        int low = 0, high = _ranges.Count - 1;
+        while (low <= high)
         {
-            var mid = (low + high) >>> 1;
-            if (_ranges[mid].Max.Value < n)
-                low = mid + 1;
+            var mid = low + (high - low) / 2;
+            var min = _ranges[mid].Min.Value;
+            if (n == min)
+            {
+                exists = true;
+                return mid;
+            }
+            if (n < min)
+                high = mid - 1;
             else
-                high = mid;
+                low = mid + 1;
         }
+        exists = false;
         return low;
     }
 }
