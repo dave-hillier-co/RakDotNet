@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Runtime.CompilerServices;
@@ -9,7 +8,7 @@ using RakDotNet.Protocol.Wire.Messages;
 namespace RakDotNet.Protocol.Wire;
 
 /// <summary>
-/// A growable, poolable BitStream for application and plugin payloads, backed by <see cref="ArrayPool{T}.Shared"/>.
+/// A growable BitStream for application and plugin payloads, with its buffer from <see cref="ArrayPool{T}.Shared"/>.
 /// </summary>
 /// <remarks>
 /// Every <c>Write*</c> member forwards to a <see cref="BitStreamWriter"/> created at the current bit position with
@@ -22,40 +21,27 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
 {
     public const int DefaultInitialCapacityBytes = 256;
 
-    // Streams kept for Rent; enough for the streams a peer's threads hold at once.
-    private const int MaxPooledStreams = 64;
-    private static readonly ConcurrentQueue<BitStream> Pool = new();
-
     // Write<T> stops growing here, so a codec that throws InvalidOperationException for another reason still surfaces.
     private const int MaxGrowthHintBytes = 1 << 26;
 
-    private readonly bool _rented;
     private byte[]? _buffer;
     private int _bitPosition;
-    private int _initialCapacity;
 
     public BitStream(int initialCapacityBytes = DefaultInitialCapacityBytes)
-        : this(initialCapacityBytes, rented: false) { }
-
-    private BitStream(int initialCapacityBytes, bool rented)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(initialCapacityBytes);
-        _rented = rented;
-        _initialCapacity = Math.Max(1, initialCapacityBytes);
-        _buffer = ArrayPool<byte>.Shared.Rent(_initialCapacity);
+        _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, initialCapacityBytes));
     }
 
-    /// <summary>A stream from a shared pool; <see cref="Dispose"/> returns it.</summary>
-    public static BitStream Rent(int initialCapacityBytes = DefaultInitialCapacityBytes)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegative(initialCapacityBytes);
-        if (!Pool.TryDequeue(out var stream))
-            return new BitStream(initialCapacityBytes, rented: true);
-        stream._initialCapacity = Math.Max(1, initialCapacityBytes);
-        stream._buffer = ArrayPool<byte>.Shared.Rent(stream._initialCapacity);
-        stream._bitPosition = 0;
-        return stream;
-    }
+    /// <summary>
+    /// A stream whose buffer comes from <see cref="ArrayPool{T}.Shared"/>; <see cref="Dispose"/> returns the buffer.
+    /// </summary>
+    /// <remarks>
+    /// Only the buffer is pooled, never the stream object. A pooled object would have no owner token, so a stale
+    /// second <see cref="Dispose"/> after another caller rented it would return that caller's buffer and pool the
+    /// stream twice. To build payloads without allocating, keep a stream and <see cref="Reset"/> it.
+    /// </remarks>
+    public static BitStream Rent(int initialCapacityBytes = DefaultInitialCapacityBytes) => new(initialCapacityBytes);
 
     public int BitsWritten
     {
@@ -250,7 +236,7 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
     /// <inheritdoc cref="Advance"/>
     public Span<byte> GetSpan(int sizeHint = 0) => GetMemory(sizeHint).Span;
 
-    /// <summary>Returns the buffer to the pool, and the stream itself if it was rented.</summary>
+    /// <summary>Returns the buffer to the pool. Disposing again does nothing.</summary>
     public void Dispose()
     {
         var buffer = _buffer;
@@ -259,8 +245,6 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
         _buffer = null;
         _bitPosition = 0;
         ArrayPool<byte>.Shared.Return(buffer);
-        if (_rented && Pool.Count < MaxPooledStreams)
-            Pool.Enqueue(this);
     }
 
     private byte[] Buffer

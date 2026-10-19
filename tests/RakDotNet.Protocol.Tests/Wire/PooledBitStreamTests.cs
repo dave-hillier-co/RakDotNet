@@ -198,6 +198,23 @@ public class PooledBitStreamTests
     }
 
     [Fact]
+    public void Disposing_a_rented_stream_twice_never_touches_a_later_renter()
+    {
+        var stale = BitStream.Rent();
+        stale.Dispose();
+        using var owner = BitStream.Rent();
+        owner.WriteByte(7);
+
+        stale.Dispose();
+        using var other = BitStream.Rent();
+        other.WriteByte(9);
+
+        Assert.NotSame(owner, other);
+        Assert.Equal([7], owner.Written.ToArray());
+        Assert.Throws<ObjectDisposedException>(() => stale.WriteByte(1));
+    }
+
+    [Fact]
     public void A_disposed_stream_throws_and_disposing_twice_is_harmless()
     {
         var stream = new BitStream();
