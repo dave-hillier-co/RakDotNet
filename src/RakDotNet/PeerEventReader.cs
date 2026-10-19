@@ -13,6 +13,10 @@ namespace RakDotNet;
 /// and ReceiptAbandoned precedes the connection's Disconnected. Reads are the dispatch step: one caller at a time,
 /// enforced by an interlocked guard that throws <see cref="InvalidOperationException"/>.
 /// </para>
+/// <para>
+/// Internal traffic never reaches the stream: connected pings and pongs, unconnected pings, handshake messages and
+/// ID_DETECT_LOST_CONNECTIONS. <see cref="INetworkObserver"/> sees it.
+/// </para>
 /// </remarks>
 public sealed class PeerEventReader
 {
@@ -25,7 +29,8 @@ public sealed class PeerEventReader
     public bool TryRead(out PeerEvent e) => throw new NotImplementedException();
 
     /// <summary>
-    /// True when an event may be available; false after shutdown. Completes synchronously when one is queued. While
+    /// True when an event may be available; false after shutdown. Completes synchronously when one is queued, otherwise
+    /// through one reusable value-task source. While
     /// plugins are attached it also returns true at least every <see cref="RakPeerOptions.PluginUpdateInterval"/>, so
     /// OnUpdate keeps running for an idle async consumer, and the next <see cref="TryRead"/> may then return false.
     /// </summary>
@@ -41,6 +46,9 @@ public sealed class PeerEventReader
     /// <summary>GetReceiveBufferSize.</summary>
     public int Count => throw new NotImplementedException();
 
-    /// <summary>Completes at shutdown; faults with <see cref="RakTransportException"/> on a fatal transport failure.</summary>
+    /// <summary>
+    /// Completes at shutdown, which also ends every untracked receipt still outstanding; faults with
+    /// <see cref="RakTransportException"/> on a fatal transport failure.
+    /// </summary>
     public Task Completion => throw new NotImplementedException();
 }

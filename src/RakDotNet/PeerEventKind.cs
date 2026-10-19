@@ -50,9 +50,15 @@ public enum PeerEventKind : byte
 /// </remarks>
 public enum DisconnectReason : byte
 {
-    /// <summary>ID_DISCONNECTION_NOTIFICATION</summary>
+    /// <summary>
+    /// ID_DISCONNECTION_NOTIFICATION: the remote's notification, enqueued once this peer's ACK of it is sent
+    /// (RakPeer.cpp:6095-6099, 5903), or a local notifying close once its outgoing data drains (RakPeer.cpp:5873-5903).
+    /// </summary>
     DisconnectionNotification,
 
-    /// <summary>ID_CONNECTION_LOST</summary>
+    /// <summary>
+    /// ID_CONNECTION_LOST: a timeout or dead link (RakPeer.cpp:5900-5901), or a local silent close of a connected system
+    /// (RakPeer.cpp:1667-1678).
+    /// </summary>
     ConnectionLost,
 }

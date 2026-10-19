@@ -28,7 +28,7 @@ public enum ConnectAttemptResult : byte
 /// <summary>RakNet's PI2_FailedConnectionAttemptReason: why a started attempt failed (RakPeer.cpp:6429-6458).</summary>
 public enum ConnectFailure : byte
 {
-    /// <summary>ID_CONNECTION_ATTEMPT_FAILED</summary>
+    /// <summary>ID_CONNECTION_ATTEMPT_FAILED: a pending entry timed out (RakPeer.cpp:5898-5899).</summary>
     ConnectionAttemptFailed,
 
     /// <summary>ID_ALREADY_CONNECTED</summary>

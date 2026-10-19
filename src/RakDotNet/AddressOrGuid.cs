@@ -7,7 +7,10 @@ namespace RakDotNet;
 /// RakNet's AddressOrGUID: a send or close target. Holds exactly one of a GUID or an address, never both, so a target
 /// is never ambiguous and RakNet's GUID-before-address precedence (RakNetTypes.cpp:56-70) never applies.
 /// </summary>
-/// <remarks><c>default</c> is undefined, which is what <c>except: default</c> on a broadcast means.</remarks>
+/// <remarks>
+/// <c>default</c> is undefined, which is what <c>except: default</c> on a broadcast means. Converting an unassigned GUID
+/// or address gives an undefined target.
+/// </remarks>
 public readonly struct AddressOrGuid : IEquatable<AddressOrGuid>
 {
     private readonly RakNetGuid _guid;

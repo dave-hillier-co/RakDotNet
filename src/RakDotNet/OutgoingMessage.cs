@@ -10,6 +10,13 @@ namespace RakDotNet;
 /// A ref struct, so sending neither boxes nor captures. Every send copies the bytes into a pooled segment before it
 /// returns, so the caller's buffer is free afterwards. The bit length is kept exactly, because the encapsulated
 /// message length on the wire is in bits (RakPeer.cpp:1408).
+/// <para>
+/// The steady-state send path allocates nothing: the send validates, takes a receipt number with
+/// <see cref="Interlocked.Increment(ref uint)"/> (skipping 0), copies into a segment from the peer's pool and enqueues a
+/// command struct on a preallocated MPSC ring, waking the loop only on an idle-to-busy transition or an Immediate send.
+/// The cycle queues the message into the connection's preallocated priority heaps and frames datagrams into slab
+/// buffers. Resend entries are pooled; reliable segments return to the pool on ACK, unreliable ones after framing.
+/// </para>
 /// </remarks>
 public readonly ref struct OutgoingMessage
 {

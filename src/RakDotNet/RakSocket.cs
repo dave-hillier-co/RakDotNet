@@ -4,7 +4,10 @@ using RakDotNet.Protocol.Wire;
 namespace RakDotNet;
 
 /// <summary>One bound socket, as GetSockets / GetSocket return.</summary>
-/// <remarks>The underlying <see cref="System.Net.Sockets.Socket"/> is never handed out: its receive side belongs to the peer.</remarks>
+/// <remarks>
+/// The underlying <see cref="System.Net.Sockets.Socket"/> is never handed out: its receive side belongs to the peer, and
+/// a second reader would steal datagrams.
+/// </remarks>
 public sealed class RakSocket
 {
     private RakSocket() { }

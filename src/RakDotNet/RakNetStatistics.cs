@@ -39,7 +39,9 @@ public struct PriorityValues<T>
 /// <summary>RakNet's RakNetStatistics, by value with no arrays, so copying a snapshot allocates nothing.</summary>
 /// <remarks>
 /// The I/O cycle publishes each connection's block under a sequence lock every cycle; readers copy it without blocking.
-/// Peer-wide totals are also published through <c>System.Diagnostics.Metrics</c> as <c>Meter("RakDotNet")</c>.
+/// Peer-wide totals are also published through <c>System.Diagnostics.Metrics</c> as <c>Meter("RakDotNet")</c>, with
+/// observable instruments over the snapshots. The field set covers the interop <c>stats</c> command, so the interop
+/// driver maps it field for field.
 /// </remarks>
 public readonly struct RakNetStatistics
 {
@@ -95,6 +97,6 @@ public readonly record struct ConnectionStatistics(RakConnection Connection, Rak
 
 /// <summary>
 /// <see cref="RakPeer.Pools"/>. A <see cref="Misses"/> count that grows in steady state means an owned event was never
-/// disposed or a pool cap is too small.
+/// disposed or a pool cap is too small. The allocation-budget test checks that it stays zero after warm-up.
 /// </summary>
 public readonly record struct PoolStatistics(long SegmentsOutstanding, long OwnedEventsOutstanding, long Misses);

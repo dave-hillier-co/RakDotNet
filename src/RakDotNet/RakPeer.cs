@@ -13,7 +13,19 @@ namespace RakDotNet;
 /// <para>
 /// Commands (sends, closes, connects, setters, <see cref="BanList"/>, <see cref="Plugins"/>, <see cref="LowLevel"/>)
 /// are thread-safe and never block: they enqueue for the I/O cycle and take effect on the next cycle. Queries read
-/// snapshots the cycle publishes and may be one cycle old.
+/// snapshots the cycle publishes and may be one cycle old. Commands from one thread are applied in call order.
+/// </para>
+/// <para>
+/// Hostnames are <see cref="string"/> and the host overloads resolve them with
+/// <see cref="Dns.GetHostAddressesAsync(string, CancellationToken)"/>; RakNet resolves on the caller, blocking. No member
+/// takes a hostname as bytes. Offline sends (PingUnconnected, AdvertiseSystem, the LowLevel out-of-band and TTL sends)
+/// return whether the datagram was sent.
+/// </para>
+/// <para>
+/// Byte settings (<see cref="OfflinePingResponse"/>, <see cref="IncomingPassword"/>) are copied on assignment and their
+/// getters return library-owned read-only memory. Continuations of the async members run on the thread pool
+/// (RunContinuationsAsynchronously), so user code never runs inside the I/O cycle, and no SynchronizationContext is
+/// captured.
 /// </para>
 /// </remarks>
 public sealed class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
@@ -126,8 +138,10 @@ public sealed class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     /// <summary>
     /// <see cref="Connect"/>, completing when the I/O cycle produces the Connected or ConnectFailed event, not when it
-    /// is read; the event still appears on the stream. Cancelling stops the attempt: by
-    /// <see cref="CancelConnectionAttempt"/> while queued, by a silent close once it has a table entry.
+    /// is read; the event still appears on the stream. A synchronous rejection completes it at once with
+    /// <see cref="ConnectResult.AttemptResult"/> set. Cancelling throws <see cref="OperationCanceledException"/> and stops
+    /// the attempt: by <see cref="CancelConnectionAttempt"/> while queued, by a silent close once it has a table entry,
+    /// which for a system not yet connected produces no event.
     /// </summary>
     public ValueTask<ConnectResult> ConnectAsync(SystemAddress remote, ConnectOptions? options = null,
                                                  CancellationToken cancellationToken = default) => throw new NotImplementedException();
@@ -156,6 +170,14 @@ public sealed class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// (RakPeer.cpp:1326-1330), even when the target is not connected. A send to this peer becomes loopback
     /// (RakPeer.cpp:1332-1346).
     /// </summary>
+    /// <remarks>
+    /// Only the *WithAckReceipt reliabilities produce receipt events: a reliable receipt ends with ReceiptAcked, an
+    /// unreliable one with ReceiptAcked or, once <see cref="UnreliableTimeout"/> passes without an ACK, ReceiptLost
+    /// (ReliabilityLayer.cpp:1860-1876). A receipt whose connection ends, or whose target the I/O cycle cannot find, ends
+    /// with ReceiptAbandoned; at shutdown <see cref="PeerEventReader.Completion"/> ends it. No socket I/O happens on the
+    /// caller's thread: <see cref="Priority.Immediate"/> wakes the loop at once in Background mode and goes out first in
+    /// the next <see cref="Update"/> in Manual mode.
+    /// </remarks>
     /// <exception cref="ArgumentException">
     /// An empty message, <paramref name="orderingChannel"/> of 32 or more, an undefined enum value or an undefined target
     /// (RakNet asserts, RakPeer.cpp:1311-1315).
@@ -169,7 +191,10 @@ public sealed class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
                                    byte orderingChannel, int sizeHint, TState state, MessageWriter<TState> write)
         where TState : allows ref struct => throw new NotImplementedException();
 
-    /// <summary>RakNet's <c>broadcast = true</c>: every connected system except <paramref name="except"/>, one shared receipt.</summary>
+    /// <summary>
+    /// RakNet's <c>broadcast = true</c>: every connected system except <paramref name="except"/>, one shared receipt and
+    /// one receipt event per recipient.
+    /// </summary>
     public SendResult Broadcast(OutgoingMessage message, Reliability reliability,
                                 Priority priority = Priority.High, byte orderingChannel = 0,
                                 AddressOrGuid except = default, SendReceipt forceReceipt = default) =>
@@ -184,8 +209,11 @@ public sealed class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// <summary>
     /// A send whose receipt completes the returned task instead of appearing on the stream. Accepts a reliability with a
     /// receipt flavour (Unreliable, Reliable, ReliableOrdered or their *WithAckReceipt forms) and sends the receipt
-    /// flavour; the sequenced reliabilities throw <see cref="ArgumentException"/>.
+    /// flavour; the sequenced reliabilities, which RakNet gives no receipt flavour, throw <see cref="ArgumentException"/>.
     /// </summary>
+    /// <remarks>
+    /// The task is backed by a pooled IValueTaskSource returned to the pool in GetResult, so it is awaited once.
+    /// </remarks>
     public ValueTask<DeliveryOutcome> SendAndTrackAsync(OutgoingMessage message, AddressOrGuid target,
                                                         Reliability reliability, Priority priority = Priority.High,
                                                         byte orderingChannel = 0,

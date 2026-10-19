@@ -21,6 +21,7 @@ namespace RakDotNet;
 /// (RakPeer.cpp:1549-1555); receipt events are the ID then the receipt as 4 little-endian bytes
 /// (ReliabilityLayer.cpp:760, 1871-1872).
 /// </para>
+/// <para>Kind-specific members return <c>default</c> when the event is of another kind.</para>
 /// </remarks>
 public readonly ref struct PeerEvent
 {

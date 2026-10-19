@@ -32,6 +32,12 @@ public interface IDatagramTransportFactory
 /// The default factory: UDP sockets, receiving with <c>Socket.ReceiveFrom(Span, SocketFlags, SocketAddress)</c> into
 /// pooled slots and one outstanding <c>ReceiveFromAsync</c> per binding as the Background-mode wake signal.
 /// </summary>
+/// <remarks>
+/// Allocation-free in steady state: one <see cref="System.Net.SocketAddress"/> is reused for receives and copied into a
+/// <see cref="SystemAddress"/> value; sends use <c>Socket.SendTo(ReadOnlySpan, SocketFlags, SocketAddress)</c> with a
+/// <see cref="System.Net.SocketAddress"/> cached per remote. Transient errors such as ICMP-induced ConnectionReset are ignored, as
+/// in RakNet.
+/// </remarks>
 public sealed class UdpTransportFactory : IDatagramTransportFactory
 {
     private UdpTransportFactory() { }

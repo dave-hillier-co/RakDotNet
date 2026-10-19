@@ -6,7 +6,8 @@ namespace RakDotNet;
 /// <remarks>
 /// RAKNET_ALREADY_STARTED cannot happen because a peer starts once; INVALID_SOCKET_DESCRIPTORS and
 /// INVALID_MAX_CONNECTIONS are argument validation; COULD_NOT_GENERATE_GUID (RakPeer.cpp:382) cannot happen because the
-/// GUID is redrawn.
+/// GUID is redrawn; PORT_CANNOT_BE_ZERO applies only to console platforms RakDotNet does not target. RAKNET_STARTED is
+/// <see cref="RakPeer.Start"/> returning.
 /// </remarks>
 public enum StartupError : byte
 {
