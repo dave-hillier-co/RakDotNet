@@ -46,6 +46,9 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
                 MaxConnections = options.MaxConnections,
                 MaxIncomingConnections = options.MaxIncoming,
                 Bindings = [new SocketBinding(new IPEndPoint(IPAddress.Parse(options.Host), options.Port))],
+                // A driver stands for a process of its own, and RakNet's clock starts with the process (GetTime.cpp:183-189);
+                // peers on one TimeProvider share a clock, so each driver gets its own.
+                TimeProvider = new ProcessClock(),
             });
         }
         catch (RakStartupException exception)
@@ -395,4 +398,7 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
             // (docs/api-design.md section 7), so the stream ends here and no data is lost.
         }
     }
+
+    /// <summary>The system clock under an identity of its own, so this driver's peer has its own RakNet clock origin.</summary>
+    private sealed class ProcessClock : TimeProvider;
 }

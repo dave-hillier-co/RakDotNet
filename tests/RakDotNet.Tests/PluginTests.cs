@@ -83,6 +83,29 @@ public class PluginTests
     }
 
     [Fact]
+    public void Injected_connection_packets_with_no_connection_still_call_the_connection_callbacks()
+    {
+        var log = new List<string>();
+        var connections = new List<RakConnection>();
+        var plugin = new RecordingPlugin("a", log) { Connections = connections };
+        using var peers = new ManualPeers(client: o => o with { Plugins = [plugin] });
+        var source = new SystemAddress(System.Net.IPAddress.Parse("192.0.2.7"), 4321);
+        var guid = new RakNetGuid(77);
+
+        peers.Client.Inject([(byte)MessageId.NewIncomingConnection], source, guid);
+        peers.Client.Inject([(byte)MessageId.ConnectionLost], source, guid);
+        ManualPeers.Drain(peers.Client, peers.ClientEvents);
+
+        // CallPluginCallbacks keys on the first byte alone, so a pushed-back packet calls OnNewConnection and
+        // OnClosedConnection with its own address and GUID (RakPeer.cpp:6411-6428).
+        Assert.Equal(["a.OnConnected(True)", "a.OnDisconnected(ConnectionLost)"], log.Where(l => l.Contains(".OnConnected", StringComparison.Ordinal) || l.Contains(".OnDisconnected", StringComparison.Ordinal)));
+        Assert.All(connections, c => Assert.Equal(source, c.Address));
+        Assert.All(connections, c => Assert.Equal(guid, c.RakNetGuid));
+        Assert.All(connections, c => Assert.False(peers.Client.TryGetConnection(c.RakNetGuid, out _)));
+        Assert.Equal(2, connections.Count);
+    }
+
+    [Fact]
     public void Abandoned_receipts_never_reach_plugins()
     {
         var log = new List<string>();
@@ -174,9 +197,19 @@ public class PluginTests
             OnUpdateAction?.Invoke(Host!);
         }
 
-        public void OnConnected(RakConnection connection, bool isIncoming) => log.Add($"{name}.OnConnected({isIncoming})");
+        public List<RakConnection>? Connections { get; init; }
 
-        public void OnDisconnected(RakConnection connection, DisconnectReason reason) => log.Add($"{name}.OnDisconnected({reason})");
+        public void OnConnected(RakConnection connection, bool isIncoming)
+        {
+            Connections?.Add(connection);
+            log.Add($"{name}.OnConnected({isIncoming})");
+        }
+
+        public void OnDisconnected(RakConnection connection, DisconnectReason reason)
+        {
+            Connections?.Add(connection);
+            log.Add($"{name}.OnDisconnected({reason})");
+        }
 
         public PluginResult OnEvent(PeerEvent e)
         {

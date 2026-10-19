@@ -38,7 +38,8 @@ namespace RakDotNet.Protocol.Peer;
 /// </para>
 /// <para>
 /// Each connection keeps RakPeer's history of its last five pongs, from which the ping statistics and the clock
-/// differential come; incoming ID_TIMESTAMP messages are shifted by that differential as they are dequeued.
+/// differential come. Incoming ID_TIMESTAMP messages leave the core as they arrived: RakPeer::Receive shifts them as the
+/// application reads them (RakPeer.cpp:1548-1555), which is the layer above's job.
 /// </para>
 /// </remarks>
 internal sealed class PeerCore
@@ -171,7 +172,10 @@ internal sealed class PeerCore
     {
         ArgumentNullException.ThrowIfNull(address);
         if (FindActive(guid) is { } system)
+        {
             system.Address = address;
+            SlotsVersion++;
+        }
     }
 
     /// <summary>
@@ -282,33 +286,26 @@ internal sealed class PeerCore
     public bool TryDequeueDatagram(out OutgoingDatagram datagram) => _datagrams.TryDequeue(out datagram);
 
     /// <summary>
-    /// The next event, as RakPeer::Receive returns it: a message starting with ID_TIMESTAMP and long enough to hold a
-    /// time has that time shifted onto this peer's clock by the sender's current clock differential
-    /// (RakPeer.cpp:1548-1555, ShiftIncomingTimestamp at 3773-3787).
+    /// The next event, in the order RakPeer adds packets to packetReturnQueue. An ID_TIMESTAMP message is not shifted
+    /// here: RakPeer::Receive shifts every ID_TIMESTAMP packet when it is read, pushed-back ones included
+    /// (RakPeer.cpp:1548-1555).
     /// </summary>
-    public bool TryDequeueEvent([NotNullWhen(true)] out PeerEvent? peerEvent)
-    {
-        if (!_events.TryDequeue(out peerEvent))
-            return false;
-        if (peerEvent is MessageReceived message
-            && message.Data.Length >= 1 + sizeof(ulong)
-            && message.Data.Span[0] == (byte)MessageId.Timestamp)
-        {
-            peerEvent = message with { Data = ShiftIncomingTimestamp(message.Data.Span, message.Remote) };
-        }
-        return true;
-    }
+    public bool TryDequeueEvent([NotNullWhen(true)] out PeerEvent? peerEvent) => _events.TryDequeue(out peerEvent);
 
-    // ShiftIncomingTimestamp and GetBestClockDifferential, RakPeer.cpp:3773-3799: the differential of the active
-    // system the message came from, or 0.
-    private byte[] ShiftIncomingTimestamp(ReadOnlySpan<byte> data, IPEndPoint remote)
-    {
-        var shifted = data.ToArray();
-        var encoded = BinaryPrimitives.ReadUInt64BigEndian(shifted.AsSpan(1));
-        var differential = (ulong)ClockDifferential(FindActive(remote));
-        BinaryPrimitives.WriteUInt64BigEndian(shifted.AsSpan(1), unchecked(encoded - differential));
-        return shifted;
-    }
+    /// <summary>
+    /// remoteSystemList: one entry per slot, null until first used. A slot keeps its last system, with
+    /// <see cref="RemoteSystem.IsActive"/> clear and its GUID unassigned, until it is reused.
+    /// </summary>
+    public IReadOnlyList<RemoteSystem?> Slots => _slots;
+
+    /// <summary>
+    /// activeSystemList in RakPeer's order: appended to on assignment, and a removal moves the last entry into the
+    /// hole (AddToActiveSystemList and RemoveFromActiveSystemList, RakPeer.cpp:3940-3958).
+    /// </summary>
+    public IReadOnlyList<RemoteSystem> ActiveSystems => _active;
+
+    /// <summary>Changes whenever a slot is assigned, deactivated or given a new address, so the layer above can tell when to look again.</summary>
+    public int SlotsVersion { get; private set; }
 
     // RakPeer.cpp:2157-2169.
     internal static int AveragePing(RemoteSystem? system)
@@ -495,6 +492,23 @@ internal sealed class PeerCore
         return receipt;
     }
 
+    /// <summary>
+    /// One recipient of a broadcast send (SendImmediate with broadcast true, RakPeer.cpp:4335-4370): queued on
+    /// <paramref name="system"/> while its slot is active, whatever its connect mode, and returns the receipt number used.
+    /// </summary>
+    public uint SendToSlot(RemoteSystem system, ReadOnlySpan<byte> data, int bitLength, Reliability reliability, Priority priority, byte channel, long nowUs)
+    {
+        ArgumentNullException.ThrowIfNull(system);
+        var receipt = NextSendReceipt();
+        if (system.IsActive)
+        {
+            system.Session.Send(data, bitLength, reliability, priority, channel, receipt, nowUs);
+            if (reliability.IsReliable())
+                system.LastReliableSendMs = nowUs / 1000;
+        }
+        return receipt;
+    }
+
     /// <summary>Sends to the system with <paramref name="guid"/>.</summary>
     public uint Send(ulong guid, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, long nowUs)
     {
@@ -597,8 +611,11 @@ internal sealed class PeerCore
         var nowMs = nowUs / 1000;
         UpdateConnectionAttempts(nowMs);
 
-        foreach (var system in _active.ToList())
+        // RakPeer.cpp:5832: by index over activeSystemList. A system closed during its own turn has the last entry moved
+        // into its place, and the loop moves on, so that entry waits for the next update.
+        for (var index = 0; index < _active.Count; index++)
         {
+            var system = _active[index];
             // Keepalive, RakPeer.cpp:5857-5869: a reliable ping so a dead connection is noticed.
             if (system.Mode == ConnectMode.Connected
                 && nowMs > system.LastReliableSendMs
@@ -1197,6 +1214,7 @@ internal sealed class PeerCore
         var system = new RemoteSystem(index, address, guid, session, mode, nowMs) { Mtu = mtu };
         _slots[index] = system;
         _active.Add(system);
+        SlotsVersion++;
         return system;
     }
 
@@ -1229,7 +1247,11 @@ internal sealed class PeerCore
             return;
         system.IsActive = false;
         system.Guid = RakNetConstants.UnassignedGuid;
-        _active.Remove(system);
+        // RemoveFromActiveSystemList, RakPeer.cpp:3945-3958: the last entry fills the hole.
+        var index = _active.IndexOf(system);
+        _active[index] = _active[^1];
+        _active.RemoveAt(_active.Count - 1);
+        SlotsVersion++;
     }
 
     private static ConnectionState StateOf(RemoteSystem? system) =>

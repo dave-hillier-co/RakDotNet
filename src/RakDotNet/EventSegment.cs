@@ -54,6 +54,9 @@ internal sealed class EventSegment(EventPool pool)
 
     public ReadOnlyMemory<byte> Memory => _buffer.AsMemory(0, Length);
 
+    /// <summary><see cref="Data"/>, for the rewrites RakPeer::Receive makes in place, such as the ID_TIMESTAMP shift.</summary>
+    public Span<byte> WritableData => _buffer.AsSpan(0, Length);
+
     /// <summary>Room for <paramref name="length"/> bytes, which become <see cref="Data"/>.</summary>
     public Span<byte> SetLength(int length)
     {

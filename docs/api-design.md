@@ -51,6 +51,7 @@ The stream is `peer.Events`, RakNet's `Receive()`. Each entry is a borrowed `Pee
 - `Connected` precedes that connection's first message. A connection's last delivered message precedes its `Disconnected`, and nothing for that connection follows it.
 - A receipt event follows the send that produced it. `ReceiptAbandoned` events for a connection precede its `Disconnected` when it has one.
 - `Inject(..., atHead: true)` places the entry so the next `TryRead` returns it, as `PushBackPacket(packet, true)` (`RakPeer.cpp:2838-2841`).
+- An `ID_TIMESTAMP` entry has its time shifted when it is read, not when it arrives: every entry popped, injected ones included, is shifted by the clock differential of the active connection at its address at that moment, as `RakPeer::Receive` does (`RakPeer.cpp:1548-1555`, `3773-3799`).
 - Commands from one thread are applied in call order.
 - Async completions (`ConnectAsync`, `CloseAsync`, `Closed`, `SendAndTrackAsync`, `PingAsync`) resolve when the I/O cycle produces the outcome, not when the matching event is read, and the event still appears at its position (decision 11.8). Tracked receipts go to their awaiter instead of the stream.
 - When the stream holds `PeerLimits.EventQueueCapacity` entries the cycle stops reading datagrams until the consumer drains it below half; locally generated control entries use reserved headroom, so nothing delivered is dropped or reordered.
@@ -76,6 +77,8 @@ incoming request ─────────────────┤         
                                   │               └─ timeout or dead link ─────────────────► Disconnected
                                   └─► ConnectFailed ─► NotConnected
 ```
+
+A `RakConnection` is one slot of RakNet's remote system list (`RemoteSystemStruct`). It is created when the remote system takes a slot (`AssignSystemAddressToRemoteSystemList`, `RakPeer.cpp:3595-3770`): an outgoing attempt once the server answers the offline handshake, an incoming one once its `OPEN_CONNECTION_REQUEST_2` is accepted. It is `Connecting` until `Connected`, and lookups, `GetConnectionState`, sends, broadcasts and the `AlreadyConnectedToEndpoint` check see it in every state, as RakNet's slot semantics (`isActive` and `connectMode`) prescribe; `Connections`, `ConnectionCount` and `TryGetConnectionByIndex` list only `Connected` ones (`RakPeer.cpp:1799-1850`). A handshake that RakNet ends without a packet ends the object with no event. `Pending` belongs to an attempt that has no slot yet and is visible only through `GetConnectionState` and the `ConnectAsync` task.
 
 Every transition into `Disconnected` is reported by the packet RakNet itself enqueues for it (decision 11.3), and every failed attempt by RakNet's failure ID. The citations are on `RakPeer.Close`, `DisconnectReason` and `ConnectFailure`. `Connect` returns the synchronous `ConnectAttemptResult`; the outcome arrives later as `Connected` or `ConnectFailed` (decision 11.13). Cancelling a queued attempt produces no event, as in RakNet (`RakPeer.cpp:1686-1710`).
 
@@ -110,7 +113,7 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 1. Release the previously borrowed event. Apply deferred attaches, detaches and injections.
 2. Call `OnUpdate` on every plugin in the first list, then the second. This happens once per `TryRead` call, before anything is popped, including calls that return false.
 3. Pop the next entry, or return false. `ReceiptAbandoned` entries skip steps 4 and 5 (decision 11.4).
-4. Connection callbacks (`CallPluginCallbacks`, `RakPeer.cpp:6411-6461`), first list then second, keyed on `Data[0]`: `ID_DISCONNECTION_NOTIFICATION` and `ID_CONNECTION_LOST` call `OnDisconnected`, `ID_NEW_INCOMING_CONNECTION` and `ID_CONNECTION_REQUEST_ACCEPTED` call `OnConnected`, and the ten failure IDs call `OnConnectFailed`.
+4. Connection callbacks (`CallPluginCallbacks`, `RakPeer.cpp:6411-6461`), first list then second, keyed on `Data[0]`: `ID_DISCONNECTION_NOTIFICATION` and `ID_CONNECTION_LOST` call `OnDisconnected`, `ID_NEW_INCOMING_CONNECTION` and `ID_CONNECTION_REQUEST_ACCEPTED` call `OnConnected`, and the ten failure IDs call `OnConnectFailed`. An entry with no connection behind it, such as an injected `ID_NEW_INCOMING_CONNECTION`, still calls them, as RakNet passes the packet's own address and GUID: the hook gets a `RakConnection` that carries them, is in no lookup, and has `State == NotConnected`.
 5. `OnEvent` on the first list in order, then the second. The first `Consume` stops the chain, releases the event (unless it was detached) and continues from step 3.
 6. Return the event to the application.
 
@@ -134,7 +137,7 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `ConnectWithSocket` | `ConnectOptions.SocketIndex` selecting a binding whose `SocketBinding.Transport` adopted that socket at start |
 | `Shutdown(blockDuration, channel, priority)` | `peer.ShutdownAsync(blockDuration, channel, priority)` |
 | `IsActive` | `peer.IsActive` |
-| `GetConnectionList` | `peer.Connections` (each `Address`) |
+| `GetConnectionList` | `peer.Connections` (each `Address`), in `activeSystemList` order |
 | `GetNextSendReceipt` / `IncrementNextSendReceipt` | `peer.PeekNextReceipt()` / `peer.ReserveReceipt()` |
 | `Send(data, length, priority, reliability, channel, target, broadcast, forceReceipt)` | `peer.Send(message, target, reliability, priority, channel, forceReceipt)` or `connection.Send(...)`; `broadcast = true` → `peer.Broadcast(..., except: target)` |
 | `Send(BitStream*, ...)` | the same calls with an `OutgoingMessage` from `BitStream` or `BitStreamWriter` (bit-exact length), or `Send<TState>` with a `MessageWriter` |
@@ -144,14 +147,14 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `DeallocatePacket` | automatic at the next read; `OwnedPeerEvent.Dispose` for detached events |
 | `GetMaximumNumberOfPeers` | `peer.MaxConnections` |
 | `CloseConnection(target, notify, channel, priority)` | `peer.Close(target, notify, channel, priority)` / `connection.Close` / `CloseAsync` |
-| `GetConnectionState` | `peer.GetConnectionState(AddressOrGuid)` / `connection.State` |
+| `GetConnectionState` | `peer.GetConnectionState(AddressOrGuid)` (`Disconnected` for an address a closed slot held) / `connection.State` |
 | `CancelConnectionAttempt` | `peer.CancelConnectionAttempt(address)`, or cancel the `ConnectAsync` token |
 | `GetIndexFromSystemAddress` | `peer.TryGetConnection(address, out c)` → `c.SystemIndex` |
 | `GetSystemAddressFromIndex` / `GetGUIDFromIndex` | `peer.TryGetConnectionByIndex(i, out c)` → `c.Address` / `c.RakNetGuid` |
 | `GetSystemList` | `peer.Connections` (each `Address` and `RakNetGuid`) |
 | `AddToBanList` / `RemoveFromBanList` / `ClearBanList` / `IsBanned` | `peer.BanList.Add(pattern, duration)` / `Remove` / `Clear` / `IsBanned` |
 | `SetLimitIPConnectionFrequency` | `peer.LimitIpConnectionFrequency` |
-| `Ping(SystemAddress)` | `connection.Ping()` |
+| `Ping(SystemAddress)` | `connection.Ping()`; takes a receipt number, as RakNet's goes through `Send` |
 | `Ping(host, port, onlyReplyOnAcceptingConnections, socketIndex)` | `peer.PingUnconnected(address, ...)` / `PingUnconnectedAsync(host, port, ...)`, answered by an `UnconnectedPong` event; or `peer.PingAsync(address, timeout)` |
 | `GetAveragePing` / `GetLastPing` / `GetLowestPing` | `connection.AveragePing` / `LastPing` / `LowestPing` (`null` for -1) |
 | `SetOccasionalPing` | `peer.OccasionalPing` |
@@ -164,12 +167,12 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `GetMyBoundAddress(i)` | `peer.Sockets[i].LocalAddress` |
 | `Get64BitUniqueRandomNumber` | `RandomSource.Shared.NextUInt64()` |
 | `GetGuidFromSystemAddress` | `peer.GetGuidFromAddress(address)` (own GUID for `Unassigned`) |
-| `GetSystemAddressFromGuid` | `peer.GetAddressFromGuid(rakNetGuid)` |
+| `GetSystemAddressFromGuid` | `peer.GetAddressFromGuid(rakNetGuid)` (`InternalAddresses[0]` for the own GUID) |
 | `GetClientPublicKeyFromSystemAddress` | `connection.RemoteIdentityKey` |
 | `SetTimeoutTime(ms, UNASSIGNED)` | `peer.DefaultTimeout` (default and every live connection) |
 | `SetTimeoutTime(ms, target)` / `GetTimeoutTime(target)` | `connection.Timeout` |
 | `GetMTUSize(target)` | `connection.Mtu`; for `UNASSIGNED` RakNet's `defaultMTUSize`, the smallest of `RakNetConstants.MtuSizes` (`RakPeer.cpp:206`, `2580`) |
-| `GetNumberOfAddresses` / `GetLocalIP(i)` | `peer.LocalAddresses.Count` / `peer.LocalAddresses[i]` |
+| `GetNumberOfAddresses` / `GetLocalIP(i)` | `peer.LocalAddresses.Count` / `peer.LocalAddresses[i]`, the assigned head of `InternalAddresses` (ipList) |
 | `IsLocalIP` | `peer.IsLocalAddress(IPAddress)` |
 | `AllowConnectionResponseIPMigration` | `peer.AllowConnectionResponseIpMigration` |
 | `AdvertiseSystem` | `peer.AdvertiseSystem(address, data, i)` / `AdvertiseSystemAsync(host, port, ...)`; received as `AdvertiseSystem` |

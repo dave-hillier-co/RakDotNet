@@ -8,9 +8,13 @@ namespace RakDotNet;
 /// <summary>One entry of RakNet's remote system list.</summary>
 /// <remarks>
 /// <para>
-/// Created when the I/O cycle reports the connection: for an outgoing attempt with ID_CONNECTION_REQUEST_ACCEPTED, for an
-/// incoming one with ID_NEW_INCOMING_CONNECTION. Before that an outgoing attempt is visible only as
-/// <see cref="ConnectionState.Pending"/> or <see cref="ConnectionState.Connecting"/> and its ConnectAsync task.
+/// Created when the remote system takes a slot in the list (AssignSystemAddressToRemoteSystemList,
+/// RakPeer.cpp:3595-3770): for an outgoing attempt once the server answers the offline handshake, for an incoming one
+/// once its OPEN_CONNECTION_REQUEST_2 is accepted. From then until ID_CONNECTION_REQUEST_ACCEPTED or
+/// ID_NEW_INCOMING_CONNECTION it is <see cref="ConnectionState.Connecting"/>, and it can be found, sent to and broadcast
+/// to as RakNet's slot can (RakPeer.cpp:4306-4347). Before it has a slot, an outgoing attempt is visible only as
+/// <see cref="ConnectionState.Pending"/> through <see cref="RakPeer.GetConnectionState"/> and its ConnectAsync task. A
+/// handshake that ends without RakNet reporting it ends the object too, with no event.
 /// </para>
 /// <para>
 /// Never reused: a later connection from the same address or GUID gets a new object, so identity is safe as a dictionary
@@ -23,7 +27,9 @@ namespace RakDotNet;
 public sealed class RakConnection
 {
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private volatile int _state = (int)ConnectionState.Connected;
+    private volatile int _state;
+    private volatile bool _isIncoming;
+    private volatile SystemAddressBox _externalAddress;
     private volatile int _systemIndex;
     private volatile int _mtu;
     private long _timeoutMs;
@@ -36,14 +42,15 @@ public sealed class RakConnection
     private volatile SystemAddressBox _address;
 
     internal RakConnection(RakPeer peer, RakNetGuid rakNetGuid, SystemAddress address, bool isIncoming, RakSocket socket,
-                           SystemAddress externalAddress, long nowUs)
+                           SystemAddress externalAddress, long nowUs, ConnectionState state)
     {
         Peer = peer;
         RakNetGuid = rakNetGuid;
         _address = new SystemAddressBox(address);
-        IsIncoming = isIncoming;
+        _isIncoming = isIncoming;
         Socket = socket;
-        ExternalAddress = externalAddress;
+        _externalAddress = new SystemAddressBox(externalAddress);
+        _state = (int)state;
         Counters = new ConnectionCounters(nowUs);
     }
 
@@ -57,7 +64,8 @@ public sealed class RakConnection
     /// <summary>GetIndexFromSystemAddress</summary>
     public int SystemIndex => _systemIndex;
 
-    public bool IsIncoming { get; }
+    /// <summary>Whether the remote system started the connection; set by the completing packet once there is one.</summary>
+    public bool IsIncoming => _isIncoming;
 
     /// <summary>GetSocket(target)</summary>
     public RakSocket Socket { get; }
@@ -93,8 +101,8 @@ public sealed class RakConnection
     /// <summary>GetClockDifferential, signed milliseconds. Incoming ID_TIMESTAMP is already shifted by it.</summary>
     public long ClockDifferential => Interlocked.Read(ref _clockDifferential);
 
-    /// <summary>GetExternalID(target): this peer's address as the remote sees it.</summary>
-    public SystemAddress ExternalAddress { get; }
+    /// <summary>GetExternalID(target): this peer's address as the remote sees it; unassigned until the connected handshake reports it.</summary>
+    public SystemAddress ExternalAddress => _externalAddress.Value;
 
     /// <summary>GetInternalID(target, i)</summary>
     public IReadOnlyList<SystemAddress> RemoteInternalAddresses => _remoteInternalAddresses;
@@ -177,6 +185,26 @@ public sealed class RakConnection
             _remoteInternalAddresses = system.TheirInternalAddresses.Select(a => (SystemAddress)a).ToArray();
         }
         Counters.Publish(system.Session);
+    }
+
+    /// <summary>The completing packet arrived: ID_CONNECTION_REQUEST_ACCEPTED or ID_NEW_INCOMING_CONNECTION. Called by the I/O cycle.</summary>
+    internal void MarkConnected(bool isIncoming, SystemAddress externalAddress)
+    {
+        _isIncoming = isIncoming;
+        if (externalAddress.IsAssigned)
+            _externalAddress = new SystemAddressBox(externalAddress);
+    }
+
+    /// <summary>
+    /// A connection object for a packet with no slot behind it, such as a pushed-back ID_NEW_INCOMING_CONNECTION, so
+    /// plugin connection callbacks get the packet's address and GUID as RakNet's do (RakPeer.cpp:6411-6428). It is in no
+    /// lookup, its <see cref="State"/> is NotConnected and <see cref="Closed"/> is complete.
+    /// </summary>
+    internal static RakConnection Unlisted(RakPeer peer, RakNetGuid rakNetGuid, SystemAddress address, bool isIncoming, RakSocket socket, long nowUs)
+    {
+        var connection = new RakConnection(peer, rakNetGuid, address, isIncoming, socket, SystemAddress.Unassigned, nowUs, ConnectionState.NotConnected);
+        connection._closed.TrySetResult();
+        return connection;
     }
 
     /// <summary>ChangeSystemAddress moved the connection. Called by the I/O cycle.</summary>

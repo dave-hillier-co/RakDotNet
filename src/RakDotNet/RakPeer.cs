@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using RakDotNet.Protocol.Peer;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Messages;
@@ -49,12 +50,16 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     // RakPeer::Shutdown polls for active systems every 15 ms (RakPeer.cpp:1082).
     private static readonly TimeSpan ShutdownPollInterval = TimeSpan.FromMilliseconds(15);
 
+    // GetTimeUS subtracts initialTime, taken once per process on the first call (GetTime.cpp:183-189). Here the
+    // process's clock is the TimeProvider, so every peer on one provider reads the same RakNet time.
+    private static readonly ConditionalWeakTable<TimeProvider, StrongBox<long>> ClockOrigins = new();
+
     private readonly RakPeerOptions _options;
     private readonly TimeProvider _time;
-    private readonly long _startTimestamp;
+    private readonly long _clockOrigin;
     private readonly IDatagramTransport[] _transports;
     private readonly RakSocket[] _sockets;
-    private readonly IPAddress[] _localAddresses;
+    private volatile IPAddress[] _localAddresses;
     private readonly IPEndPoint[] _coreInternalAddresses;
     private volatile SystemAddress[] _internalAddresses;
     private readonly ConcurrentQueue<PeerCommand> _commands = new();
@@ -94,19 +99,19 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private volatile bool _allowConnectionResponseIpMigration;
     private long _outgoingBandwidthLimit;
 
-    private RakPeer(RakPeerOptions options, RakNetGuid guid, IDatagramTransport[] transports, IPAddress[] localAddresses,
-                    IPEndPoint[] internalAddresses, PeerCore core, int eventCapacity)
+    private RakPeer(RakPeerOptions options, RakNetGuid guid, IDatagramTransport[] transports, IPEndPoint[] internalAddresses,
+                    PeerCore core, int eventCapacity)
     {
         _options = options;
         _time = options.TimeProvider;
-        _startTimestamp = _time.GetTimestamp();
+        _clockOrigin = ClockOrigins.GetValue(_time, static time => new StrongBox<long>(time.GetTimestamp())).Value;
         RakNetGuid = guid;
         _transports = transports;
         _sockets = [.. transports.Select((t, i) => new RakSocket(i, t))];
-        _localAddresses = localAddresses;
         _core = core;
         _coreInternalAddresses = internalAddresses;
         _internalAddresses = [.. internalAddresses.Select(a => (SystemAddress)a)];
+        _localAddresses = LocalIps(_internalAddresses);
         _eventCapacity = eventCapacity;
         _offlinePingResponse = options.OfflinePingResponse.ToArray();
         _maxIncomingConnections = Math.Min(options.MaxIncomingConnections, options.MaxConnections);
@@ -137,10 +142,9 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         try
         {
             var guid = options.RakNetGuid ?? DrawGuid(options.Random);
-            var localAddresses = HostAddresses();
             // The core reads ipList whenever it builds a handshake message, so SetInternalAddress changes this array in
             // the I/O cycle.
-            var internalAddresses = LocalAddressList.Build(localAddresses, transports[0].LocalAddress.Port).ToArray();
+            var internalAddresses = LocalAddressList.Build(HostAddresses(), transports[0].LocalAddress.Port).ToArray();
             var core = new PeerCore(new PeerOptions
             {
                 Guid = guid.Value,
@@ -160,8 +164,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
                 OccasionalPing = options.OccasionalPing,
             };
             core.SetOfflinePingResponse(options.OfflinePingResponse.Span);
-            var peer = new RakPeer(options, guid, transports, [.. localAddresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork)],
-                                   internalAddresses, core, options.Limits.EventQueueCapacity);
+            var peer = new RakPeer(options, guid, transports, internalAddresses, core, options.Limits.EventQueueCapacity);
             peer.StartPlugins();
             peer.StartLoop();
             return peer;
@@ -253,16 +256,23 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// <summary>Every timer reads this.</summary>
     public TimeProvider TimeProvider => _time;
 
-    /// <summary>RakNet::GetTime in milliseconds, from <see cref="TimeProvider"/>.</summary>
+    /// <summary>
+    /// RakNet::GetTime in milliseconds, from <see cref="TimeProvider"/>: the time since the first peer on that provider
+    /// started, so peers sharing a provider share a clock as peers in one RakNet process do (GetTime.cpp:183-189).
+    /// </summary>
     public ulong GetTime() => (ulong)(NowUs / 1000);
 
     /// <summary>One per <see cref="SocketBinding"/>, indexed by binding.</summary>
     public IReadOnlyList<RakSocket> Sockets => _sockets;
 
-    /// <summary>GetNumberOfAddresses / GetLocalIP</summary>
+    /// <summary>
+    /// GetNumberOfAddresses / GetLocalIP: the addresses of <see cref="InternalAddresses"/> up to its first unassigned
+    /// entry, as both read ipList (RakPeer.cpp:2586-2622), so the list is sorted, limited and changed by
+    /// <see cref="SetInternalAddress"/>.
+    /// </summary>
     public IReadOnlyList<IPAddress> LocalAddresses => _localAddresses;
 
-    /// <summary>IsLocalIP: 127.0.0.1 or an address of this host (RakPeer.cpp:2636-2657).</summary>
+    /// <summary>IsLocalIP: 127.0.0.1 or one of <see cref="LocalAddresses"/> (RakPeer.cpp:2636-2657).</summary>
     public bool IsLocalAddress(IPAddress address)
     {
         ArgumentNullException.ThrowIfNull(address);
@@ -286,6 +296,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
             var updated = (SystemAddress[])_internalAddresses.Clone();
             updated[index] = address;
             _internalAddresses = updated;
+            _localAddresses = LocalIps(updated);
         }
         Enqueue(new PeerCommand { Kind = CommandKind.SetInternalAddress, Target = address, Value = index });
     }
@@ -311,60 +322,100 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     /// <summary>
     /// NumberOfConnections: the connections whose <see cref="RakConnection.State"/> is Connected, as RakNet counts only
-    /// CONNECTED systems (RakPeer.cpp:920-926, 1832-1850). A connection that is disconnecting is not counted.
+    /// CONNECTED systems (RakPeer.cpp:920-926, 1832-1850). A connection that is connecting or disconnecting is not counted.
     /// </summary>
     public int ConnectionCount => _table.Connected.Length;
 
     /// <summary>
-    /// GetConnectionList / GetSystemList: the connections whose <see cref="RakConnection.State"/> is Connected
-    /// (RakPeer.cpp:1832-1850). <see cref="TryGetConnection(RakNetGuid, out RakConnection?)"/> still finds a connection
-    /// while it is disconnecting.
+    /// GetConnectionList / GetSystemList: the connections whose <see cref="RakConnection.State"/> is Connected, in the
+    /// order of RakNet's activeSystemList, where a removal moves the last entry into the hole (RakPeer.cpp:1832-1850,
+    /// 3945-3958). <see cref="TryGetConnection(RakNetGuid, out RakConnection?)"/> also finds a connection while it is
+    /// connecting or disconnecting.
     /// </summary>
     public ConnectionList Connections => new(_table.Connected);
 
+    /// <summary>The connection of the active slot with <paramref name="rakNetGuid"/>, whatever its state (RakPeer.cpp:3426-3440).</summary>
     public bool TryGetConnection(RakNetGuid rakNetGuid, [NotNullWhen(true)] out RakConnection? connection) =>
         _table.ByGuid.TryGetValue(rakNetGuid, out connection);
 
+    /// <summary>The connection of the active slot at <paramref name="address"/>, whatever its state (RakPeer.cpp:3407-3424).</summary>
     public bool TryGetConnection(SystemAddress address, [NotNullWhen(true)] out RakConnection? connection) =>
         _table.ByAddress.TryGetValue(address, out connection);
 
-    /// <summary>GetSystemAddressFromIndex / GetGUIDFromIndex.</summary>
+    /// <summary>GetSystemAddressFromIndex / GetGUIDFromIndex: only a Connected connection (RakPeer.cpp:1799-1825).</summary>
     public bool TryGetConnectionByIndex(int systemIndex, [NotNullWhen(true)] out RakConnection? connection)
     {
-        connection = Array.Find(_table.All, c => c.SystemIndex == systemIndex);
+        connection = Array.Find(_table.Connected, c => c.SystemIndex == systemIndex);
         return connection is not null;
     }
 
-    /// <summary>GetGuidFromSystemAddress: this peer's own GUID for <see cref="SystemAddress.Unassigned"/> (RakPeer.cpp:2396).</summary>
+    /// <summary>
+    /// GetGuidFromSystemAddress (RakPeer.cpp:2394-2417): this peer's own GUID for <see cref="SystemAddress.Unassigned"/>,
+    /// otherwise the GUID of the first slot, active or not, that holds the address; a slot that is no longer active has
+    /// an unassigned GUID.
+    /// </summary>
     public RakNetGuid GetGuidFromAddress(SystemAddress address)
     {
         if (!address.IsAssigned)
             return RakNetGuid;
-        return TryGetConnection(address, out var connection) ? connection.RakNetGuid : RakNetGuid.Unassigned;
+        foreach (var slot in _table.Slots)
+        {
+            if (slot.Address == address)
+                return slot.RakNetGuid;
+        }
+        return RakNetGuid.Unassigned;
     }
 
-    /// <summary>GetSystemAddressFromGuid</summary>
-    public SystemAddress GetAddressFromGuid(RakNetGuid rakNetGuid) =>
-        TryGetConnection(rakNetGuid, out var connection) ? connection.Address : SystemAddress.Unassigned;
+    /// <summary>
+    /// GetSystemAddressFromGuid (RakPeer.cpp:2447-2473): <see cref="InternalAddresses"/>[0] for this peer's own GUID,
+    /// otherwise the address of the slot with the GUID, connected or not.
+    /// </summary>
+    public SystemAddress GetAddressFromGuid(RakNetGuid rakNetGuid)
+    {
+        if (!rakNetGuid.IsAssigned)
+            return SystemAddress.Unassigned;
+        if (rakNetGuid == RakNetGuid)
+            return _internalAddresses[0];
+        foreach (var slot in _table.Slots)
+        {
+            if (slot.RakNetGuid == rakNetGuid)
+                return slot.Address;
+        }
+        return SystemAddress.Unassigned;
+    }
 
-    /// <summary>GetConnectionState, including <see cref="ConnectionState.Pending"/> attempts.</summary>
+    /// <summary>
+    /// GetConnectionState (RakPeer.cpp:1717-1770): <see cref="ConnectionState.Pending"/> for an address with a queued
+    /// attempt, then the state of the active slot with the address or GUID, then for an address only
+    /// <see cref="ConnectionState.Disconnected"/> when a slot held it before. A slot's GUID is cleared when it closes, so
+    /// a GUID that is no longer connected is <see cref="ConnectionState.NotConnected"/>.
+    /// </summary>
     public ConnectionState GetConnectionState(AddressOrGuid target)
     {
         if (target.IsUndefined)
             return ConnectionState.NotConnected;
+        var table = _table;
         if (target.RakNetGuid.IsAssigned)
-            return TryGetConnection(target.RakNetGuid, out var byGuid) ? byGuid.State : ConnectionState.NotConnected;
+            return table.ByGuid.TryGetValue(target.RakNetGuid, out var byGuid) ? byGuid.State : ConnectionState.NotConnected;
         lock (_attemptsGate)
         {
-            if (_attempts.TryGetValue(target.Address, out var attempt))
-                return attempt.State;
+            if (_attempts.TryGetValue(target.Address, out var attempt) && attempt.State == ConnectionState.Pending)
+                return ConnectionState.Pending;
         }
-        return TryGetConnection(target.Address, out var byAddress) ? byAddress.State : ConnectionState.NotConnected;
+        if (table.ByAddress.TryGetValue(target.Address, out var byAddress))
+            return byAddress.State;
+        foreach (var slot in table.Slots)
+        {
+            if (slot.Address == target.Address)
+                return ConnectionState.Disconnected;
+        }
+        return ConnectionState.NotConnected;
     }
 
     /// <summary>
     /// Checks the connection table and the attempt registry, then queues the attempt. The outcome later arrives on the
-    /// stream as Connected or ConnectFailed.
+    /// stream as Connected or ConnectFailed. An address with an active slot, an incoming handshake included, is
+    /// <see cref="ConnectAttemptResult.AlreadyConnectedToEndpoint"/> (RakPeer.cpp:3275-3276).
     /// </summary>
     public ConnectAttemptResult Connect(SystemAddress remote, ConnectOptions? options = null) =>
         StartConnect(remote, options ?? DefaultConnectOptions, completion: null, out _);
@@ -854,10 +905,13 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// <summary>Whether <see cref="RakPeerOptions.Security"/> was set at start.</summary>
     public bool IsSecurityEnabled => _options.Security is not null;
 
-    /// <summary>GetStatisticsList: copies up to <paramref name="destination"/>'s length and returns the count copied.</summary>
+    /// <summary>
+    /// GetStatisticsList: the Connected connections in <see cref="Connections"/> order (RakPeer.cpp:3096-3118). Copies
+    /// up to <paramref name="destination"/>'s length and returns the count copied.
+    /// </summary>
     public int CopyStatistics(Span<ConnectionStatistics> destination)
     {
-        var all = _table.All;
+        var all = _table.Connected;
         var count = Math.Min(all.Length, destination.Length);
         var now = NowUs;
         for (var i = 0; i < count; i++)
@@ -874,7 +928,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     RakPeer? IPluginHost.Peer => this;
 
-    internal long NowUs => (long)_time.GetElapsedTime(_startTimestamp).TotalMicroseconds;
+    internal long NowUs => (long)_time.GetElapsedTime(_clockOrigin).TotalMicroseconds;
 
     internal TimeSpan PluginUpdateInterval => _options.PluginUpdateInterval;
 
@@ -920,10 +974,14 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         Enqueue(new PeerCommand { Kind = CommandKind.SetNetworkSimulator, State = options });
     }
 
-    /// <summary>Ping(SystemAddress): one unreliable ID_CONNECTED_PING on the next cycle (RakPeer.cpp:2073-2076).</summary>
+    /// <summary>
+    /// Ping(SystemAddress): one unreliable ID_CONNECTED_PING on the next cycle (RakPeer.cpp:2073-2076). It goes through
+    /// Send, so it takes a receipt number (RakPeer.cpp:4114, 1326-1330).
+    /// </summary>
     internal void PingConnected(RakConnection connection)
     {
         ThrowIfStopped();
+        ReserveReceipt();
         Enqueue(new PeerCommand { Kind = CommandKind.PingConnected, Target = connection.RakNetGuid });
     }
 
@@ -1028,6 +1086,10 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
                 return guid;
         }
     }
+
+    // GetNumberOfAddresses and GetLocalIP: ipList up to its first unassigned entry (RakPeer.cpp:2586-2622).
+    private static IPAddress[] LocalIps(SystemAddress[] ipList) =>
+        [.. ipList.TakeWhile(a => a.IsAssigned).Select(a => a.ToIPEndPoint().Address)];
 
     // RakPeer gets ipList from gethostbyname of the host name (RakNetSocket2_Windows_Linux.cpp:70-103); a host that does
     // not resolve has no internal addresses.
@@ -1316,18 +1378,40 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         public SystemAddress Value { get; } = value;
     }
 
-    /// <summary>The published connection table: rebuilt by the I/O cycle when a connection is added or removed.</summary>
-    private sealed class ConnectionTable(RakConnection[] all)
+    /// <summary>
+    /// The published remote system list: rebuilt by the I/O cycle when a slot is assigned, closed or moved, or a
+    /// connection enters or leaves Connected.
+    /// </summary>
+    private sealed class ConnectionTable
     {
-        public static ConnectionTable Empty { get; } = new([]);
+        public ConnectionTable(RakConnection[] all, SlotView[] slots)
+        {
+            All = all;
+            Slots = slots;
+            Connected = Array.FindAll(all, c => c.State == ConnectionState.Connected);
+            foreach (var connection in all)
+            {
+                ByGuid.TryAdd(connection.RakNetGuid, connection);
+                ByAddress.TryAdd(connection.Address, connection);
+            }
+        }
 
-        public RakConnection[] All { get; } = all;
+        public static ConnectionTable Empty { get; } = new([], []);
 
-        /// <summary>The entries that were Connected when the table was published.</summary>
-        public RakConnection[] Connected { get; } = Array.FindAll(all, c => c.State == ConnectionState.Connected);
+        /// <summary>The connection of every active slot, in activeSystemList order.</summary>
+        public RakConnection[] All { get; }
 
-        public Dictionary<RakNetGuid, RakConnection> ByGuid { get; } = all.ToDictionary(c => c.RakNetGuid);
+        /// <summary>The entries of <see cref="All"/> that were Connected when the table was published.</summary>
+        public RakConnection[] Connected { get; }
 
-        public Dictionary<SystemAddress, RakConnection> ByAddress { get; } = all.ToDictionary(c => c.Address);
+        public Dictionary<RakNetGuid, RakConnection> ByGuid { get; } = [];
+
+        public Dictionary<SystemAddress, RakConnection> ByAddress { get; } = [];
+
+        /// <summary>remoteSystemList by index, closed slots included.</summary>
+        public SlotView[] Slots { get; }
     }
+
+    /// <summary>One entry of remoteSystemList as queries see it: a closed slot keeps its address and loses its GUID.</summary>
+    private readonly record struct SlotView(SystemAddress Address, RakNetGuid RakNetGuid);
 }

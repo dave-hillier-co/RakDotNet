@@ -241,7 +241,7 @@ public class ConnectedPingTests
     }
 
     [Fact]
-    public void An_incoming_timestamp_is_shifted_onto_the_local_clock()
+    public void An_incoming_timestamp_leaves_the_core_as_it_arrived()
     {
         Connect();
         var serverTimeMs = (ulong)(_link.NowUsOf(_server) / 1000);
@@ -250,36 +250,9 @@ public class ConnectedPingTests
         _server.Send(ClientAddress, message, Reliability.ReliableOrdered, Priority.High, 0, _link.NowUsOf(_server));
         _link.RunUntil(() => ClientEvents.OfType<MessageReceived>().Any(), TimeSpan.FromSeconds(1));
 
-        // RakPeer::Receive, RakPeer.cpp:1548-1555, 3773-3787: the time is rewritten on the way to the application.
-        var received = ClientEvents.OfType<MessageReceived>().Single().Packet.ToArray();
-        var shifted = BinaryPrimitives.ReadUInt64BigEndian(received.AsSpan(1));
-        Assert.Equal(serverTimeMs - (ulong)_client.GetClockDifferential(ServerAddress), shifted);
-        Assert.InRange((long)shifted, _link.NowMs - 10, _link.NowMs);
-        Assert.Equal(message[..1], received[..1]);
-        Assert.Equal(message[9..], received[9..]);
-    }
-
-    [Fact]
-    public void A_timestamp_dequeued_after_its_sender_disconnected_is_not_shifted()
-    {
-        Connect();
-        Assert.NotEqual(0, _client.GetClockDifferential(ServerAddress));
-        byte[] message = [(byte)MessageId.Timestamp, .. BigEndian(1_234_567), (byte)MessageId.UserPacketEnum];
-        _server.Send(ClientAddress, message, Reliability.ReliableOrdered, Priority.Immediate, 0, _link.NowUsOf(_server));
-        // Deliver by hand for 10 ms, leaving the client's events queued.
-        for (var us = 1_000; us <= 10_000; us += 1_000)
-        {
-            _server.Update(_link.NowUsOf(_server) + us);
-            foreach (var datagram in Datagrams(_server))
-                _client.Receive(ServerAddress, datagram.Data, ClientNowUs + us);
-            _client.Update(ClientNowUs + us);
-        }
-
-        _client.CloseConnection(ServerAddress, false, 0, Priority.Low, ClientNowUs);
-
-        // GetBestClockDifferential looks up only active systems (RakPeer.cpp:3793), so the time is shifted by 0.
-        var received = Events(_client).OfType<MessageReceived>().Single().Packet.ToArray();
-        Assert.Equal(message, received);
+        // RakPeer::Receive shifts the time as the application reads it (RakPeer.cpp:1548-1555), not as the update
+        // thread queues it, so the layer above does it.
+        Assert.Equal(message, ClientEvents.OfType<MessageReceived>().Single().Packet.ToArray());
     }
 
     [Fact]
