@@ -39,7 +39,7 @@ public class BitStreamPositioningTests
     [Fact]
     public void WriteBits_left_aligned_takes_the_high_bits_of_the_final_byte()
     {
-        // BitStream.cpp:424-475 with rightAlignedBits false: the partial last byte is not shifted.
+        // BitStream.cpp:424-480 with rightAlignedBits false: the partial last byte is not shifted.
         AssertWritten((ref BitStreamWriter w) => w.WriteBits([0xab, 0xe0], 11, rightAlignedBits: false), 12, "d5f0");
         AssertWritten((ref BitStreamWriter w) => w.WriteBits([0x05], 3, rightAlignedBits: true), 4, "d0");
     }
@@ -47,7 +47,7 @@ public class BitStreamPositioningTests
     [Fact]
     public void WriteBits_left_aligned_keeps_the_unused_low_bits_of_the_final_byte_as_native_does()
     {
-        // BitStream.cpp:446-455: the whole input byte is copied, so the bits past the count stay set and later writes OR
+        // BitStream.cpp:448-460: the whole input byte is copied, so the bits past the count stay set and later writes OR
         // into them.
         AssertWritten((ref BitStreamWriter w) =>
         {
@@ -78,7 +78,7 @@ public class BitStreamPositioningTests
     [Fact]
     public void Write_from_a_reader_copies_bits_from_its_position()
     {
-        // BitStream.cpp:193-243: copies from the source's read offset.
+        // BitStream.cpp:193-237: copies from the source's read offset.
         Span<byte> buffer = stackalloc byte[8];
         var source = new BitStreamReader([0x5a, 0xc3, 0x80], 17);
         Assert.True(source.IgnoreBits(3));
@@ -123,7 +123,7 @@ public class BitStreamPositioningTests
     [Fact]
     public void A_reader_can_read_into_a_BitStream_and_fails_when_short()
     {
-        // BitStream.cpp:244-270: Read(BitStream&, bits) fails when fewer bits are unread.
+        // BitStream.cpp:246-270: Read(BitStream&, bits) fails when fewer bits are unread.
         var source = new BitStreamReader([0x5a, 0xc3, 0x80], 17);
         Assert.True(source.IgnoreBits(3));
         using var stream = new BitStream();
@@ -238,7 +238,7 @@ public class BitStreamPositioningTests
     [Fact]
     public void TryReadAlignedBytesSafe_caps_the_length_at_the_maximum()
     {
-        // BitStream.cpp:384-394.
+        // BitStream.cpp:395-404.
         var reader = Reader("8000000180616263646566", 88);
         Assert.True(reader.TryReadAlignedBytesSafe(4, out var capped));
         Assert.Equal("abcd"u8.ToArray(), capped.ToArray());

@@ -208,7 +208,7 @@ public static partial class BitStreamEncodings
     }
 
     /// <summary>
-    /// BitStream::ReadAlignedBytesSafe (BitStream.cpp:384-394): a compressed u32 length capped at
+    /// BitStream::ReadAlignedBytesSafe (BitStream.cpp:395-404): a compressed u32 length capped at
     /// <paramref name="maxBytes"/>, then that many aligned bytes as a slice of the input. A length of 0 does not align.
     /// </summary>
     public static bool TryReadAlignedBytesSafe(this ref BitStreamReader reader, int maxBytes, out ReadOnlySpan<byte> value)
@@ -534,81 +534,5 @@ public static partial class BitStreamEncodings
         writer.WriteUInt16((ushort)(Math.Abs(x) * 65535.0));
         writer.WriteUInt16((ushort)(Math.Abs(y) * 65535.0));
         writer.WriteUInt16((ushort)(Math.Abs(z) * 65535.0));
-    }
-}
-
-/// <summary>
-/// RakNet's <c>Serialize(bool writeToBitstream, ...)</c> idiom: one method body that either writes or reads.
-/// </summary>
-/// <remarks>
-/// A ref struct cannot hold a <c>ref</c> to another ref struct, so the serializer owns its writer or reader by value;
-/// <see cref="Writer"/> and <see cref="Reader"/> return the advanced copy.
-/// </remarks>
-public ref struct BitSerializer
-{
-    private BitStreamWriter _writer;
-    private BitStreamReader _reader;
-
-    public BitSerializer(BitStreamWriter writer)
-    {
-        _writer = writer;
-        IsWriting = true;
-    }
-
-    public BitSerializer(BitStreamReader reader) => _reader = reader;
-
-    public readonly bool IsWriting { get; }
-
-    /// <summary>The writer after the calls so far. Throws when reading.</summary>
-    public readonly BitStreamWriter Writer =>
-        IsWriting ? _writer : throw new InvalidOperationException("The serializer is reading.");
-
-    /// <summary>The reader after the calls so far. Throws when writing.</summary>
-    public readonly BitStreamReader Reader =>
-        IsWriting ? throw new InvalidOperationException("The serializer is writing.") : _reader;
-
-    /// <summary>Writes <paramref name="value"/>, or reads into it; false when a read fails.</summary>
-    /// <remarks>BitStream::Serialize: the value's bytes big-endian (BitStream.h:1080-1102).</remarks>
-    public bool Serialize<T>(ref T value)
-        where T : unmanaged, INumber<T>
-    {
-        if (IsWriting)
-        {
-            BitStreamEncodings.WriteRaw(ref _writer, value);
-            return true;
-        }
-        if (!BitStreamEncodings.TryReadRaw(ref _reader, out T read))
-            return false;
-        value = read;
-        return true;
-    }
-
-    /// <summary>BitStream::Serialize of a bool: one bit.</summary>
-    public bool Serialize(ref bool value)
-    {
-        if (IsWriting)
-        {
-            _writer.WriteBit(value);
-            return true;
-        }
-        if (!_reader.TryReadBit(out var read))
-            return false;
-        value = read;
-        return true;
-    }
-
-    /// <summary>BitStream::SerializeCompressed.</summary>
-    public bool SerializeCompressed<T>(ref T value)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        if (IsWriting)
-        {
-            _writer.WriteCompressed(value);
-            return true;
-        }
-        if (!_reader.TryReadCompressed(out T read))
-            return false;
-        value = read;
-        return true;
     }
 }

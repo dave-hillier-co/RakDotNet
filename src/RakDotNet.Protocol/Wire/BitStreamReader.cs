@@ -85,7 +85,7 @@ public ref struct BitStreamReader
     /// </summary>
     /// <remarks>
     /// Left-aligned, RakNet does not mask the final byte, so its low bits hold the bits of the stream byte that follow
-    /// the ones read (BitStream.cpp:579-581); this reader does the same.
+    /// the ones read (BitStream.cpp:580-583); this reader does the same.
     /// </remarks>
     public bool TryReadBits(scoped Span<byte> destination, int bitCount, bool alignBitsToRight = true)
     {
@@ -117,7 +117,7 @@ public ref struct BitStreamReader
 
     /// <summary>
     /// Copies <paramref name="bitCount"/> bits into <paramref name="destination"/>; false, without moving, when fewer
-    /// are unread. Matches BitStream::Read(BitStream*, numberOfBits) (BitStream.cpp:244-250).
+    /// are unread. Matches BitStream::Read(BitStream*, numberOfBits) (BitStream.cpp:246-252).
     /// </summary>
     public bool TryReadBits(BitStream destination, int bitCount)
     {
@@ -248,7 +248,7 @@ public ref struct BitStreamReader
         return true;
     }
 
-    /// <summary>Reads a GUID as BitStream::Read(RakNetGUID) does (BitStream.h:1562-1566): a big-endian u64.</summary>
+    /// <summary>Reads a GUID as BitStream::Read(RakNetGUID) does (BitStream.h:1551-1554): a big-endian u64.</summary>
     public bool TryReadRakNetGuid(out RakNetGuid value)
     {
         var ok = TryReadUInt64(out var raw);

@@ -2,13 +2,13 @@ using System.Numerics;
 
 namespace RakDotNet.Protocol.Wire;
 
-// The compressed forms of non-integer types, and the delta and compressed delta encodings (BitStream.h:1236-1432,
-// 1585-1724). RakNet's templates accept any type with Write and operator==, so each type it specialises or that has a
+// The compressed forms of non-integer types, and the delta and compressed delta encodings (BitStream.h:1236-1438,
+// 1589-1743). RakNet's templates accept any type with Write and operator==, so each type it specialises or that has a
 // Write gets an overload here; integers and floating point go through the generic INumber forms.
 public static partial class BitStreamEncodings
 {
     /// <summary>
-    /// BitStream::WriteCompressed(float) (BitStream.h:1327-1338): clamped to -1..1, then <c>(value + 1) * 32767.5</c>
+    /// BitStream::WriteCompressed(float) (BitStream.h:1328-1338): clamped to -1..1, then <c>(value + 1) * 32767.5</c>
     /// as a u16.
     /// </summary>
     public static void WriteCompressed(this ref BitStreamWriter writer, float value)
@@ -20,7 +20,7 @@ public static partial class BitStreamEncodings
         writer.WriteUInt16((ushort)((value + 1.0f) * 32767.5f));
     }
 
-    /// <summary>BitStream::ReadCompressed(float) (BitStream.h:1665-1676).</summary>
+    /// <summary>BitStream::ReadCompressed(float) (BitStream.h:1666-1676).</summary>
     public static bool TryReadCompressed(this ref BitStreamReader reader, out float value)
     {
         value = default;
@@ -44,7 +44,7 @@ public static partial class BitStreamEncodings
         writer.WriteUInt32((uint)((value + 1.0) * 2147483648.0));
     }
 
-    /// <summary>BitStream::ReadCompressed(double) (BitStream.h:1678-1689).</summary>
+    /// <summary>BitStream::ReadCompressed(double) (BitStream.h:1679-1689).</summary>
     public static bool TryReadCompressed(this ref BitStreamReader reader, out double value)
     {
         value = default;
@@ -54,19 +54,19 @@ public static partial class BitStreamEncodings
         return true;
     }
 
-    /// <summary>BitStream::WriteCompressed(bool) is Write(bool), one bit (BitStream.h:1320-1324).</summary>
+    /// <summary>BitStream::WriteCompressed(bool) is Write(bool), one bit (BitStream.h:1321-1324).</summary>
     public static void WriteCompressed(this ref BitStreamWriter writer, bool value) => writer.WriteBit(value);
 
     /// <summary>BitStream::ReadCompressed(bool) is Read(bool) (BitStream.h:1659-1663).</summary>
     public static bool TryReadCompressed(this ref BitStreamReader reader, out bool value) => reader.TryReadBit(out value);
 
-    /// <summary>BitStream::WriteCompressed(SystemAddress) is Write(SystemAddress) (BitStream.h:1305-1308).</summary>
+    /// <summary>BitStream::WriteCompressed(SystemAddress) is Write(SystemAddress) (BitStream.h:1303-1307).</summary>
     public static void WriteCompressed(this ref BitStreamWriter writer, SystemAddress value) => writer.WriteAddress(value);
 
     /// <summary>BitStream::ReadCompressed(SystemAddress) is Read(SystemAddress) (BitStream.h:1641-1645).</summary>
     public static bool TryReadCompressed(this ref BitStreamReader reader, out SystemAddress value) => reader.TryReadSystemAddress(out value);
 
-    /// <summary>BitStream::WriteCompressed(RakNetGUID) is Write(RakNetGUID) (BitStream.h:1310-1314).</summary>
+    /// <summary>BitStream::WriteCompressed(RakNetGUID) is Write(RakNetGUID) (BitStream.h:1309-1313).</summary>
     public static void WriteCompressed(this ref BitStreamWriter writer, RakNetGuid value) => writer.WriteRakNetGuid(value);
 
     /// <summary>BitStream::ReadCompressed(RakNetGUID) is Read(RakNetGUID) (BitStream.h:1653-1657).</summary>
@@ -79,7 +79,7 @@ public static partial class BitStreamEncodings
     public static bool TryReadCompressed(this ref BitStreamReader reader, out UInt24 value) => reader.TryReadUInt24(out value);
 
     /// <summary>
-    /// BitStream::WriteDelta (BitStream.h:1235-1247): a 0 bit if <paramref name="value"/> equals <paramref name="last"/>,
+    /// BitStream::WriteDelta (BitStream.h:1236-1247): a 0 bit if <paramref name="value"/> equals <paramref name="last"/>,
     /// else a 1 bit then the value big-endian. Floating point compares as C++ <c>==</c> does, so NaN is always written.
     /// </summary>
     public static void WriteDelta<T>(this ref BitStreamWriter writer, T value, T last)
@@ -90,7 +90,7 @@ public static partial class BitStreamEncodings
             WriteRaw(ref writer, value);
     }
 
-    /// <summary>BitStream::WriteDelta with no last value (BitStream.h:1260-1266): a 1 bit, then the value.</summary>
+    /// <summary>BitStream::WriteDelta with no last value (BitStream.h:1263-1268): a 1 bit, then the value.</summary>
     public static void WriteDelta<T>(this ref BitStreamWriter writer, T value)
         where T : unmanaged, INumber<T>
     {
@@ -99,7 +99,7 @@ public static partial class BitStreamEncodings
     }
 
     /// <summary>
-    /// BitStream::ReadDelta (BitStream.h:1576-1586): leaves <paramref name="value"/> unchanged when the sender wrote
+    /// BitStream::ReadDelta (BitStream.h:1589-1598): leaves <paramref name="value"/> unchanged when the sender wrote
     /// the same value; false, without moving, when truncated.
     /// </summary>
     public static bool TryReadDelta<T>(this ref BitStreamReader reader, ref T value)
@@ -119,7 +119,7 @@ public static partial class BitStreamEncodings
     }
 
     /// <summary>
-    /// BitStream::WriteDelta(bool, bool) (BitStream.h:1252-1258): writes <paramref name="value"/> only, as one bit.
+    /// BitStream::WriteDelta(bool, bool) (BitStream.h:1253-1258): writes <paramref name="value"/> only, as one bit.
     /// </summary>
     public static void WriteDelta(this ref BitStreamWriter writer, bool value, bool last) => writer.WriteBit(value);
 
@@ -133,7 +133,7 @@ public static partial class BitStreamEncodings
         writer.WriteBit(value);
     }
 
-    /// <summary>BitStream::ReadDelta(bool) (BitStream.h:1593-1597): reads the one bit.</summary>
+    /// <summary>BitStream::ReadDelta(bool) (BitStream.h:1602-1605): reads the one bit.</summary>
     public static bool TryReadDelta(this ref BitStreamReader reader, ref bool value)
     {
         if (!reader.TryReadBit(out var read))
@@ -222,7 +222,7 @@ public static partial class BitStreamEncodings
     }
 
     /// <summary>
-    /// BitStream::WriteCompressedDelta (BitStream.h:1395-1410): a 0 bit if <paramref name="value"/> equals
+    /// BitStream::WriteCompressedDelta (BitStream.h:1399-1410): a 0 bit if <paramref name="value"/> equals
     /// <paramref name="last"/>, else a 1 bit then the compressed value.
     /// </summary>
     public static void WriteCompressedDelta<T>(this ref BitStreamWriter writer, T value, T last)
@@ -233,7 +233,7 @@ public static partial class BitStreamEncodings
             writer.WriteCompressed(value);
     }
 
-    /// <summary>BitStream::WriteCompressedDelta with no last value (BitStream.h:1420-1426): a 1 bit, then the value.</summary>
+    /// <summary>BitStream::WriteCompressedDelta with no last value (BitStream.h:1426-1430): a 1 bit, then the value.</summary>
     public static void WriteCompressedDelta<T>(this ref BitStreamWriter writer, T value)
         where T : unmanaged, IBinaryInteger<T>
     {
@@ -241,7 +241,7 @@ public static partial class BitStreamEncodings
         writer.WriteCompressed(value);
     }
 
-    /// <summary>BitStream::ReadCompressedDelta (BitStream.h:1707-1716).</summary>
+    /// <summary>BitStream::ReadCompressedDelta (BitStream.h:1727-1736).</summary>
     public static bool TryReadCompressedDelta<T>(this ref BitStreamReader reader, ref T value)
         where T : unmanaged, IBinaryInteger<T>
     {
@@ -320,13 +320,13 @@ public static partial class BitStreamEncodings
         return true;
     }
 
-    /// <summary>BitStream::WriteCompressedDelta(bool, bool) (BitStream.h:1412-1418): writes the bool only.</summary>
+    /// <summary>BitStream::WriteCompressedDelta(bool, bool) (BitStream.h:1416-1420): writes the bool only.</summary>
     public static void WriteCompressedDelta(this ref BitStreamWriter writer, bool value, bool last) => writer.WriteBit(value);
 
-    /// <summary>BitStream::WriteCompressedDelta(bool) (BitStream.h:1428-1432): writes the bool only.</summary>
+    /// <summary>BitStream::WriteCompressedDelta(bool) (BitStream.h:1435-1438): writes the bool only.</summary>
     public static void WriteCompressedDelta(this ref BitStreamWriter writer, bool value) => writer.WriteBit(value);
 
-    /// <summary>BitStream::ReadCompressedDelta(bool) (BitStream.h:1720-1724): reads the one bit.</summary>
+    /// <summary>BitStream::ReadCompressedDelta(bool) (BitStream.h:1740-1743): reads the one bit.</summary>
     public static bool TryReadCompressedDelta(this ref BitStreamReader reader, ref bool value) => reader.TryReadDelta(ref value);
 
     /// <summary>BitStream::WriteCompressedDelta of a SystemAddress, whose compressed form is the plain one.</summary>

@@ -101,7 +101,7 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
     /// <summary>
     /// Copies <paramref name="bitCount"/> bits from <paramref name="source"/>'s position and advances it past them,
     /// stopping early when the source runs out. Matches BitStream::Write(BitStream*, numberOfBits)
-    /// (BitStream.cpp:193-243).
+    /// (BitStream.cpp:193-237).
     /// </summary>
     public void Write(scoped ref BitStreamReader source, int bitCount)
     {

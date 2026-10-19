@@ -75,10 +75,10 @@ public ref struct BitStreamWriter
     /// <summary>
     /// Writes <paramref name="bitCount"/> bits from <paramref name="source"/>: whole bytes in order, then the final
     /// partial byte's low bits, or with <paramref name="rightAlignedBits"/> false its high bits. Matches
-    /// BitStream::WriteBits (BitStream.cpp:424-475).
+    /// BitStream::WriteBits (BitStream.cpp:424-480).
     /// </summary>
     /// <remarks>
-    /// Left-aligned, RakNet copies the whole final byte unshifted (BitStream.cpp:446-455), so bits of it past
+    /// Left-aligned, RakNet copies the whole final byte unshifted (BitStream.cpp:448-460), so bits of it past
     /// <paramref name="bitCount"/> land in the stream and later writes OR into them; this writer does the same. RakNet's
     /// own left-aligned callers pass bytes whose unused bits are zero.
     /// </remarks>
@@ -115,7 +115,7 @@ public ref struct BitStreamWriter
     /// <summary>
     /// Copies up to <paramref name="bitCount"/> bits from <paramref name="source"/>'s position, stopping early when the
     /// source runs out, and returns how many were copied. BitStream::Write(BitStream*, numberOfBits)
-    /// (BitStream.cpp:193-243) without the advance of the source: the reader is taken by value so that a writer over a
+    /// (BitStream.cpp:193-237) without the advance of the source: the reader is taken by value so that a writer over a
     /// stack buffer can copy from a reader over any memory. <see cref="BitStream.Write(ref BitStreamReader, int)"/>
     /// advances its source.
     /// </summary>
@@ -236,7 +236,7 @@ public ref struct BitStreamWriter
         WriteBytes(bytes);
     }
 
-    /// <summary>Writes the GUID's u64 big-endian. Matches BitStream::Write(RakNetGUID) (BitStream.h:1220-1224).</summary>
+    /// <summary>Writes the GUID's u64 big-endian. Matches BitStream::Write(RakNetGUID) (BitStream.h:1187-1190).</summary>
     public void WriteRakNetGuid(RakNetGuid value) => WriteUInt64(value.Value);
 
     /// <summary>

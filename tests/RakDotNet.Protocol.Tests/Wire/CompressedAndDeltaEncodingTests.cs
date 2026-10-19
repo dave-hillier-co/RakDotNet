@@ -20,7 +20,7 @@ public class CompressedAndDeltaEncodingTests
     [InlineData(-0.3f, "accc80")]
     public void WriteCompressed_float_is_a_u16_between_minus_one_and_one(float value, string hex)
     {
-        // BitStream.h:1327-1338: clamped to -1..1, then (value + 1) * 32767.5 as a u16.
+        // BitStream.h:1328-1338: clamped to -1..1, then (value + 1) * 32767.5 as a u16.
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressed(value), 17, hex);
         var reader = Reader(hex, 17);
         Assert.True(reader.TryReadCompressed(out float read));
@@ -53,7 +53,7 @@ public class CompressedAndDeltaEncodingTests
     [Fact]
     public void The_compressed_forms_of_bool_address_guid_and_uint24_are_the_plain_forms()
     {
-        // BitStream.h:1305-1325: WriteCompressed of these types calls Write.
+        // BitStream.h:1303-1324: WriteCompressed of these types calls Write.
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressed(true), 2, "c0");
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressed(Address), 57, "827aff7efe026900");
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressed(Guid), 65, "808101820283038400");
@@ -76,7 +76,7 @@ public class CompressedAndDeltaEncodingTests
     [Fact]
     public void WriteRakNetGuid_writes_the_value_big_endian()
     {
-        // BitStream.h:1220-1224: Write(RakNetGUID) writes the u64 g.
+        // BitStream.h:1187-1190: Write(RakNetGUID) writes the u64 g.
         AssertWritten((ref BitStreamWriter w) => w.WriteRakNetGuid(Guid), 65, "808101820283038400");
         var reader = Reader("808101820283038400", 65);
         Assert.True(reader.TryReadRakNetGuid(out var read));
@@ -96,7 +96,7 @@ public class CompressedAndDeltaEncodingTests
     [Fact]
     public void WriteDelta_without_a_last_value_always_writes_the_flag_and_the_value()
     {
-        // BitStream.h:1262-1266.
+        // BitStream.h:1263-1268.
         AssertWritten((ref BitStreamWriter w) => w.WriteDelta(7u), 34, "c0000001c0");
         var reader = Reader("c0000001c0", 34);
         var value = 0u;
@@ -107,13 +107,13 @@ public class CompressedAndDeltaEncodingTests
     [Fact]
     public void WriteDelta_of_a_bool_writes_only_the_bool()
     {
-        // BitStream.h:1252-1258: the bool specialisation ignores the last value.
+        // BitStream.h:1253-1258: the bool specialisation ignores the last value.
         AssertWritten((ref BitStreamWriter w) => w.WriteDelta(true, false), 2, "c0");
         AssertWritten((ref BitStreamWriter w) => w.WriteDelta(false, false), 2, "80");
         // The one-argument form has no bool specialisation: a 1 bit, then the bool.
         AssertWritten((ref BitStreamWriter w) => w.WriteDelta(false), 3, "c0");
 
-        // BitStream.h:1593-1597: ReadDelta of a bool reads the one bit.
+        // BitStream.h:1602-1605: ReadDelta of a bool reads the one bit.
         var reader = Reader("c0", 2);
         var flag = false;
         Assert.True(reader.TryReadDelta(ref flag));
@@ -178,7 +178,7 @@ public class CompressedAndDeltaEncodingTests
     [Fact]
     public void WriteCompressedDelta_writes_a_flag_then_the_compressed_value()
     {
-        // BitStream.h:1395-1432.
+        // BitStream.h:1399-1438.
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressedDelta(5u, 5u), 2, "80");
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressedDelta(6u, 5u), 35, "c0000000c0");
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressedDelta(6u), 35, "c0000000c0");
@@ -205,7 +205,7 @@ public class CompressedAndDeltaEncodingTests
     [Fact]
     public void WriteCompressedDelta_of_a_bool_writes_only_the_bool()
     {
-        // BitStream.h:1413-1418 and 1428-1432: both bool forms are Write(bool).
+        // BitStream.h:1416-1420 and 1435-1438: both bool forms are Write(bool).
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressedDelta(true, true), 2, "c0");
         AssertWritten((ref BitStreamWriter w) => w.WriteCompressedDelta(true), 2, "c0");
         var reader = Reader("c0", 2);
