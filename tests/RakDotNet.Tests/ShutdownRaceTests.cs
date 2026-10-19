@@ -50,10 +50,60 @@ public sealed class ShutdownRaceTests
         Assert.Equal(new SendReceipt(7), outcome.Receipt);
     }
 
+    [Fact]
+    public void A_read_on_another_thread_while_shutdown_holds_the_dispatch_step_returns_false()
+    {
+        // Section 7: from the shutdown call on, a concurrent read finishes first and later reads return false. The
+        // plugin step of shutdown holds the dispatch step, so a read from another thread then must not throw.
+        var plugin = new ReadingOnShutdownPlugin();
+        var peer = RakPeer.Start(new RakPeerOptions
+        {
+            MaxConnections = 1,
+            Bindings = [ManualPeers.Loopback],
+            Threading = PeerThreading.Manual,
+            Plugins = [plugin],
+        });
+
+        peer.Dispose();
+
+        Assert.Null(plugin.Failure);
+        Assert.False(plugin.Read);
+    }
+
     private static RakPeer Start() => RakPeer.Start(new RakPeerOptions
     {
         MaxConnections = 1,
         Bindings = [ManualPeers.Loopback],
         Threading = PeerThreading.Manual,
     });
+
+    private sealed class ReadingOnShutdownPlugin : IRakPlugin
+    {
+        private IPluginHost? _host;
+
+        public bool? Read { get; private set; }
+
+        public Exception? Failure { get; private set; }
+
+        public void OnAttached(IPluginHost host) => _host = host;
+
+        public void OnShutdown()
+        {
+            var peer = _host!.Peer!;
+            // A thread of its own: a task waited on here could be inlined onto the shutdown thread.
+            var reader = new Thread(() =>
+            {
+                try
+                {
+                    Read = peer.Events.TryRead(out _);
+                }
+                catch (InvalidOperationException exception)
+                {
+                    Failure = exception;
+                }
+            });
+            reader.Start();
+            reader.Join();
+        }
+    }
 }

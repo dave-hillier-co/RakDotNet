@@ -42,9 +42,9 @@ public sealed class SplitMessageScenarios
         var receipt = await session.Server.SendAsync(
             new SendOptions(clientGuid, data, Reliability.ReliableOrderedWithAckReceipt, Priority.Low), Token);
 
-        var received = await session.ClientInbox.WaitForPacketAsync(p => p.MessageId == 255, $"the {BigMessageSize}-byte message", TimeSpan.FromSeconds(60), Token);
-        Assert.Equal(BigMessageSize, received.Data.Length);
-        Assert.True(data.AsSpan().SequenceEqual(received.Data.Span), "The reassembled message differs from the one sent.");
+        // Matched by length: a native receiver may put another part first (see IsDeliveredAsSent).
+        var received = await session.ClientInbox.WaitForPacketAsync(p => p.Data.Length == BigMessageSize, $"the {BigMessageSize}-byte message", TimeSpan.FromSeconds(60), Token);
+        Assert.True(IsDeliveredAsSent(client, data, received.Data), "The reassembled message differs from the one sent.");
         await ScenarioFlows.WaitForReceiptAsync(session.ServerInbox, MessageId.SndReceiptAcked, receipt, Token);
     }
 
@@ -123,6 +123,19 @@ public sealed class SplitMessageScenarios
     {
         PeerKind.Native => [.. data.AsSpan(LargestUnsplitSize), .. data.AsSpan(0, LargestUnsplitSize)],
         PeerKind.RakDotNet => data,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
+
+    /// <summary>
+    /// Whether a receiver of <paramref name="kind"/> delivered <paramref name="data"/> as it should. A burst of thousands
+    /// of parts over loopback can lose a datagram, and its resend then arrives after later parts. Native RakNet 4.081
+    /// joins parts in arrival order (docs/plan.md, "Wire format notes"), so a native receiver delivers the parts joined
+    /// in some order; RakDotNet joins them by split index, so it delivers the message sent.
+    /// </summary>
+    private static bool IsDeliveredAsSent(PeerKind kind, byte[] data, ReadOnlyMemory<byte> delivered) => kind switch
+    {
+        PeerKind.Native => SplitParts.IsJoinedInSomeOrder(delivered, data, LargestUnsplitSize),
+        PeerKind.RakDotNet => data.AsSpan().SequenceEqual(delivered.Span),
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
     };
 

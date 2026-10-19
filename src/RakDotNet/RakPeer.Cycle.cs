@@ -47,7 +47,17 @@ public sealed partial class RakPeer
     /// <summary>The dispatch step of <see cref="PeerEventReader.TryRead"/>, RakPeer::Receive (RakPeer.cpp:1528-1600).</summary>
     internal bool TryReadNext(out PeerEvent e)
     {
-        EnterDispatch();
+        if (!TryEnterDispatch())
+        {
+            // Shutdown closes the stream before it takes the dispatch step, so a read that meets it there is a later
+            // read, which returns false (docs/api-design.md section 7).
+            if (_streamClosed && !InDispatchOnThisThread)
+            {
+                e = default;
+                return false;
+            }
+            ThrowConcurrentDispatch();
+        }
         try
         {
             ReleaseBorrowed();
@@ -970,9 +980,14 @@ public sealed partial class RakPeer
 
     private void EnterDispatch()
     {
-        if (Interlocked.CompareExchange(ref _dispatchThread, Environment.CurrentManagedThreadId, 0) != 0)
-            throw new InvalidOperationException("The event stream is read by one caller at a time, and not from inside a plugin hook.");
+        if (!TryEnterDispatch())
+            ThrowConcurrentDispatch();
     }
+
+    private bool TryEnterDispatch() => Interlocked.CompareExchange(ref _dispatchThread, Environment.CurrentManagedThreadId, 0) == 0;
+
+    private static void ThrowConcurrentDispatch() =>
+        throw new InvalidOperationException("The event stream is read by one caller at a time, and not from inside a plugin hook.");
 
     private void ExitDispatch() => Volatile.Write(ref _dispatchThread, 0);
 
