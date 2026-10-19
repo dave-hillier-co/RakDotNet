@@ -212,6 +212,9 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
         EndWrite(writer);
     }
 
+    /// <inheritdoc cref="BitStreamWriter.WriteRakNetGuid"/>
+    public void WriteRakNetGuid(RakNetGuid value) => WriteUInt64(value.Value);
+
     /// <summary>A reader over <see cref="Written"/>, limited to <see cref="BitsWritten"/>.</summary>
     public BitStreamReader CreateReader() => new(Written, _bitPosition);
 

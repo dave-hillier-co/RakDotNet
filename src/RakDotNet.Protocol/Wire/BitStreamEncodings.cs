@@ -21,7 +21,7 @@ namespace RakDotNet.Protocol.Wire;
 /// Strings are UTF-8, since RakNet's are C strings of bytes. The length limits count bytes.
 /// </para>
 /// </remarks>
-public static class BitStreamEncodings
+public static partial class BitStreamEncodings
 {
     /// <summary>
     /// BitStream::WriteCompressed for an integer (BitStream.h:1275-1300, BitStream.cpp:489-548). RakNet reverses the
@@ -220,9 +220,9 @@ public static class BitStreamEncodings
         writer.WriteSingle(magnitude);
         if (magnitude > 0.00001f)
         {
-            WriteCompressedFloat(ref writer, value.X / magnitude);
-            WriteCompressedFloat(ref writer, value.Y / magnitude);
-            WriteCompressedFloat(ref writer, value.Z / magnitude);
+            writer.WriteCompressed(value.X / magnitude);
+            writer.WriteCompressed(value.Y / magnitude);
+            writer.WriteCompressed(value.Z / magnitude);
         }
     }
 
@@ -235,7 +235,7 @@ public static class BitStreamEncodings
             return false;
         if (magnitude > 0.00001f)
         {
-            if (!TryReadCompressedFloat(ref r, out var x) || !TryReadCompressedFloat(ref r, out var y) || !TryReadCompressedFloat(ref r, out var z))
+            if (!r.TryReadCompressed(out float x) || !r.TryReadCompressed(out float y) || !r.TryReadCompressed(out float z))
                 return false;
             value = new Vector3(x * magnitude, y * magnitude, z * magnitude);
         }
@@ -330,36 +330,6 @@ public static class BitStreamEncodings
         tmp2 = (double)q.X * q.W;
         value.M32 = (float)(2.0 * (tmp1 + tmp2));
         value.M23 = (float)(2.0 * (tmp1 - tmp2));
-        return true;
-    }
-
-    /// <summary>BitStream::WriteDelta: one bit if <paramref name="value"/> equals <paramref name="last"/>, else a bit then the value.</summary>
-    public static void WriteDelta<T>(this ref BitStreamWriter writer, T value, T last)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        if (value == last)
-        {
-            writer.WriteBit(false);
-            return;
-        }
-        writer.WriteBit(true);
-        WriteRaw(ref writer, value);
-    }
-
-    /// <summary>BitStream::ReadDelta: leaves <paramref name="value"/> unchanged when the sender wrote the same value.</summary>
-    public static bool TryReadDelta<T>(this ref BitStreamReader reader, ref T value)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        var r = reader;
-        if (!r.TryReadBit(out var changed))
-            return false;
-        if (changed)
-        {
-            if (!TryReadRaw(ref r, out T read))
-                return false;
-            value = read;
-        }
-        reader = r;
         return true;
     }
 
@@ -496,26 +466,6 @@ public static class BitStreamEncodings
         writer.WriteUInt16((ushort)(Math.Abs(x) * 65535.0));
         writer.WriteUInt16((ushort)(Math.Abs(y) * 65535.0));
         writer.WriteUInt16((ushort)(Math.Abs(z) * 65535.0));
-    }
-
-    // BitStream::WriteCompressed(float) (BitStream.h:1327-1338): clamped to -1..1, then a u16.
-    private static void WriteCompressedFloat(ref BitStreamWriter writer, float value)
-    {
-        if (value < -1.0f)
-            value = -1.0f;
-        if (value > 1.0f)
-            value = 1.0f;
-        writer.WriteUInt16((ushort)((value + 1.0f) * 32767.5f));
-    }
-
-    // BitStream::ReadCompressed(float) (BitStream.h:1665-1676).
-    private static bool TryReadCompressedFloat(ref BitStreamReader reader, out float value)
-    {
-        value = default;
-        if (!reader.TryReadUInt16(out var compressed))
-            return false;
-        value = (compressed / 32767.5f) - 1.0f;
-        return true;
     }
 }
 

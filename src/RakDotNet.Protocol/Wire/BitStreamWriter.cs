@@ -164,6 +164,9 @@ public ref struct BitStreamWriter
         WriteBytes(bytes);
     }
 
+    /// <summary>Writes the GUID's u64 big-endian. Matches BitStream::Write(RakNetGUID) (BitStream.h:1220-1224).</summary>
+    public void WriteRakNetGuid(RakNetGuid value) => WriteUInt64(value.Value);
+
     /// <summary>
     /// Writes an IPv4 SystemAddress: version byte 4, the bitwise-NOT of each address byte in network order,
     /// then the port big-endian. Matches BitStream::Write(SystemAddress).

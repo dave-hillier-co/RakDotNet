@@ -182,6 +182,14 @@ public ref struct BitStreamReader
         return true;
     }
 
+    /// <summary>Reads a GUID as BitStream::Read(RakNetGUID) does (BitStream.h:1562-1566): a big-endian u64.</summary>
+    public bool TryReadRakNetGuid(out RakNetGuid value)
+    {
+        var ok = TryReadUInt64(out var raw);
+        value = new RakNetGuid(raw);
+        return ok;
+    }
+
     /// <summary>
     /// Reads a SystemAddress as BitStream::Read(SystemAddress) does; false on a truncated or unsupported address.
     /// </summary>
