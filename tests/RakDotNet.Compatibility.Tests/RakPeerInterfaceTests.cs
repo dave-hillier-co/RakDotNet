@@ -288,9 +288,6 @@ public sealed class RakPeerInterfaceTests : IDisposable
         var serverAddress = client.GetSystemAddressFromGuid(server.GetMyGUID());
 
         Assert.True(client.GetMTUSize(serverAddress) > 0);
-        Assert.Equal(10_000u, client.GetTimeoutTime(serverAddress));
-        client.SetTimeoutTime(5_000, serverAddress);
-        Assert.Equal(5_000u, client.GetTimeoutTime(serverAddress));
         Assert.NotNull(client.GetStatistics(serverAddress));
         Assert.NotNull(client.GetStatistics(SystemAddress.Unassigned));
         Assert.Null(client.GetStatistics(new SystemAddress(IPAddress.Loopback, 9)));
@@ -307,6 +304,244 @@ public sealed class RakPeerInterfaceTests : IDisposable
         client.GetSystemList(addresses, guids);
         Assert.Equal([serverAddress], addresses);
         Assert.NotEqual(SystemAddress.Unassigned, client.GetExternalID(serverAddress));
+    }
+
+    [Fact]
+    public void GetTimeoutTime_returns_the_default_even_for_a_connection_as_RakNet_does()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        Connect(client, server);
+        var serverAddress = client.GetSystemAddressFromGuid(server.GetMyGUID());
+
+        client.SetTimeoutTime(5_000, serverAddress);
+
+        // RakPeer.cpp:2551-2564 reads the connection's timeout, discards it and returns defaultTimeoutTime.
+        Assert.Equal(10_000u, client.GetTimeoutTime(serverAddress));
+        Assert.True(client.Peer!.TryGetConnection(serverAddress, out var connection));
+        Assert.Equal(TimeSpan.FromSeconds(5), connection.Timeout);
+        client.SetTimeoutTime(7_000, SystemAddress.Unassigned);
+        Assert.Equal(7_000u, client.GetTimeoutTime(serverAddress));
+    }
+
+    [Fact]
+    public void IsLocalIP_compares_strings_as_RakNet_does()
+    {
+        var peer = Started(1);
+        var stopped = Instance();
+
+        // RakPeer.cpp:2636-2657: "127.0.0.1" and "localhost" by strcmp, then each GetLocalIP string.
+        Assert.True(peer.IsLocalIP("localhost"));
+        Assert.True(stopped.IsLocalIP("localhost"));
+        Assert.True(stopped.IsLocalIP("127.0.0.1"));
+        Assert.False(peer.IsLocalIP("127.1"));
+        Assert.False(peer.IsLocalIP(null));
+        Assert.False(peer.IsLocalIP(""));
+        if (peer.GetNumberOfAddresses() > 0)
+            Assert.True(peer.IsLocalIP(peer.GetLocalIP(0)));
+    }
+
+    [Fact]
+    public void Pings_of_a_system_still_connecting_are_65535_as_in_RakNet()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        var serverAddress = new SystemAddress(IPAddress.Loopback, ServerPort(server));
+        Assert.Equal(ConnectionAttemptResult.ConnectionAttemptStarted, client.Connect("127.0.0.1", serverAddress.Port));
+
+        // Each peer runs only when stepped, so the client stops in IS_CONNECTING: it has a slot from
+        // ID_OPEN_CONNECTION_REPLY_2 and the server has not answered its connection request.
+        var clock = Stopwatch.StartNew();
+        while (client.GetConnectionState(serverAddress) != ConnectionState.Connecting)
+        {
+            Assert.True(clock.Elapsed < Patience, "The client never reached IS_CONNECTING.");
+            Assert.True(client.RunUpdateCycle());
+            if (client.GetConnectionState(serverAddress) == ConnectionState.Connecting)
+                break;
+            Assert.True(server.RunUpdateCycle());
+            Thread.Sleep(1);
+        }
+
+        // AssignSystemAddressToRemoteSystemList sets every ping to 65535 (RakPeer.cpp:3740-3748), and GetLastPing and
+        // GetLowestPing return them raw (RakPeer.cpp:2178-2208); GetAveragePing finds no sample (RakPeer.cpp:2157-2169).
+        Assert.Equal(65535, client.GetLastPing(serverAddress));
+        Assert.Equal(65535, client.GetLowestPing(serverAddress));
+        Assert.Equal(-1, client.GetAveragePing(serverAddress));
+        Assert.Equal(-1, client.GetLastPing(new SystemAddress(IPAddress.Loopback, 9)));
+    }
+
+    [Fact]
+    public void A_disconnected_system_keeps_its_slot_values_as_in_RakNet()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        Connect(client, server);
+        var serverGuid = server.GetMyGUID();
+        var serverAddress = client.GetSystemAddressFromGuid(serverGuid);
+        var external = client.GetExternalID(serverAddress);
+        Assert.NotEqual(SystemAddress.Unassigned, external);
+        Assert.True(client.Peer!.TryGetConnection(serverGuid, out var connection));
+
+        server.CloseConnection(client.GetMyGUID(), sendDisconnectionNotification: true);
+        ReceiveUntil(client, MessageId.DisconnectionNotification, server).Dispose();
+        Assert.Equal(ConnectionState.NotConnected, client.Peer.GetConnectionState(serverGuid));
+        // The values the slot held when it went inactive.
+        var lastPing = (int)connection.LastPing!.Value.TotalMilliseconds;
+        var lowestPing = (int)connection.LowestPing!.Value.TotalMilliseconds;
+
+        // The slot goes inactive but keeps its values until it is reassigned: GetExternalID falls back to an inactive
+        // slot's myExternalSystemAddress (RakPeer.cpp:2351-2376), and the ping queries look up slots with onlyActive
+        // false (RakPeer.cpp:2178-2208, 3381-3443).
+        Assert.Equal(external, client.GetExternalID(serverAddress));
+        Assert.Equal(lastPing, client.GetLastPing(serverGuid));
+        Assert.Equal(lowestPing, client.GetLowestPing(serverAddress));
+    }
+
+    [Fact]
+    public void ConnectWithSocket_connects_through_the_given_socket()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Instance();
+        Assert.Equal(StartupResult.RakNetStarted, client.Startup(1, [Loopback(), Loopback()]));
+        var sockets = new List<RakSocket>();
+        client.GetSockets(sockets);
+        var second = sockets[1];
+
+        Assert.Equal(ConnectionAttemptResult.ConnectionAttemptStarted, client.ConnectWithSocket("127.0.0.1", ServerPort(server), default, second));
+        ReceiveUntil(client, MessageId.ConnectionRequestAccepted, server).Dispose();
+        using var incoming = ReceiveUntil(server, MessageId.NewIncomingConnection, client);
+
+        Assert.Equal(second.LocalAddress.Port, incoming.SystemAddress.Port);
+        Assert.Same(second, client.GetSocket(client.GetSystemAddressFromGuid(server.GetMyGUID())));
+    }
+
+    [Fact]
+    public void ConnectWithSocket_reports_RakNets_invalid_parameter()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        var socket = client.GetSocket(SystemAddress.Unassigned)!;
+
+        // RakPeer.cpp:1024-1025: no host, not started or no socket.
+        Assert.Equal(ConnectionAttemptResult.InvalidParameter, client.ConnectWithSocket(null!, ServerPort(server), default, socket));
+        Assert.Equal(ConnectionAttemptResult.InvalidParameter, client.ConnectWithSocket("127.0.0.1", ServerPort(server), default, null!));
+        Assert.Equal(ConnectionAttemptResult.InvalidParameter, Instance().ConnectWithSocket("127.0.0.1", ServerPort(server), default, socket));
+        // Decision 11.14: another peer's socket is not borrowed.
+        Assert.Equal(ConnectionAttemptResult.InvalidParameter, client.ConnectWithSocket("127.0.0.1", ServerPort(server), default, server.GetSocket(SystemAddress.Unassigned)!));
+    }
+
+    [Fact]
+    public void GetSocket_and_GetSockets_answer_as_RakNet()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Instance();
+        Assert.Null(client.GetSocket(SystemAddress.Unassigned));
+        var sockets = new List<RakSocket> { null! };
+        client.GetSockets(sockets);
+        Assert.Empty(sockets);
+
+        Assert.Equal(StartupResult.RakNetStarted, client.Startup(1, [Loopback(), Loopback()]));
+        client.GetSockets(sockets);
+        Assert.Equal(2, sockets.Count);
+        Assert.Equal(client.GetMyBoundAddress(0), sockets[0].LocalAddress);
+        Assert.Equal(client.GetMyBoundAddress(1), sockets[1].LocalAddress);
+        // RakPeer.cpp:5658-5663: an undefined target answers with socketList, of which GetSocket returns the first.
+        Assert.Same(sockets[0], client.GetSocket(SystemAddress.Unassigned));
+        Assert.Null(client.GetSocket(new SystemAddress(IPAddress.Loopback, 9)));
+
+        Connect(client, server);
+        Assert.Same(sockets[0], client.GetSocket(client.GetSystemAddressFromGuid(server.GetMyGUID())));
+
+        client.ReleaseSockets(sockets);
+        Assert.Empty(sockets);
+    }
+
+    [Fact]
+    public void AllocatePacket_builds_a_packet_for_PushBackPacket()
+    {
+        var peer = Started(1);
+        var source = new SystemAddress(IPAddress.Parse("10.0.0.1"), 1234);
+
+        var packet = peer.AllocatePacket(3);
+        // RakPeer.cpp:159-169: length and bitSize from dataSize, guid unassigned, not generated locally.
+        Assert.Equal(3, packet.Length);
+        Assert.Equal(24, packet.BitSize);
+        Assert.Equal(RakNetGuid.Unassigned, packet.RakNetGuid);
+        Assert.False(packet.WasGeneratedLocally);
+        packet.Data.Span[0] = (byte)MessageId.UserPacketEnum;
+        packet.Data.Span[1] = 7;
+        packet.Data.Span[2] = 8;
+        packet.SystemAddress = source;
+        packet.RakNetGuid = new RakNetGuid(77);
+
+        peer.PushBackPacket(packet, pushAtHead: false);
+        Assert.Throws<ObjectDisposedException>(() => packet.Data);
+
+        using var received = ReceiveUntil(peer, MessageId.UserPacketEnum);
+        Assert.Equal([(byte)MessageId.UserPacketEnum, 7, 8], received.Data.ToArray());
+        Assert.Equal(source, received.SystemAddress);
+        Assert.Equal(new RakNetGuid(77), received.RakNetGuid);
+    }
+
+    [Fact]
+    public void A_received_packet_pushed_back_carries_its_edits()
+    {
+        var peer = Started(1);
+        var source = new SystemAddress(IPAddress.Parse("10.0.0.2"), 4321);
+        peer.SendLoopback([(byte)MessageId.UserPacketEnum, 1]);
+        var looped = ReceiveUntil(peer, MessageId.UserPacketEnum);
+
+        looped.Data.Span[1] = 2;
+        looped.SystemAddress = source;
+        peer.PushBackPacket(looped, pushAtHead: true);
+
+        using var again = ReceiveUntil(peer, MessageId.UserPacketEnum);
+        Assert.Equal([(byte)MessageId.UserPacketEnum, 2], again.Data.ToArray());
+        Assert.Equal(source, again.SystemAddress);
+    }
+
+    [Fact]
+    public void SetUserUpdateThread_runs_the_callback_every_update_cycle()
+    {
+        var peer = Instance();
+        var calls = new List<(RakPeerInterface Peer, object? Data)>();
+        var data = new object();
+        peer.SetUserUpdateThread((p, d) => calls.Add((p, d)), data);
+        Assert.False(peer.RunUpdateCycle());
+        Assert.Equal(StartupResult.RakNetStarted, peer.Startup(1, [Loopback()]));
+
+        Assert.True(peer.RunUpdateCycle());
+        Assert.True(peer.RunUpdateCycle());
+        Assert.Equal(2, calls.Count);
+        Assert.All(calls, call => Assert.Same(peer, call.Peer));
+        Assert.All(calls, call => Assert.Same(data, call.Data));
+
+        peer.Receive();
+        Assert.Equal(3, calls.Count);
+
+        peer.SetUserUpdateThread(null, null);
+        peer.RunUpdateCycle();
+        Assert.Equal(3, calls.Count);
+    }
+
+    [Fact]
+    public void RunUpdateCycle_drives_the_peer_without_Receive()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        Assert.Equal(ConnectionAttemptResult.ConnectionAttemptStarted, client.Connect("127.0.0.1", ServerPort(server)));
+
+        var clock = Stopwatch.StartNew();
+        while (server.NumberOfConnections() == 0)
+        {
+            Assert.True(clock.Elapsed < Patience, "The server never accepted the connection.");
+            Assert.True(client.RunUpdateCycle());
+            Assert.True(server.RunUpdateCycle());
+            Thread.Sleep(1);
+        }
+
+        using var accepted = ReceiveUntil(client, MessageId.ConnectionRequestAccepted);
+        Assert.Equal(server.GetMyGUID(), accepted.RakNetGuid);
     }
 
     [Fact]
