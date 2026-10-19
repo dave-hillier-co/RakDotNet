@@ -18,7 +18,8 @@ namespace RakDotNet.Protocol.Wire;
 /// release build gives a defined result.
 /// </para>
 /// <para>
-/// Strings are UTF-8, since RakNet's are C strings of bytes. The length limits count bytes.
+/// Strings are bytes, as RakNet's are C strings; each string encoding has a byte form and a <see cref="string"/> form
+/// that encodes and decodes UTF-8. The length limits count bytes.
 /// </para>
 /// </remarks>
 public static partial class BitStreamEncodings
@@ -418,70 +419,6 @@ public static partial class BitStreamEncodings
         if (!TryReadRaw(ref reader, out TWire wire))
             return false;
         value = TValue.CreateTruncating(wire);
-        return true;
-    }
-
-    /// <summary>
-    /// RakString::Serialize (RakString.cpp:1218-1223): a u16 byte length, then the UTF-8 bytes aligned to a byte.
-    /// </summary>
-    /// <exception cref="ArgumentException">The string is more than 65535 bytes of UTF-8.</exception>
-    public static void WriteRakString(this ref BitStreamWriter writer, ReadOnlySpan<char> value)
-    {
-        var length = Encoding.UTF8.GetByteCount(value);
-        if (length > ushort.MaxValue)
-            throw new ArgumentException("A RakString holds at most 65535 bytes.", nameof(value));
-        var bytes = length <= 256 ? stackalloc byte[length] : new byte[length];
-        Encoding.UTF8.GetBytes(value, bytes);
-        writer.WriteUInt16((ushort)length);
-        writer.WriteAlignedBytes(bytes);
-    }
-
-    /// <summary>RakString::Deserialize (RakString.cpp:1234-1253): an empty string still aligns the read.</summary>
-    public static bool TryReadRakString(this ref BitStreamReader reader, [NotNullWhen(true)] out string? value)
-    {
-        value = null;
-        var r = reader;
-        if (!r.TryReadUInt16(out var length))
-            return false;
-        if (length == 0)
-        {
-            r.AlignToByte();
-            value = string.Empty;
-        }
-        else
-        {
-            if (!r.TryReadAlignedBytes(length, out var bytes))
-                return false;
-            value = Encoding.UTF8.GetString(bytes);
-        }
-        reader = r;
-        return true;
-    }
-
-    /// <summary>
-    /// StringCompressor::EncodeString with RakNet's default English Huffman table (StringCompressor.cpp:366-397): at most
-    /// <paramref name="maxCharCount"/> - 1 bytes of UTF-8 are written, or all of them when the limit is 0 or more than
-    /// their count. RakString::SerializeCompressed passes 0xFFFF.
-    /// </summary>
-    public static void WriteCompressedString(this ref BitStreamWriter writer, ReadOnlySpan<char> value, int maxCharCount)
-    {
-        var length = Encoding.UTF8.GetByteCount(value);
-        var bytes = length <= 256 ? stackalloc byte[length] : new byte[length];
-        Encoding.UTF8.GetBytes(value, bytes);
-        StringCompressor.English.Write(ref writer, bytes, maxCharCount);
-    }
-
-    /// <summary>
-    /// StringCompressor::DecodeString (StringCompressor.cpp:399-427): false for a limit that is not positive or a
-    /// truncated stream; a string of <paramref name="maxCharCount"/> bytes or more keeps its first
-    /// <paramref name="maxCharCount"/> - 1.
-    /// </summary>
-    public static bool TryReadCompressedString(this ref BitStreamReader reader, int maxCharCount, [NotNullWhen(true)] out string? value)
-    {
-        value = null;
-        if (!StringCompressor.English.TryRead(ref reader, maxCharCount, out var bytes))
-            return false;
-        value = Encoding.UTF8.GetString(bytes);
         return true;
     }
 
