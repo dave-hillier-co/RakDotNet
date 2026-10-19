@@ -87,6 +87,17 @@ public class SystemAddressRakNetFormTests
         Assert.Equal(Address("1.2.3.4", 5), address.WithPort(Address("8.8.8.8", 5).Port));
     }
 
+    [Fact]
+    public void WireSize_is_the_bytes_an_address_takes_in_a_BitStream()
+    {
+        // SystemAddress::size() (RakNetTypes.cpp:191-198) in the IPv4 build: a u32, a u16 and a char.
+        Span<byte> buffer = stackalloc byte[16];
+        var writer = new BitStreamWriter(buffer);
+        writer.WriteAddress(Address("1.2.3.4", 5));
+        Assert.Equal(SystemAddress.WireSize, writer.BytesWritten);
+        Assert.Equal(7, SystemAddress.WireSize);
+    }
+
     [Theory]
     [InlineData("10.0.0.1", true)]
     [InlineData("192.168.0.1", true)]

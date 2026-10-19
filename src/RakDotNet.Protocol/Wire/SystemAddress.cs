@@ -19,6 +19,12 @@ public readonly struct SystemAddress : IEquatable<SystemAddress>, IComparable<Sy
 {
     private const string UnassignedText = "UNASSIGNED_SYSTEM_ADDRESS";
 
+    /// <summary>
+    /// SystemAddress::size() (RakNetTypes.cpp:191-198): the bytes an address takes when written to a BitStream, a
+    /// version byte, a u32 and a u16, in RakNet's IPv4 build.
+    /// </summary>
+    public const int WireSize = sizeof(uint) + sizeof(ushort) + sizeof(byte);
+
     /// <summary>The port delimiter RakNet's text forms default to (RakNetTypes.h, ToString and FromString).</summary>
     public const char RakNetPortDelimiter = '|';
 

@@ -31,7 +31,7 @@ The API exposes the whole of RakNet's `RakPeerInterface` and `PluginInterface2` 
 
 | Assembly | Namespace | Contents | Source |
 |---|---|---|---|
-| `RakDotNet.Protocol` | `RakDotNet.Protocol.Wire` | Layer 0, public: the RakNet enums and wire types, `RakNetGuid`, `SystemAddress`, `BitStreamReader`, `BitStreamWriter`, `BitStream`, `BitStreamEncodings`, `BitSerializer`; in `.Messages`, the message codecs, `RakNetConstants`, `TimestampHeader`, `OutOfBandHeader` | `src/RakDotNet.Protocol/Wire/` |
+| `RakDotNet.Protocol` | `RakDotNet.Protocol.Wire` | Layer 0, public: the RakNet enums and wire types, `RakNetGuid`, `SystemAddress`, `BitStreamReader`, `BitStreamWriter`, `BitStream`, `BitStreamEncodings`, `BitSerializer`, `StringCompressor`, `HuffmanEncodingTree`, `StringTable`; in `.Messages`, the message codecs, `RakNetConstants`, `TimestampHeader`, `OutOfBandHeader` | `src/RakDotNet.Protocol/Wire/` |
 | `RakDotNet.Protocol` | `.Session`, `.Peer` | Layers 1 and 2, `internal` (decision 11.2) | `src/RakDotNet.Protocol/Session/`, `Peer/` |
 | `RakDotNet` | `RakDotNet` | Layer 3: `RakPeer`, `RakConnection`, the event stream, sending, options, statistics, plugins and observers | `src/RakDotNet/` |
 | `RakDotNet` | `RakDotNet.Security` | Key and connect-security types | `src/RakDotNet/Security/` |
