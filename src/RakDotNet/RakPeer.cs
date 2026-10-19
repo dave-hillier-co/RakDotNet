@@ -281,11 +281,18 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         }
     }
 
-    /// <summary>NumberOfConnections</summary>
-    public int ConnectionCount => _table.All.Length;
+    /// <summary>
+    /// NumberOfConnections: the connections whose <see cref="RakConnection.State"/> is Connected, as RakNet counts only
+    /// CONNECTED systems (RakPeer.cpp:920-926, 1832-1850). A connection that is disconnecting is not counted.
+    /// </summary>
+    public int ConnectionCount => _table.Connected.Length;
 
-    /// <summary>GetConnectionList / GetSystemList.</summary>
-    public ConnectionList Connections => new(_table.All);
+    /// <summary>
+    /// GetConnectionList / GetSystemList: the connections whose <see cref="RakConnection.State"/> is Connected
+    /// (RakPeer.cpp:1832-1850). <see cref="TryGetConnection(RakNetGuid, out RakConnection?)"/> still finds a connection
+    /// while it is disconnecting.
+    /// </summary>
+    public ConnectionList Connections => new(_table.Connected);
 
     public bool TryGetConnection(RakNetGuid rakNetGuid, [NotNullWhen(true)] out RakConnection? connection) =>
         _table.ByGuid.TryGetValue(rakNetGuid, out connection);
@@ -1181,6 +1188,9 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         public static ConnectionTable Empty { get; } = new([]);
 
         public RakConnection[] All { get; } = all;
+
+        /// <summary>The entries that were Connected when the table was published.</summary>
+        public RakConnection[] Connected { get; } = Array.FindAll(all, c => c.State == ConnectionState.Connected);
 
         public Dictionary<RakNetGuid, RakConnection> ByGuid { get; } = all.ToDictionary(c => c.RakNetGuid);
 

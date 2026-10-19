@@ -648,6 +648,8 @@ public sealed partial class RakPeer
             }
             connection.Refresh(system, (ConnectionState)_core.GetConnectionState(guid), nowUs);
         }
+        if (ConnectedChanged())
+            PublishTable();
 
         lock (_attemptsGate)
         {
@@ -707,6 +709,26 @@ public sealed partial class RakPeer
             _byAddress.Remove(connection.Address);
         _closedLocally.Remove(guid);
         PublishTable();
+    }
+
+    /// <summary>Whether a connection entered or left Connected since the table was published.</summary>
+    private bool ConnectedChanged()
+    {
+        var table = _table;
+        var connected = 0;
+        foreach (var connection in table.All)
+        {
+            if (connection.State == ConnectionState.Connected)
+                connected++;
+        }
+        if (connected != table.Connected.Length)
+            return true;
+        foreach (var connection in table.Connected)
+        {
+            if (connection.State != ConnectionState.Connected)
+                return true;
+        }
+        return false;
     }
 
     private void PublishTable() => _table = new ConnectionTable([.. _byGuid.Values.OrderBy(c => c.SystemIndex)]);

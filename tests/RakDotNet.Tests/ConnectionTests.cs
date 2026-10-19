@@ -196,6 +196,24 @@ public class ConnectionTests
     }
 
     [Fact]
+    public void A_disconnecting_connection_is_not_counted_or_listed()
+    {
+        using var peers = new ManualPeers();
+        var server = peers.Connect();
+
+        server.Close();
+        // Only the client runs, so the server never acknowledges the notification and the close cannot finish.
+        peers.Client.Update();
+        peers.Client.Update();
+
+        // NumberOfConnections and GetConnectionList count only CONNECTED systems (RakPeer.cpp:920-926, 1832-1850).
+        Assert.Equal(ConnectionState.Disconnecting, server.State);
+        Assert.Equal(0, peers.Client.ConnectionCount);
+        Assert.Empty(peers.Client.Connections);
+        Assert.Equal(1, peers.Server.ConnectionCount);
+    }
+
+    [Fact]
     public void A_silent_close_reports_ConnectionLost_at_once_and_abandons_outstanding_receipts_first()
     {
         using var peers = new ManualPeers();

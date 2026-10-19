@@ -3,8 +3,8 @@ using System.Collections;
 namespace RakDotNet;
 
 /// <summary>
-/// An immutable snapshot of the connection table, rebuilt only when a connection is added or removed. Enumerates with a
-/// struct enumerator, without allocating.
+/// An immutable snapshot of the connected systems, rebuilt only when a connection is added or removed or stops being
+/// Connected. Enumerates with a struct enumerator, without allocating.
 /// </summary>
 public readonly struct ConnectionList : IReadOnlyList<RakConnection>
 {
