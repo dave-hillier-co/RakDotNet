@@ -13,7 +13,7 @@ A modern C# implementation of the RakNet protocol, wire-compatible with the orig
 | Target framework | net10.0. No netstandard, no Mono/legacy Unity. |
 | Core design | Sans-IO: protocol and reliability logic take bytes and time as input and produce bytes, messages and events as output. No sockets or clocks inside. |
 | Testing | Classic TDD, sociable tests. Golden vectors captured from native RakNet. Cross-implementation interop matrix. |
-| Port source | C++ RakNet (BSD-3 + PATENTS) is the specification and the code we port from. |
+| Port source | C++ RakNet (BSD-3 + PATENTS) is the specification and the code we port from. [source-map.md](source-map.md) maps every RakNet `Source/` unit to its C# location and milestone. |
 | Other references | whirvis/jraknet (MIT): small helpers may be borrowed. RakNetty (GPLv3): design ideas only, no code. luyinquan/JRakNet: ignored (an early snapshot of JRakNet, superseded). Brutal.RakNet: API surface checklist and a second native peer. |
 
 ## Architecture
