@@ -9,7 +9,7 @@ namespace RakDotNet.Protocol.Tests.Session;
 public class OrderingChannelsTests
 {
     private readonly OrderingChannels _channels = new();
-    private readonly List<EncapsulatedMessage> _delivered = [];
+    private readonly List<ReceivedMessage> _delivered = [];
 
     private string Delivered => string.Concat(_delivered.Select(m => (char)m.Payload.Span[0]));
 
@@ -112,7 +112,7 @@ public class OrderingChannelsTests
         Assert.Equal("nousrd", Delivered);
     }
 
-    private void Receive(EncapsulatedMessage message) => _channels.Receive(message, _delivered);
+    private void Receive(EncapsulatedMessage message) => _channels.Receive(ReceivedMessage.From(message), _delivered);
 
     private static EncapsulatedMessage Message(char name, Reliability reliability) =>
         new(reliability, new[] { (byte)name });

@@ -29,7 +29,6 @@ public sealed class ProxiedScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_message_larger_than_the_mtu_is_split_and_reassembled_intact(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.SplitMessages);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
 
         await ScenarioFlows.SplitPacketAsync(session, Token);

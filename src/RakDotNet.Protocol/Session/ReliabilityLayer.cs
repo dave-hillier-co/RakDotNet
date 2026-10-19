@@ -29,8 +29,10 @@ namespace RakDotNet.Protocol.Session;
 /// number it skipped (<see cref="SlidingWindow.OnGotPacket"/>). Resends and NAKs feed the sliding window's backoff.
 /// </para>
 /// <para>
-/// Split messages are not implemented yet; <see cref="Send(ReadOnlySpan{byte}, int, Reliability, Priority, byte, uint, long)"/>
-/// refuses messages that would need splitting and split fragments that arrive are dropped.
+/// A message too large for one datagram is split into parts (SplitPacket) that share its ordering and sequencing
+/// indexes and are queued one by one, so they interleave with other messages by priority. Every part is reliable, as
+/// RakNet forces. Received parts are held by <see cref="SplitMessageAssembler"/> until the message is whole; it then
+/// passes through ordering like any other message, and acknowledgements go out at once.
 /// </para>
 /// </remarks>
 internal sealed class ReliabilityLayer
@@ -71,6 +73,7 @@ internal sealed class ReliabilityLayer
     private readonly DatagramHistory _datagramHistory = new();
     private readonly List<UnreliableReceipt> _unreliableReceipts = [];
     private UInt24 _nextReliableMessageNumber;
+    private ushort _nextSplitId;
     private int _unacknowledgedBytes;
     private bool _bandwidthExceeded;
     private long _lastUpdateUs;
@@ -89,7 +92,8 @@ internal sealed class ReliabilityLayer
     private readonly RangeList _naks = new();
     private readonly ReceivedMessageNumbers _receivedMessageNumbers = new();
     private readonly OrderingChannels _orderingChannels = new();
-    private readonly List<EncapsulatedMessage> _released = [];
+    private readonly SplitMessageAssembler _splitMessages = new();
+    private readonly List<ReceivedMessage> _released = [];
     private long _timeLastDatagramArrivedMs;
 
     // Statistics.
@@ -139,6 +143,23 @@ internal sealed class ReliabilityLayer
         }
     }
 
+    /// <summary>
+    /// SetSplitMessageProgressInterval (ReliabilityLayer.cpp:2378-2381, RakPeer.cpp:3646): while a split message is
+    /// arriving, an ID_DOWNLOAD_PROGRESS message is delivered every this many parts. 0, the default, never.
+    /// </summary>
+    public int SplitMessageProgressInterval
+    {
+        get => _splitMessages.ProgressInterval;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _splitMessages.ProgressInterval = value;
+        }
+    }
+
+    /// <summary>Split messages with some but not all of their parts received.</summary>
+    public int IncompleteSplitMessages => _splitMessages.IncompleteCount;
+
     public int Mtu => _mtu;
 
     /// <summary>IsDeadConnection.</summary>
@@ -158,13 +179,17 @@ internal sealed class ReliabilityLayer
 
     private int MaxPayloadBits => DatagramLimits.MaxPayloadBits(_mtu);
 
+    // The largest message sent whole, and the size of every split part but the last: the datagram budget less the
+    // largest message header (ReliabilityLayer.cpp:1604, 2939).
+    private int MaxBlockBytes => MaxPayloadBits / 8 - BitsToBytes(EncapsulatedMessage.MaxHeaderLengthBits);
+
     /// <summary>A message to send. The bit length is the whole payload.</summary>
     public bool Send(ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs) =>
         Send(data, data.Length * 8, reliability, priority, channel, receipt, nowUs);
 
     /// <summary>
     /// ReliabilityLayer::Send (ReliabilityLayer.cpp:1539-1683): copies the message, assigns its ordering and sequencing
-    /// indexes and queues it. Returns false for an empty message or one that would need splitting.
+    /// indexes and queues it, split into parts when it does not fit one datagram. Returns false for an empty message.
     /// </summary>
     /// <param name="data">The message, at least <c>ceil(bitLength / 8)</c> bytes.</param>
     /// <param name="bitLength">The message length in bits.</param>
@@ -188,12 +213,22 @@ internal sealed class ReliabilityLayer
         var byteLength = BitsToBytes(bitLength);
         ArgumentOutOfRangeException.ThrowIfLessThan(data.Length, byteLength, nameof(data));
 
-        // ReliabilityLayer.cpp:1604-1606.
-        var maxDataSizeBytes = MaxPayloadBits / 8 - BitsToBytes(EncapsulatedMessage.MaxHeaderLengthBits);
-        if (byteLength > maxDataSizeBytes)
-            return false; // Needs SplitPacket (ReliabilityLayer.cpp:1659-1669), not implemented yet.
-
         _metrics[(int)SessionMetric.UserMessageBytesPushed].Push(nowUs, (ulong)byteLength);
+
+        // ReliabilityLayer.cpp:1604-1606.
+        var needsSplitting = byteLength > MaxBlockBytes;
+        if (needsSplitting)
+        {
+            // "Split packets cannot be unreliable, in case that one part doesn't arrive and the whole cannot be
+            // reassembled" (ReliabilityLayer.cpp:1609-1622).
+            reliability = reliability switch
+            {
+                Reliability.Unreliable => Reliability.Reliable,
+                Reliability.UnreliableWithAckReceipt => Reliability.ReliableWithAckReceipt,
+                Reliability.UnreliableSequenced => Reliability.ReliableSequenced,
+                _ => reliability,
+            };
+        }
 
         var message = new OutgoingMessage(data[..byteLength].ToArray(), bitLength, reliability, priority, receipt, nowUs);
         if (reliability.IsSequenced())
@@ -209,14 +244,57 @@ internal sealed class ReliabilityLayer
             _sequencedWriteIndex[channel] = default;
         }
 
+        if (needsSplitting)
+        {
+            SplitAndQueue(message);
+            return true;
+        }
+
         // AddToUnreliableLinkedList, ReliabilityLayer.cpp:3715-3736.
         if (message.IsUnreliable)
             message.UnreliableNode = _unreliable.AddLast(message);
-
-        _outgoing.Enqueue(message, priority);
-        _messagesInSendBuffer[(int)priority]++;
-        _bytesInSendBuffer[(int)priority] += byteLength;
+        Queue(message);
         return true;
+    }
+
+    // SplitPacket, ReliabilityLayer.cpp:2928-3033: parts of maximumSendBlockBytes, the last one shorter, each queued with
+    // its own weight so that other messages interleave with them.
+    private void SplitAndQueue(OutgoingMessage message)
+    {
+        var blockBytes = MaxBlockBytes;
+        var byteLength = message.Data.Length;
+        var count = (uint)((byteLength - 1) / blockBytes + 1);
+        var id = _nextSplitId++; // "It's ok if this wraps to 0" (ReliabilityLayer.cpp:3001).
+        for (var index = 0u; index < count; index++)
+        {
+            var offset = (int)index * blockBytes;
+            var bytesToSend = Math.Min(byteLength - offset, blockBytes);
+            // ReliabilityLayer.cpp:2990-2993: a full block is whole bytes even when it ends the message.
+            var bitLength = bytesToSend != blockBytes ? message.BitLength - offset * 8 : bytesToSend * 8;
+            var part = new OutgoingMessage(
+                message.Data.Slice(offset, bytesToSend),
+                bitLength,
+                message.Reliability,
+                message.Priority,
+                message.Receipt,
+                message.CreationTimeUs
+            )
+            {
+                OrderingChannel = message.OrderingChannel,
+                OrderingIndex = message.OrderingIndex,
+                SequencingIndex = message.SequencingIndex,
+                Split = new SplitHeader(count, id, index),
+            };
+            // Parts are reliable, so none joins the unreliable list (ReliabilityLayer.cpp:3015).
+            Queue(part);
+        }
+    }
+
+    private void Queue(OutgoingMessage message)
+    {
+        _outgoing.Enqueue(message, message.Priority);
+        _messagesInSendBuffer[(int)message.Priority]++;
+        _bytesInSendBuffer[(int)message.Priority] += BitsToBytes(message.BitLength);
     }
 
     /// <summary>
@@ -430,16 +508,36 @@ internal sealed class ReliabilityLayer
             return;
         }
 
-        if (message.Split is not null)
-            return; // Reassembly (InsertIntoSplitPacketList, ReliabilityLayer.cpp:1221-1242) is not implemented yet.
+        ReceivedMessage received;
+        if (message.Split is null)
+        {
+            received = ReceivedMessage.From(message);
+        }
+        else
+        {
+            // ReliabilityLayer.cpp:1221-1242.
+            if (!_splitMessages.TryInsert(message, out var progress, out var complete))
+            {
+                _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
+                return;
+            }
+            // Progress goes straight to the output queue, ahead of ordering (ReliabilityLayer.cpp:3171).
+            if (progress is not null)
+                _events.Enqueue(new MessageDelivered(progress, progress.Length * 8));
+            if (complete is null)
+                return; // Don't have all the parts yet.
+            // "Ack immediately, because for large files this can take a long time" (ReliabilityLayer.cpp:3243-3244).
+            SendAcks(nowUs);
+            received = complete;
+        }
 
         _released.Clear();
-        _orderingChannels.Receive(message, _released);
+        _orderingChannels.Receive(received, _released);
         foreach (var released in _released)
         {
             // Counted as each message reaches the output queue (ReliabilityLayer.cpp:1346, 1412, 1481).
-            _metrics[(int)SessionMetric.UserMessageBytesReceivedProcessed].Push(nowUs, (ulong)BitsToBytes(released.PayloadBitLength));
-            _events.Enqueue(new MessageDelivered(released.Payload, released.PayloadBitLength));
+            _metrics[(int)SessionMetric.UserMessageBytesReceivedProcessed].Push(nowUs, (ulong)BitsToBytes(released.BitLength));
+            _events.Enqueue(new MessageDelivered(released.Payload, released.BitLength));
         }
     }
 
@@ -544,7 +642,8 @@ internal sealed class ReliabilityLayer
         _resendBuffer[slot] = null;
         _bytesInResendBuffer -= (ulong)BitsToBytes(message.BitLength);
 
-        if (message.Reliability >= Reliability.ReliableWithAckReceipt)
+        // Only the last part of a split message reports its receipt (ReliabilityLayer.cpp:2486-2488).
+        if (message.Reliability >= Reliability.ReliableWithAckReceipt && (message.Split is not { } split || split.Index + 1 == split.Count))
             _events.Enqueue(new ReceiptAcknowledged(message.Receipt));
 
         // RemoveFromList(internalPacket, isReliable), ReliabilityLayer.cpp:3559-3579.
@@ -808,9 +907,10 @@ internal sealed class ReliabilityLayer
     private readonly record struct UnreliableReceipt(UInt24 DatagramNumber, uint Receipt, long DeadlineUs);
 
     /// <summary>The send-side InternalPacket.</summary>
-    private sealed class OutgoingMessage(byte[] data, int bitLength, Reliability reliability, Priority priority, uint receipt, long creationTimeUs)
+    private sealed class OutgoingMessage(ReadOnlyMemory<byte> data, int bitLength, Reliability reliability, Priority priority, uint receipt, long creationTimeUs)
     {
-        public byte[] Data { get; } = data;
+        /// <summary>The message, or for a split part its slice of the whole message's copy.</summary>
+        public ReadOnlyMemory<byte> Data { get; } = data;
 
         public int BitLength { get; } = bitLength;
 
@@ -830,6 +930,8 @@ internal sealed class ReliabilityLayer
 
         public UInt24 ReliableMessageNumber { get; set; } = UnassignedMessageNumber;
 
+        public SplitHeader? Split { get; init; }
+
         public long NextActionTimeUs { get; set; }
 
         public int TimesSent { get; set; }
@@ -846,7 +948,7 @@ internal sealed class ReliabilityLayer
             Reliability is Reliability.Unreliable or Reliability.UnreliableSequenced or Reliability.UnreliableWithAckReceipt;
 
         /// <summary>GetMessageHeaderLengthBits (ReliabilityLayer.cpp:2555-2605).</summary>
-        public int HeaderBits => EncapsulatedMessage.GetHeaderLengthBits(Reliability, isSplit: false);
+        public int HeaderBits => EncapsulatedMessage.GetHeaderLengthBits(Reliability, isSplit: Split is not null);
 
         /// <summary>Header plus data, each rounded up to whole bytes (PushPacket, ReliabilityLayer.cpp:3464).</summary>
         public int PushedBytes => BitsToBytes(BitLength) + BitsToBytes(HeaderBits);
@@ -862,7 +964,8 @@ internal sealed class ReliabilityLayer
                 ReliableMessageNumber,
                 SequencingIndex,
                 OrderingIndex,
-                OrderingChannel
+                OrderingChannel,
+                Split
             );
     }
 }

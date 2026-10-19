@@ -285,16 +285,6 @@ public class ReliabilityLayerTests
     }
 
     [Fact]
-    public void A_message_too_large_for_one_datagram_is_refused_until_splitting_exists()
-    {
-        // ReliabilityLayer.cpp:1604-1606: the limit is the datagram budget minus the largest message header.
-        var limit = Mtu - 28 - DatagramLimits.HeaderBudgetBytes - (EncapsulatedMessage.MaxHeaderLengthBits + 7) / 8;
-
-        Assert.True(_sender.Send(new byte[limit], Reliability.Reliable, Priority.High, 0, 0, Start));
-        Assert.False(_sender.Send(new byte[limit + 1], Reliability.Reliable, Priority.High, 0, 0, Start));
-    }
-
-    [Fact]
     public void Channels_out_of_range_are_sent_on_channel_zero()
     {
         // ReliabilityLayer.cpp:1563-1564.

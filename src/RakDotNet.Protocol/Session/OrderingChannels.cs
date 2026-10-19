@@ -1,5 +1,4 @@
 using RakDotNet.Protocol.Wire;
-using RakDotNet.Protocol.Wire.Datagrams;
 
 namespace RakDotNet.Protocol.Session;
 
@@ -28,19 +27,19 @@ internal sealed class OrderingChannels
     private readonly UInt24[] _orderedReadIndex = new UInt24[ChannelCount];
     private readonly UInt24[] _highestSequencedReadIndex = new UInt24[ChannelCount];
     private readonly UInt24[] _heapIndexOffsets = new UInt24[ChannelCount];
-    private readonly PriorityQueue<EncapsulatedMessage, ulong>[] _heaps = new PriorityQueue<EncapsulatedMessage, ulong>[ChannelCount];
+    private readonly PriorityQueue<ReceivedMessage, ulong>[] _heaps = new PriorityQueue<ReceivedMessage, ulong>[ChannelCount];
 
     public OrderingChannels()
     {
         for (var i = 0; i < ChannelCount; i++)
-            _heaps[i] = new PriorityQueue<EncapsulatedMessage, ulong>();
+            _heaps[i] = new PriorityQueue<ReceivedMessage, ulong>();
     }
 
     /// <summary>
     /// Adds every message <paramref name="message"/> releases to <paramref name="delivered"/>, in delivery order:
     /// nothing, the message itself, or the message followed by ones it unblocked.
     /// </summary>
-    public void Receive(EncapsulatedMessage message, ICollection<EncapsulatedMessage> delivered)
+    public void Receive(ReceivedMessage message, ICollection<ReceivedMessage> delivered)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(delivered);
