@@ -24,6 +24,9 @@ internal sealed class InMemoryLink
     /// <summary>Every datagram delivered, in order.</summary>
     public List<(IPEndPoint From, IPEndPoint To, byte[] Data)> Delivered { get; } = [];
 
+    /// <summary>Every datagram sent, including those dropped, in order.</summary>
+    public List<(IPEndPoint From, IPEndPoint To, byte[] Data)> Sent { get; } = [];
+
     /// <summary>When it returns true for a datagram, the datagram is dropped.</summary>
     public Func<IPEndPoint, IPEndPoint, byte[], bool>? Drop { get; set; }
 
@@ -48,6 +51,7 @@ internal sealed class InMemoryLink
         }
         foreach (var (from, datagram) in inFlight)
         {
+            Sent.Add((from, datagram.Remote, datagram.Data));
             if (Drop?.Invoke(from, datagram.Remote, datagram.Data) == true)
                 continue;
             Delivered.Add((from, datagram.Remote, datagram.Data));

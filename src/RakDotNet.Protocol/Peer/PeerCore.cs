@@ -30,15 +30,14 @@ namespace RakDotNet.Protocol.Peer;
 /// Outputs: <see cref="TryDequeueDatagram"/> and <see cref="TryDequeueEvent"/>.
 /// </para>
 /// <para>
-/// The client probes a fixed MTU of 1492; MTU discovery, ban lists, connection rate limits, out-of-band messages and
-/// security are not implemented yet.
+/// The client discovers the MTU as RakPeer does: OPEN_CONNECTION_REQUEST_1 probes step down through
+/// <see cref="RakNetConstants.MtuSizes"/> as unanswered attempts accumulate, and the server answers with the probe's
+/// size capped at <see cref="RakNetConstants.MaximumMtuSize"/>. Every offline rejection RakPeer sends or reports is
+/// produced, including the security ones the offline handshake detects before any cryptography runs.
 /// </para>
 /// </remarks>
 internal sealed class PeerCore
 {
-    /// <summary>The MTU probed by OPEN_CONNECTION_REQUEST_1, the first of mtuSizes (RakPeer.cpp:104).</summary>
-    public const int ProbeMtu = RakNetConstants.MaximumMtuSize;
-
     // How long a connection may stay half-open, RakPeer.cpp:5877-5881.
     private const long HandshakeTimeoutMs = 10_000;
 
@@ -48,14 +47,21 @@ internal sealed class PeerCore
     // defaultMTUSize, mtuSizes[NUM_MTU_SIZES-1] (RakPeer.cpp:206).
     private const int DefaultMtu = 576;
 
+    // RakPeer.cpp:3611-3612: with the frequency limit, an IP may take a new slot once per 100 ms.
+    private const long ConnectionFrequencyWindowMs = 100;
+
     private readonly PeerOptions _options;
     private readonly RemoteSystem?[] _slots;
     private readonly List<RemoteSystem> _active = [];
     private readonly List<ConnectionAttempt> _attempts = [];
     private readonly Queue<OutgoingDatagram> _datagrams = new();
     private readonly Queue<PeerEvent> _events = new();
+    private readonly BanTable _bans = new();
     private byte[] _offlinePingResponse = [];
     private uint _nextSendReceipt = 1;
+
+    // firstExternalID (RakPeer.cpp:240): this peer's address as the first system it connected with saw it.
+    private IPEndPoint _firstExternalAddress = InternalAddressList.Unassigned;
 
     public PeerCore(PeerOptions options)
     {
@@ -66,12 +72,53 @@ internal sealed class PeerCore
         _options = options;
         _slots = new RemoteSystem?[options.MaxConnections];
         MaxIncomingConnections = Math.Min(options.MaxIncomingConnections, options.MaxConnections);
+        LimitIpConnectionFrequency = options.LimitIpConnectionFrequency;
     }
 
     public ulong Guid => _options.Guid;
 
     /// <summary>SetMaximumIncomingConnections.</summary>
     public int MaxIncomingConnections { get; set; }
+
+    /// <summary>
+    /// SetLimitIPConnectionFrequency: refuse a new connection from an IP address, other than this host's own, that took
+    /// a slot less than 100 ms ago (RakPeer.cpp:3604-3625). The server answers ID_IP_RECENTLY_CONNECTED; a client
+    /// abandons the attempt without an event.
+    /// </summary>
+    public bool LimitIpConnectionFrequency { get; set; }
+
+    /// <summary>
+    /// AddToBanList (RakPeer.cpp:1861-1900): every datagram from a matching address is answered with
+    /// ID_CONNECTION_BANNED and otherwise ignored, connected or not.
+    /// </summary>
+    /// <param name="pattern">A dotted IPv4 address, where <c>*</c> matches everything from that character on, such as
+    /// <c>128.0.0.*</c>. Empty patterns and those over 15 characters are ignored.</param>
+    /// <param name="durationMs">How long the ban lasts; 0 bans forever. Banning a pattern again replaces its duration.</param>
+    /// <param name="nowUs">The current time.</param>
+    public void AddToBanList(string pattern, long durationMs, long nowUs)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(durationMs);
+        _bans.Add(pattern, durationMs, nowUs / 1000);
+    }
+
+    /// <summary>RemoveFromBanList (RakPeer.cpp:1910-1941): lifts the ban on exactly <paramref name="pattern"/>.</summary>
+    public void RemoveFromBanList(string pattern) => _bans.Remove(pattern);
+
+    /// <summary>ClearBanList (RakPeer.cpp:1948-1963).</summary>
+    public void ClearBanList() => _bans.Clear();
+
+    /// <summary>IsBanned (RakPeer.cpp:1981-2049) for a dotted address without a port.</summary>
+    public bool IsBanned(string address, long nowUs) => _bans.IsBanned(address, nowUs / 1000);
+
+    /// <summary>
+    /// GetMTUSize (RakPeer.cpp:2570-2581): the MTU agreed with the connected system at <paramref name="remote"/>, or
+    /// the default of 576 when there is none.
+    /// </summary>
+    public int GetMtuSize(IPEndPoint remote)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        return FindActive(remote)?.Mtu ?? DefaultMtu;
+    }
 
     /// <summary>SetOfflinePingResponse: the data appended to ID_UNCONNECTED_PONG, under 400 bytes (RakPeer.cpp:2271).</summary>
     public void SetOfflinePingResponse(ReadOnlySpan<byte> data)
@@ -95,9 +142,16 @@ internal sealed class PeerCore
     /// <param name="intervalMs">timeBetweenSendConnectionAttemptsMS.</param>
     /// <param name="timeoutMs">The connection's timeout, or 0 for <see cref="PeerOptions.TimeoutMs"/>.</param>
     /// <param name="nowUs">The current time.</param>
-    public ConnectionAttemptResult Connect(IPEndPoint remote, ReadOnlySpan<byte> password, int attemptCount, int intervalMs, long timeoutMs, long nowUs)
+    /// <param name="security">The client's public key mode, or null for an insecure connection. The offline handshake
+    /// reports ID_OUR_SYSTEM_REQUIRES_SECURITY and ID_PUBLIC_KEY_MISMATCH from it; a secure handshake itself does not
+    /// start, so a secure server's reply carrying the expected key is ignored.</param>
+    /// <exception cref="ArgumentException">The expected server key is neither empty nor
+    /// <see cref="SecureOpenConnectionReply1.PublicKeyLength"/> bytes.</exception>
+    public ConnectionAttemptResult Connect(IPEndPoint remote, ReadOnlySpan<byte> password, int attemptCount, int intervalMs, long timeoutMs, long nowUs, ClientSecurity? security = null)
     {
         ArgumentNullException.ThrowIfNull(remote);
+        if (security is not null && !security.ServerPublicKey.IsEmpty && security.ServerPublicKey.Length != SecureOpenConnectionReply1.PublicKeyLength)
+            throw new ArgumentException($"A server public key is {SecureOpenConnectionReply1.PublicKeyLength} bytes.", nameof(security));
         if (remote.Port == 0)
             return ConnectionAttemptResult.InvalidParameter;
         if (password.Length > 255)
@@ -107,8 +161,29 @@ internal sealed class PeerCore
         if (FindAttempt(remote) is not null)
             return ConnectionAttemptResult.ConnectionAttemptAlreadyInProgress;
 
-        _attempts.Add(new ConnectionAttempt(remote, password.ToArray(), attemptCount, intervalMs, timeoutMs, nowUs / 1000));
+        _attempts.Add(new ConnectionAttempt(remote, password.ToArray(), attemptCount, intervalMs, timeoutMs, security, nowUs / 1000));
         return ConnectionAttemptResult.ConnectionAttemptStarted;
+    }
+
+    /// <summary>
+    /// The transport could not send an MTU probe (<see cref="OutgoingDatagram.DoNotFragment"/>) to
+    /// <paramref name="remote"/> because it is larger than the path allows. As RakPeer does on WSAEMSGSIZE
+    /// (RakPeer.cpp:5791-5797), the attempts left at that MTU are skipped and the next size is probed on the next
+    /// <see cref="Update"/>.
+    /// </summary>
+    public void ReportDatagramTooLarge(IPEndPoint remote, long nowUs)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        var attempt = FindAttempt(remote);
+        if (attempt is null)
+            return;
+        var attemptsPerMtu = attempt.AttemptCount / RakNetConstants.MtuSizes.Length;
+        // With fewer attempts than MTU sizes the C++ sets requestsMade to 0 and probes the same size on every update
+        // without end; the attempt fails instead.
+        attempt.RequestsMade = attemptsPerMtu <= 0
+            ? unchecked((byte)(attempt.AttemptCount + 1))
+            : unchecked((byte)((attempt.LastMtuIndex + 1) * attemptsPerMtu));
+        attempt.NextRequestTimeMs = nowUs / 1000;
     }
 
     /// <summary>
@@ -222,6 +297,12 @@ internal sealed class PeerCore
     public void Receive(IPEndPoint from, ReadOnlySpan<byte> datagram, long nowUs)
     {
         ArgumentNullException.ThrowIfNull(from);
+        // RakPeer.cpp:4550-4580: a banned address gets ID_CONNECTION_BANNED whatever it sent.
+        if (!_bans.IsEmpty && _bans.IsBanned(from.Address.ToString(), nowUs / 1000))
+        {
+            SendOffline(from, new ConnectionBanned(Guid));
+            return;
+        }
         if (ProcessOffline(from, datagram, nowUs))
             return;
         FindActive(from)?.Session.Receive(datagram, nowUs);
@@ -281,11 +362,25 @@ internal sealed class PeerCore
                 _events.Enqueue(new ConnectionAttemptFailed(attempt.Address, RakNetConstants.UnassignedGuid, new[] { (byte)MessageId.ConnectionAttemptFailed }));
                 continue;
             }
+            var mtuIndex = ProbeMtuIndex(attempt);
+            attempt.LastMtuIndex = mtuIndex;
             attempt.RequestsMade++;
             attempt.NextRequestTimeMs = nowMs + attempt.IntervalMs;
-            // MTU discovery would step down mtuSizes as requests go unanswered; the probe stays at 1492 for now.
-            SendOffline(attempt.Address, new OpenConnectionRequest1(RakNetConstants.ProtocolVersion, ProbeMtu), ProbeMtu);
+            var mtu = RakNetConstants.MtuSizes[mtuIndex];
+            var probe = Encode(new OpenConnectionRequest1(RakNetConstants.ProtocolVersion, mtu), mtu);
+            _datagrams.Enqueue(new OutgoingDatagram(attempt.Address, probe) { DoNotFragment = true });
         }
+    }
+
+    // RakPeer.cpp:5750-5752: each MTU size gets an equal share of the attempts, and the rest go to the smallest.
+    private static int ProbeMtuIndex(ConnectionAttempt attempt)
+    {
+        var attemptsPerMtu = attempt.AttemptCount / RakNetConstants.MtuSizes.Length;
+        // Below three attempts the C++ divides by zero, which arm64 evaluates as 0: the native peer probes the largest
+        // size every time, so the core does too.
+        if (attemptsPerMtu <= 0)
+            return 0;
+        return Math.Min(attempt.RequestsMade / attemptsPerMtu, RakNetConstants.MtuSizes.Length - 1);
     }
 
     // The failure conditions of RakPeer.cpp:5874-5882.
@@ -353,7 +448,11 @@ internal sealed class PeerCore
             if (id == MessageId.ConnectionRequest)
                 ParseConnectionRequest(system, data, nowUs);
             else
-                Deactivate(system); // RakPeer also bans the address for the timeout; ban lists are not implemented yet.
+            {
+                // RakPeer.cpp:5962-5974: closed, and the address banned for the connection's timeout.
+                Deactivate(system);
+                _bans.Add(system.Address.Address.ToString(), system.Session.TimeoutMs, nowMs);
+            }
             return;
         }
 
@@ -377,6 +476,7 @@ internal sealed class PeerCore
                     system.TheirInternalAddresses = incoming.InternalAddresses;
                     OnConnectedPong(system, incoming.SendPingTime, incoming.SendPongTime, nowMs);
                     system.MyExternalAddress = incoming.ServerAddress;
+                    SetFirstExternalAddress(incoming.ServerAddress);
                     _events.Enqueue(new IncomingConnectionCompleted(system.Address, system.Guid, payload));
                 }
                 break;
@@ -439,6 +539,7 @@ internal sealed class PeerCore
         OnConnectedPong(system, accepted.RequestTime, accepted.ReplyTime, nowMs);
         system.MyExternalAddress = accepted.ClientAddress;
         system.Mode = ConnectMode.Connected;
+        SetFirstExternalAddress(accepted.ClientAddress);
         _events.Enqueue(new OutgoingConnectionCompleted(system.Address, system.Guid, payload, accepted.ClientAddress));
 
         var reply = new NewIncomingConnection(system.Address, _options.LocalAddresses, accepted.ReplyTime, (ulong)nowMs);
@@ -600,28 +701,68 @@ internal sealed class PeerCore
             _events.Enqueue(new UnconnectedPongReceived(from, pong.ServerGuid, pong.SendPingTime, pong.ResponseData));
     }
 
-    // RakPeer.cpp:4737-4870: answer the server's MTU reply with OPEN_CONNECTION_REQUEST_2.
+    // RakPeer.cpp:4737-4870: answer the server's MTU reply with OPEN_CONNECTION_REQUEST_2. The security rejections
+    // leave the request queued, so it is probed again and each reply reports again until the attempts run out.
     private void OnOpenConnectionReply1(IPEndPoint from, ReadOnlySpan<byte> data)
     {
-        if (!TryDecode<OpenConnectionReply1>(data, out var reply))
-            return; // Includes a server that requires security, which is not supported yet.
-        if (FindAttempt(from) is null)
-            return;
-        SendOffline(from, new OpenConnectionRequest2(from, reply.MtuSize, Guid));
+        if (TryDecode<OpenConnectionReply1>(data, out var reply))
+        {
+            var attempt = FindAttempt(from);
+            if (attempt is null)
+                return;
+            // RakPeer.cpp:4824-4838: we passed a public key but the server has no security.
+            if (attempt.Security is not null)
+            {
+                _events.Enqueue(new ConnectionAttemptFailed(from, reply.ServerGuid, new[] { (byte)MessageId.OurSystemRequiresSecurity }));
+                return;
+            }
+            SendOffline(from, new OpenConnectionRequest2(from, reply.MtuSize, Guid));
+        }
+        else if (TryDecode<SecureOpenConnectionReply1>(data, out var secure))
+        {
+            var attempt = FindAttempt(from);
+            if (attempt is null)
+                return;
+            // RakPeer.cpp:4788-4801. PKM_ACCEPT_ANY_PUBLIC_KEY takes the server's key as the expected one; with
+            // PKM_INSECURE_CONNECTION remote_public_key is never set (RakPeer.cpp:3197-3205), so no key matches it.
+            var expected = attempt.Security switch
+            {
+                null => ReadOnlySpan<byte>.Empty,
+                { ServerPublicKey.IsEmpty: true } => secure.ServerPublicKey.Span,
+                _ => attempt.Security.ServerPublicKey.Span,
+            };
+            if (!expected.SequenceEqual(secure.ServerPublicKey.Span))
+                _events.Enqueue(new ConnectionAttemptFailed(from, secure.ServerGuid, new[] { (byte)MessageId.PublicKeyMismatch }));
+            // Otherwise the client would answer with its handshake challenge, which needs the cat key agreement
+            // (RakPeer.cpp:4803-4818); without it the reply is ignored and the attempt runs out.
+        }
     }
 
     // RakPeer.cpp:4871-5074: the offline handshake is done, so start the connected one.
     private void OnOpenConnectionReply2(IPEndPoint from, ReadOnlySpan<byte> data, long nowUs)
     {
         if (!TryDecode<OpenConnectionReply2>(data, out var reply))
+        {
+            // RakPeer.cpp:4914-4930: the server requires security and we passed no public key. The packet is the ID and
+            // 0 (the server public key is missing), and the request stays queued.
+            if (reply.RequiresSecurity && FindAttempt(from) is { Security: null })
+                _events.Enqueue(new ConnectionAttemptFailed(from, reply.ServerGuid, new byte[] { (byte)MessageId.RemoteSystemRequiresPublicKey, 0 }));
             return;
+        }
         var attempt = FindAttempt(from);
         if (attempt is null)
             return;
 
         // A cross connection may already have made this system (RakPeer.cpp:4941-4954).
-        var system = FindActive(from) ?? Assign(from, ConnectMode.UnverifiedSender, reply.MtuSize, reply.ServerGuid, nowUs);
+        var system = FindActive(from);
+        var connectedRecently = false;
         if (system is null)
+            system = Assign(from, ConnectMode.UnverifiedSender, reply.MtuSize, reply.ServerGuid, nowUs, out connectedRecently);
+        if (connectedRecently)
+        {
+            // RakPeer.cpp:4958 skips the request and the failure alike; the attempt is dropped without an event.
+        }
+        else if (system is null)
         {
             _events.Enqueue(new ConnectionAttemptFailed(from, reply.ServerGuid, new[] { (byte)MessageId.ConnectionAttemptFailed }));
         }
@@ -702,8 +843,13 @@ internal sealed class PeerCore
             return;
         }
 
+        Assign(from, ConnectMode.UnverifiedSender, request.MtuSize, request.ClientGuid, nowUs, out var connectedRecently);
+        if (connectedRecently)
+        {
+            SendOffline(from, new IpRecentlyConnected(Guid)); // RakPeer.cpp:5366-5384.
+            return;
+        }
         // The answer goes out even when no slot is free (RakPeer.cpp:5366-5417).
-        Assign(from, ConnectMode.UnverifiedSender, request.MtuSize, request.ClientGuid, nowUs);
         SendOffline(from, reply);
     }
 
@@ -711,19 +857,51 @@ internal sealed class PeerCore
     private bool AllowIncomingConnections() =>
         _active.Count(s => s.Mode == ConnectMode.Connected && !s.WeInitiatedTheConnection) < MaxIncomingConnections;
 
-    // AssignSystemAddressToRemoteSystemList, RakPeer.cpp:3595-3770, without the same-IP rate limit.
-    private RemoteSystem? Assign(IPEndPoint address, ConnectMode mode, int incomingMtu, ulong guid, long nowUs)
+    // AssignSystemAddressToRemoteSystemList, RakPeer.cpp:3595-3770. Returns null when no slot is free, or when the
+    // frequency limit refuses the address, which sets connectedRecently.
+    private RemoteSystem? Assign(IPEndPoint address, ConnectMode mode, int incomingMtu, ulong guid, long nowUs, out bool connectedRecently)
     {
+        var nowMs = nowUs / 1000;
+        connectedRecently = LimitIpConnectionFrequency
+            && !IsOwnAddress(address.Address)
+            && _active.Exists(s => s.Address.Address.Equals(address.Address)
+                && nowMs >= s.ConnectionTimeMs
+                && nowMs - s.ConnectionTimeMs < ConnectionFrequencyWindowMs);
+        if (connectedRecently)
+            return null;
+
         var index = Array.FindIndex(_slots, s => s is null || !s.IsActive);
         if (index < 0)
             return null;
-        // The C++ asserts the MTU is at most MAXIMUM_MTU_SIZE (RakPeer.cpp:3644); larger values are clamped here.
+        // MTUSize starts at defaultMTUSize and is raised to the incoming MTU (RakPeer.cpp:3638-3643). The C++ asserts
+        // the result is at most MAXIMUM_MTU_SIZE (RakPeer.cpp:3644); larger values are clamped here.
         var mtu = Math.Clamp(incomingMtu, DefaultMtu, RakNetConstants.MaximumMtuSize);
         var session = new ReliabilityLayer(mtu, nowUs) { TimeoutMs = _options.TimeoutMs };
-        var system = new RemoteSystem(index, address, guid, session, mode, nowUs / 1000);
+        var system = new RemoteSystem(index, address, guid, session, mode, nowMs) { Mtu = mtu };
         _slots[index] = system;
         _active.Add(system);
         return system;
+    }
+
+    // IsLoopbackAddress(address, false), RakPeer.cpp:4006-4027: one of ipList, or the address the first remote system
+    // saw, ignoring ports.
+    private bool IsOwnAddress(IPAddress address)
+    {
+        foreach (var local in _options.LocalAddresses)
+        {
+            if (local.Equals(InternalAddressList.Unassigned))
+                break;
+            if (local.Address.Equals(address))
+                return true;
+        }
+        return _firstExternalAddress.Address.Equals(address);
+    }
+
+    // RakPeer.cpp:6035-6042 and 6175-6182: set once, by the first connection to complete.
+    private void SetFirstExternalAddress(IPEndPoint address)
+    {
+        if (_firstExternalAddress.Equals(InternalAddressList.Unassigned))
+            _firstExternalAddress = address;
     }
 
     // CloseConnectionInternal without notification (RakPeer.cpp:4148-4174): the slot keeps the address but forgets

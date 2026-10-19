@@ -51,14 +51,21 @@ internal sealed record UnconnectedPongReceived(IPEndPoint Remote, ulong Guid, ul
 
 /// <summary>
 /// A connection attempt ended without a connection. <see cref="Reason"/> is the packet's ID: ID_CONNECTION_ATTEMPT_FAILED
-/// when no reply came or no slot was free, or the rejection the remote system sent (ID_ALREADY_CONNECTED,
+/// when no reply came or no slot was free, the rejection the remote system sent (ID_ALREADY_CONNECTED,
 /// ID_NO_FREE_INCOMING_CONNECTIONS, ID_INCOMPATIBLE_PROTOCOL_VERSION, ID_CONNECTION_BANNED, ID_IP_RECENTLY_CONNECTED,
-/// ID_INVALID_PASSWORD).
+/// ID_INVALID_PASSWORD), or a security mismatch found in the offline handshake (ID_OUR_SYSTEM_REQUIRES_SECURITY,
+/// ID_PUBLIC_KEY_MISMATCH, ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY).
 /// </summary>
+/// <remarks>
+/// The three security reasons leave the attempt running, as in RakPeer, so they can repeat, one per reply, and are
+/// followed by ID_CONNECTION_ATTEMPT_FAILED once the attempts run out.
+/// </remarks>
 /// <param name="Remote">The address the attempt was made to.</param>
 /// <param name="Guid">The remote GUID when the reply carried one.</param>
-/// <param name="Data">The packet: the ID alone for offline rejections and timeouts (RakPeer.cpp:5119-5124, 5723-5727),
-/// the whole message for ID_INVALID_PASSWORD (RakPeer.cpp:6112-6118).</param>
+/// <param name="Data">The packet: the ID alone for offline rejections, timeouts, ID_OUR_SYSTEM_REQUIRES_SECURITY and
+/// ID_PUBLIC_KEY_MISMATCH (RakPeer.cpp:5119-5124, 5723-5727, 4795-4800, 4832-4837); the ID and 0 for
+/// ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY (RakPeer.cpp:4922-4928); the whole message for ID_INVALID_PASSWORD
+/// (RakPeer.cpp:6112-6118).</param>
 internal sealed record ConnectionAttemptFailed(IPEndPoint Remote, ulong Guid, ReadOnlyMemory<byte> Data) : PeerEvent(Remote, Guid)
 {
     public MessageId Reason => (MessageId)Data.Span[0];
