@@ -27,8 +27,26 @@ public class EventStreamTests
         Assert.Equal(1 + 4 + 5, pong.Data.Length);
         Assert.InRange(BinaryPrimitives.ReadUInt32BigEndian(pong.Data.AsSpan(1)), 1u, (uint)peers.Client.GetTime());
         Assert.Equal("hello"u8.ToArray(), pong.Data[5..]);
-        // Unconnected pings are internal traffic and never reach the server's stream.
-        Assert.Empty(peers.ServerEvents);
+    }
+
+    [Theory]
+    [InlineData(false, MessageId.UnconnectedPing)]
+    [InlineData(true, MessageId.UnconnectedPingOpenConnections)]
+    public void An_answered_unconnected_ping_reaches_the_servers_stream_as_its_ID_alone(bool openConnectionsOnly, MessageId id)
+    {
+        using var peers = new ManualPeers();
+
+        Assert.True(peers.Client.PingUnconnected(peers.ServerAddress, openConnectionsOnly));
+        peers.RunUntil(() => peers.ClientEvents.Count > 0, "a pong");
+
+        // RakPeer.cpp:4672-4678: after the pong, a one-byte packet with the ping's ID, the sender's address and GUID.
+        var ping = Assert.Single(peers.ServerEvents);
+        Assert.Equal(PeerEventKind.Message, ping.Kind);
+        Assert.Equal([(byte)id], ping.Data);
+        Assert.Equal(peers.Client.RakNetGuid, ping.RakNetGuid);
+        Assert.Equal(peers.Client.Sockets[0].LocalAddress, ping.Address);
+        Assert.False(ping.IsLocal);
+        Assert.Null(ping.Connection);
     }
 
     [Fact]

@@ -477,8 +477,10 @@ public sealed partial class RakPeer
         {
             switch (coreEvent)
             {
-                case UnconnectedPingReceived:
-                    // Internal traffic never reaches the stream (docs/api-design.md section 4).
+                case UnconnectedPingReceived ping:
+                    // RakPeer.cpp:4672-4678: an answered ping is queued as its ID alone, from the sender.
+                    SystemAddress pinger = ping.Remote;
+                    EnqueueEvent(NewSegment(ping.Packet.Span, ping.Guid, pinger, _byAddress.GetValueOrDefault(pinger)));
                     break;
                 case UnconnectedPongReceived pong:
                     OnPong(pong);

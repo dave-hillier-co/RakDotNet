@@ -45,7 +45,7 @@ Usage is shown by the projects in [samples/](../samples): a server loop ([RakDot
 
 ## 4. Event ordering
 
-The stream is `peer.Events`, RakNet's `Receive()`. Each entry is a borrowed `PeerEvent` whose `Data` holds exactly RakNet's `Packet::data`, rewrites included. Internal traffic (connected pings, unconnected pings, handshake messages, `ID_DETECT_LOST_CONNECTIONS`) never reaches it.
+The stream is `peer.Events`, RakNet's `Receive()`. Each entry is a borrowed `PeerEvent` whose `Data` holds exactly RakNet's `Packet::data`, rewrites included. Internal traffic (connected pings, handshake messages, `ID_DETECT_LOST_CONNECTIONS`) never reaches it. An unconnected ping this peer answers does, as RakNet queues it: a one-byte `Message` holding `ID_UNCONNECTED_PING` or `ID_UNCONNECTED_PING_OPEN_CONNECTIONS`, from the sender's address and GUID (`RakPeer.cpp:4672-4678`).
 
 - Entries are delivered in the order the I/O cycle produced them, which is RakNet's `packetReturnQueue` order. Per-channel ordering and sequencing hold within the stream.
 - `Connected` precedes that connection's first message. A connection's last delivered message precedes its `Disconnected`, and nothing for that connection follows it.
