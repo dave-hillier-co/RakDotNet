@@ -18,6 +18,18 @@ public interface IDatagramTransport : IDisposable
     /// <summary>Non-blocking; a <paramref name="ttl"/> of 0 keeps the default.</summary>
     bool TrySend(ReadOnlySpan<byte> datagram, in SystemAddress remote, int ttl = 0);
 
+    /// <summary>
+    /// Non-blocking; sends with the IP don't-fragment flag set where the platform supports it, as RakPeer does for each
+    /// MTU probe (RakPeer.cpp:5779-5821). <paramref name="socketError"/> is <see cref="SocketError.MessageSize"/> when the
+    /// datagram is larger than the path allows. Transports without the flag send as <see cref="TrySend"/> does.
+    /// </summary>
+    bool TrySendDoNotFragment(ReadOnlySpan<byte> datagram, in SystemAddress remote, out SocketError socketError)
+    {
+        var sent = TrySend(datagram, remote);
+        socketError = sent ? SocketError.Success : SocketError.SocketError;
+        return sent;
+    }
+
     /// <summary>Called by the peer once; the transport invokes <paramref name="signal"/> when a datagram becomes available.</summary>
     void SetReadySignal(Action signal);
 }

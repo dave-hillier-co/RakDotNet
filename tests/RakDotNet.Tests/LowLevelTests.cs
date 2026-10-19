@@ -217,6 +217,28 @@ public sealed class LowLevelTests : IDisposable
         Assert.False(_peer.LowLevel.IsNetworkSimulatorActive);
     }
 
+    [Fact]
+    public void A_zero_length_datagram_is_not_received()
+    {
+        // RNS2_Berkley::RecvFromLoopInt (RakNetSocket2.cpp:357-361) passes on only datagrams with bytesRead > 0, so
+        // neither the filter, OnDirectSocketReceive nor the peer sees an empty one.
+        var observer = new ReceivedDatagrams();
+        _peer.LowLevel.Observers.Attach(observer);
+        var filtered = new List<byte[]>();
+        _peer.LowLevel.IncomingDatagramFilter = (datagram, _, _) =>
+        {
+            filtered.Add(datagram.ToArray());
+            return true;
+        };
+
+        Assert.True(_raw.TrySend([], _peer.Sockets[0].LocalAddress));
+        Assert.True(_raw.TrySend([(byte)MessageId.UserPacketEnum], _peer.Sockets[0].LocalAddress));
+        Update();
+
+        Assert.Equal([[(byte)MessageId.UserPacketEnum]], filtered);
+        Assert.Equal([[(byte)MessageId.UserPacketEnum]], observer.Received);
+    }
+
     public void Dispose()
     {
         _peer.Dispose();
@@ -258,6 +280,13 @@ public sealed class LowLevelTests : IDisposable
         var writer = new BitStreamWriter(buffer);
         new OutOfBandHeader(guid).Write(ref writer);
         return buffer;
+    }
+
+    private sealed class ReceivedDatagrams : INetworkObserver
+    {
+        public List<byte[]> Received { get; } = [];
+
+        public void OnDatagramReceived(ReadOnlySpan<byte> datagram, SystemAddress remote) => Received.Add(datagram.ToArray());
     }
 
     private sealed class SentDatagrams : INetworkObserver

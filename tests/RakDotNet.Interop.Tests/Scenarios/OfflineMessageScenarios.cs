@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
 using RakDotNet.Interop.Tests.Harness;
 using RakDotNet.Protocol.Wire;
 
@@ -8,8 +10,8 @@ namespace RakDotNet.Interop.Tests.Scenarios;
 /// Messages between unconnected peers, from Samples/OfflineMessagesTest/OfflineMessagesTest.cpp and
 /// Samples/Tests/OfflineMessagesConvertTest.cpp (AdvertiseSystem, then a ping answered with the offline ping response),
 /// Samples/Ping/Ping.cpp (a server describing itself in its offline ping response) and
-/// Samples/LANServerDiscovery/LANServerDiscovery.cpp (the same ping sent to 255.255.255.255). Every datagram goes
-/// through the proxy, so discovery pings the proxy rather than the broadcast address.
+/// Samples/LANServerDiscovery/LANServerDiscovery.cpp (the same ping sent to 255.255.255.255). Datagrams go through the
+/// proxy, except in the broadcast discovery scenario, which pings 255.255.255.255 directly.
 /// </summary>
 [Collection(OneScenarioAtATime.Name)]
 public sealed class OfflineMessageScenarios
@@ -36,6 +38,27 @@ public sealed class OfflineMessageScenarios
         Assert.Equal(session.ClientStarted.PeerGuid, ping.PeerGuid);
         Assert.Equal(session.AddressAtServer(session.ClientPeer), ping.Address);
         Assert.Equal(new byte[] { (byte)MessageId.UnconnectedPing }, ping.Data.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
+    public async Task A_discovery_ping_to_the_broadcast_address_is_answered_by_the_server_on_that_port(PeerKind client, PeerKind server)
+    {
+        // LANServerDiscovery.cpp pings "255.255.255.255" on the server's port. Both peers bind every interface, and
+        // RakPeer::Startup sets SO_BROADCAST on each socket (RakPeer.cpp:505, RakNetSocket2_Berkley.cpp:176).
+        PeerMatrix.SkipUnlessAvailable(client, server);
+        SkipUnlessBroadcastAvailable();
+        var anyInterface = new StartupOptions(Host: "0.0.0.0");
+        await using var serverPeer = await InteropPeer.StartAsync(server, "server", anyInterface, Token);
+        await using var clientPeer = await InteropPeer.StartAsync(client, "client", anyInterface, Token);
+        var description = "Offline ping response data. This can be anything you want.\0"u8.ToArray();
+        await serverPeer.Driver.SetOfflinePingResponseAsync(description, Token);
+        var serverPort = serverPeer.Started.BoundAddress.Port;
+
+        Assert.True(await clientPeer.Driver.PingAsync(new IPEndPoint(IPAddress.Broadcast, serverPort), onlyIfAccepting: false, Token));
+
+        var pong = await clientPeer.Inbox.WaitForPacketAsync(p => p.MessageId == (byte)MessageId.UnconnectedPong, "ID_UNCONNECTED_PONG", Timeout, Token);
+        AssertPong(pong, serverPeer.Started.PeerGuid, new IPEndPoint(pong.Address.Address, serverPort), description);
     }
 
     [Theory]
@@ -96,6 +119,23 @@ public sealed class OfflineMessageScenarios
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
 
         await OfflineFlows.AdvertiseSystemAsync(session, Token);
+    }
+
+    // Sending to 255.255.255.255 needs an interface with a broadcast route.
+    private static void SkipUnlessBroadcastAvailable()
+    {
+        using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp) { EnableBroadcast = true };
+        socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+        bool sent;
+        try
+        {
+            sent = socket.SendTo([0], new IPEndPoint(IPAddress.Broadcast, ((IPEndPoint)socket.LocalEndPoint!).Port)) == 1;
+        }
+        catch (SocketException)
+        {
+            sent = false;
+        }
+        Assert.SkipUnless(sent, "This host has no broadcast route.");
     }
 
     // RakPeer.cpp:4682-4700: the application sees the ID, the ping's send time cut to a 4-byte TimeMS, then the response.

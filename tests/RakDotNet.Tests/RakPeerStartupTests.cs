@@ -24,6 +24,25 @@ public class RakPeerStartupTests
     }
 
     [Fact]
+    public void A_socket_bound_to_every_interface_reports_its_address_as_127_0_0_1()
+    {
+        // RNS2_Berkley::GetSystemAddressIPV4 (RakNetSocket2_Berkley.cpp:89-102) replaces INADDR_ANY with 127.0.0.1, so
+        // GetMyBoundAddress reports 127.0.0.1 and the bound port.
+        using var peer = RakPeer.Start(LoopbackOptions with { Bindings = [SocketBinding.AnyIPv4] });
+
+        Assert.Equal(IPAddress.Loopback, peer.Sockets[0].LocalAddress.ToIPEndPoint().Address);
+        Assert.NotEqual(0, peer.Sockets[0].LocalAddress.Port);
+    }
+
+    [Fact]
+    public void Socket_bindings_default_to_raknets_buffer_sizes()
+    {
+        // RNS2_Berkley::SetSocketOptions (RakNetSocket2_Berkley.cpp:25-53).
+        Assert.Equal(256 * 1024, SocketBinding.AnyIPv4.ReceiveBufferSize);
+        Assert.Equal(16 * 1024, SocketBinding.Port(1).SendBufferSize);
+    }
+
+    [Fact]
     public void Start_draws_a_guid_that_is_neither_zero_nor_unassigned_unless_one_is_given()
     {
         using var random = RakPeer.Start(LoopbackOptions);

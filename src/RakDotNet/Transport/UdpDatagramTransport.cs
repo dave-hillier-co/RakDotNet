@@ -36,6 +36,7 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
     private SystemAddress _slotRemote;
     private volatile SocketException? _fatal;
     private volatile bool _disposed;
+    private bool _dontFragmentSupported = true;
 
     private UdpDatagramTransport(Socket socket)
     {
@@ -49,7 +50,15 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
 
     public SystemAddress LocalAddress { get; }
 
-    /// <summary>Binds a UDP socket as RakNet's RNS2_Berkley::Bind does, without SO_REUSEADDR so a taken port fails.</summary>
+    internal int ReceiveBufferSize => _socket.ReceiveBufferSize;
+
+    internal int SendBufferSize => _socket.SendBufferSize;
+
+    /// <summary>
+    /// Binds a UDP socket as RakNet's RNS2_Berkley::BindShared does (RakNetSocket2_Berkley.cpp:160-263,
+    /// RakNetSocket2.cpp:303-332): the binding's buffer sizes, SO_BROADCAST as RakPeer::Startup asks (RakPeer.cpp:505),
+    /// no SO_REUSEADDR so a taken port fails, then 4 zero bytes sent to the bound address as a test.
+    /// </summary>
     public static bool TryBind(SocketBinding binding, out UdpDatagramTransport? transport, out StartupError startupError, out SocketError socketError)
     {
         ArgumentNullException.ThrowIfNull(binding);
@@ -71,6 +80,7 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
                 socket.ReceiveBufferSize = receive;
             if (binding.SendBufferSize is { } send)
                 socket.SendBufferSize = send;
+            socket.EnableBroadcast = true;
             socket.Bind(binding.LocalEndPoint);
         }
         catch (SocketException exception)
@@ -83,6 +93,21 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
                 SocketError.AddressFamilyNotSupported or SocketError.ProtocolFamilyNotSupported => StartupError.SocketFamilyNotSupported,
                 _ => StartupError.SocketFailedToBind,
             };
+            return false;
+        }
+
+        // RakNetSocket2.cpp:317-326. The bound address has 0.0.0.0 replaced by 127.0.0.1 (RakNetSocket2_Berkley.cpp:97-101).
+        var bound = (IPEndPoint)socket.LocalEndPoint!;
+        var self = new IPEndPoint(bound.Address.Equals(IPAddress.Any) ? IPAddress.Loopback : bound.Address, bound.Port);
+        try
+        {
+            socket.SendTo(stackalloc byte[4], SocketFlags.None, self);
+        }
+        catch (SocketException exception)
+        {
+            socket.Dispose();
+            socketError = exception.SocketErrorCode;
+            startupError = StartupError.SocketFailedTestSend;
             return false;
         }
 
@@ -163,10 +188,68 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         }
     }
 
+    /// <summary>
+    /// RakPeer.cpp:5779-5821: IP don't-fragment is set for this send only (RNS2_Berkley::SetDoNotFragment,
+    /// RakNetSocket2_Berkley.cpp:71-80). A platform that refuses the option sends the datagram as it is.
+    /// </summary>
+    public bool TrySendDoNotFragment(ReadOnlySpan<byte> datagram, in SystemAddress remote, out SocketError socketError)
+    {
+        socketError = SocketError.Success;
+        if (remote.AddressFamily != _socket.AddressFamily || _disposed)
+        {
+            socketError = SocketError.AddressFamilyNotSupported;
+            return false;
+        }
+        lock (_sendGate)
+        {
+            var dontFragment = SetDontFragment(true);
+            try
+            {
+                remote.CopyTo(_sendAddress);
+                return _socket.SendTo(datagram, SocketFlags.None, _sendAddress) == datagram.Length;
+            }
+            catch (SocketException exception)
+            {
+                socketError = exception.SocketErrorCode;
+                return false;
+            }
+            catch (ObjectDisposedException)
+            {
+                socketError = SocketError.OperationAborted;
+                return false;
+            }
+            finally
+            {
+                if (dontFragment)
+                    SetDontFragment(false);
+            }
+        }
+    }
+
     public void Dispose()
     {
         _disposed = true;
         _socket.Dispose();
+    }
+
+    private bool SetDontFragment(bool value)
+    {
+        if (!_dontFragmentSupported)
+            return false;
+        try
+        {
+            _socket.DontFragment = value;
+            return true;
+        }
+        catch (Exception exception) when (exception is SocketException or NotSupportedException)
+        {
+            _dontFragmentSupported = false;
+            return false;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
     }
 
     // Errors that concern one datagram, not the socket: an ICMP port unreachable from an earlier send, or an
