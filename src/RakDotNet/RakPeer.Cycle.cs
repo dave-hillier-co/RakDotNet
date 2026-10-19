@@ -613,7 +613,7 @@ public sealed partial class RakPeer
             if (_core.TryGetRemoteSystem(guid, out var system))
             {
                 connection.System = system;
-                connection.Refresh(system, ConnectionState.Connected, nowUs);
+                connection.Refresh(system, ConnectionState.Connected);
             }
             _byGuid[guid] = connection;
             _byAddress[address] = connection;
@@ -690,7 +690,7 @@ public sealed partial class RakPeer
                 EndConnection(connection);
                 continue;
             }
-            connection.Refresh(system, (ConnectionState)PeerCore.GetConnectionState(system), nowUs);
+            connection.Refresh(system, (ConnectionState)PeerCore.GetConnectionState(system));
         }
         if (ConnectedChanged())
             PublishTable();
