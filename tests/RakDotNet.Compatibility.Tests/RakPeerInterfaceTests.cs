@@ -211,7 +211,8 @@ public sealed class RakPeerInterfaceTests : IDisposable
 
         peer.SendLoopback([(byte)MessageId.UserPacketEnum, 5]);
         var looped = ReceiveUntil(peer, MessageId.UserPacketEnum);
-        Assert.True(looped.WasGeneratedLocally);
+        // RakPeer.cpp:165, 183: AllocPacket clears wasGeneratedLocally, and SendLoopback leaves it clear.
+        Assert.False(looped.WasGeneratedLocally);
         Assert.Equal(peer.GetMyGUID(), looped.RakNetGuid);
 
         peer.PushBackPacket(looped, pushAtHead: true);

@@ -110,7 +110,7 @@ public class EventStreamTests
     }
 
     [Fact]
-    public void Loopback_messages_and_injections_arrive_as_local_packets_in_order()
+    public void Loopback_messages_and_injections_arrive_in_order_and_not_as_generated_locally()
     {
         using var peers = new ManualPeers();
         var peer = peers.Client;
@@ -124,6 +124,9 @@ public class EventStreamTests
 
         Assert.Equal([0x88, 0x86, 0x87], seen.Select(e => (byte)e.Id));
         Assert.All(seen, e => Assert.Equal(PeerEventKind.Message, e.Kind));
+        // AllocPacket clears wasGeneratedLocally (RakPeer.cpp:165, 183), and neither SendLoopback (RakPeer.cpp:1354-1364)
+        // nor PushBackPacket (RakPeer.cpp:2826-2843) sets it.
+        Assert.All(seen, e => Assert.False(e.IsLocal));
         // RakPeer.cpp:1354-1364: SendLoopback comes from ipList[0] and this peer's GUID.
         Assert.Equal(peer.RakNetGuid, seen[1].RakNetGuid);
         Assert.Equal(new RakNetGuid(77), seen[2].RakNetGuid);
@@ -146,6 +149,7 @@ public class EventStreamTests
         // RakPeer.cpp:1336-1343 copies sendReceiptSerial, which is already the next receipt, into the packet.
         Assert.Equal(PeerEventKind.ReceiptAcked, seen[1].Kind);
         Assert.Equal(new SendReceipt(sent.Receipt.Value + 1), seen[1].Receipt);
+        Assert.All(seen, e => Assert.False(e.IsLocal));
     }
 
     [Fact]

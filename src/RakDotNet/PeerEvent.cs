@@ -68,7 +68,10 @@ public readonly ref struct PeerEvent
     /// <summary><see cref="RakPeer.GetTime"/> when the entry was queued.</summary>
     public ulong ReceivedTime => Segment.ReceivedTime;
 
-    /// <summary>Packet::wasGeneratedLocally</summary>
+    /// <summary>
+    /// Packet::wasGeneratedLocally: set only on the ID_CONNECTION_LOST of a silent local close (RakPeer.cpp:1676).
+    /// Loopback and injected packets leave it clear, as AllocPacket does (RakPeer.cpp:165, 183).
+    /// </summary>
     public bool IsLocal => Segment.IsLocal;
 
     /// <summary>Packet::data. Empty when <see cref="IsRakNetPacket"/> is false.</summary>

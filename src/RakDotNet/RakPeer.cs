@@ -551,7 +551,6 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         segment.SetData(data);
         segment.Address = source;
         segment.RakNetGuid = sourceGuid;
-        segment.IsLocal = true;
         segment.Connection = sourceGuid.IsAssigned && TryGetConnection(sourceGuid, out var connection) ? connection : null;
         Classify(segment);
         InjectSegment(segment, atHead);

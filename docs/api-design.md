@@ -139,7 +139,7 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `Send(data, length, priority, reliability, channel, target, broadcast, forceReceipt)` | `peer.Send(message, target, reliability, priority, channel, forceReceipt)` or `connection.Send(...)`; `broadcast = true` → `peer.Broadcast(..., except: target)` |
 | `Send(BitStream*, ...)` | the same calls with an `OutgoingMessage` from `BitStream` or `BitStreamWriter` (bit-exact length), or `Send<TState>` with a `MessageWriter` |
 | `SendList` | `new OutgoingMessage(in ReadOnlySequence<byte>)` |
-| `SendLoopback` | `peer.SendLoopback(span)`; arrives as `Message` with `IsLocal` |
+| `SendLoopback` | `peer.SendLoopback(span)`; arrives as `Message` from this peer's GUID, with `IsLocal` clear as RakNet's `AllocPacket` leaves it (`RakPeer.cpp:165`) |
 | `Receive` | `peer.Events.TryRead(out PeerEvent)` (after `peer.Update()` in Manual mode); `WaitToReadAsync`; `ReadAllAsync` |
 | `DeallocatePacket` | automatic at the next read; `OwnedPeerEvent.Dispose` for detached events |
 | `GetMaximumNumberOfPeers` | `peer.MaxConnections` |
