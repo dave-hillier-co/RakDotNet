@@ -973,7 +973,9 @@ public sealed partial class RakPeer
         {
             if (Volatile.Read(ref _state) == Stopped)
                 return;
-            Volatile.Write(ref _state, Stopped);
+            _stopFault = fault;
+            // A full fence, so a command enqueued after this is either drained below or sees Stopped (Enqueue).
+            Interlocked.Exchange(ref _state, Stopped);
         }
         _streamClosed = true;
         _loopStopping = true;
@@ -1014,6 +1016,31 @@ public sealed partial class RakPeer
         while (_dispatchOps.TryDequeue(out var op))
             op.Inject?.TryRelease(Volatile.Read(ref op.Inject.Generation));
 
+        EndPending(fault);
+
+        lock (_cycleGate)
+        {
+            foreach (var record in _receipts.Values)
+            {
+                if (record.Tracker is { } tracker)
+                    EndTracked(tracker, record.Version, record.Receipt, fault);
+            }
+            _receipts.Clear();
+            foreach (var connection in _byGuid.Values)
+                connection.MarkClosed();
+        }
+
+        _plugins.ReleaseAll();
+        _reader.Complete(fault);
+        _stopped.TrySetResult();
+    }
+
+    /// <summary>
+    /// Ends every command still queued and every registered attempt and ping. Run by shutdown, and again by a command
+    /// that reaches the queue after shutdown drained it; safe to run concurrently.
+    /// </summary>
+    private void EndPending(Exception? fault)
+    {
         var shutdown = fault ?? new OperationCanceledException("The peer shut down.");
         while (_commands.TryDequeue(out var command))
         {
@@ -1048,22 +1075,6 @@ public sealed partial class RakPeer
             else
                 ping.Completion.TrySetException(fault);
         }
-
-        lock (_cycleGate)
-        {
-            foreach (var record in _receipts.Values)
-            {
-                if (record.Tracker is { } tracker)
-                    EndTracked(tracker, record.Version, record.Receipt, fault);
-            }
-            _receipts.Clear();
-            foreach (var connection in _byGuid.Values)
-                connection.MarkClosed();
-        }
-
-        _plugins.ReleaseAll();
-        _reader.Complete(fault);
-        _stopped.TrySetResult();
     }
 
     private static void EndTracked(TrackedSend tracker, short version, SendReceipt receipt, Exception? fault)

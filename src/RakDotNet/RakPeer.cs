@@ -74,6 +74,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private readonly Stack<TrackedSend> _trackedPool = new();
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _state;
+    private Exception? _stopFault;
     private volatile bool _streamClosed;
     private uint _nextReceipt = 1;
     private int _dispatchThread;
@@ -633,7 +634,18 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
             }, (this, pending));
         }
 
-        if (!PingUnconnected(remote, onlyReplyOnAcceptingConnections, socketIndex))
+        bool sent;
+        try
+        {
+            sent = PingUnconnected(remote, onlyReplyOnAcceptingConnections, socketIndex);
+        }
+        catch
+        {
+            // Shut down, or a bad socket index: the registration must not outlive the call.
+            EndPing(pending, static p => p.Completion.TrySetCanceled());
+            throw;
+        }
+        if (!sent)
             EndPing(pending, static p => p.Completion.TrySetException(new ArgumentException($"{p.Address} cannot be pinged from this socket.")));
         return await pending.Completion.Task.ConfigureAwait(false);
     }
@@ -1144,9 +1156,20 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         complete(ping);
     }
 
-    private void Enqueue(PeerCommand command)
+    /// <summary>
+    /// Queues a command for the I/O cycle. A command that passed its state check before shutdown but arrives after
+    /// shutdown drained the queue is ended here, as shutdown ends the ones it drained.
+    /// </summary>
+    internal void Enqueue(PeerCommand command)
     {
         _commands.Enqueue(command);
+        // Stop publishes Stopped with a full fence before it drains, and the enqueue above is one too, so either Stop's
+        // drain sees this command or this read sees Stopped.
+        if (Volatile.Read(ref _state) == Stopped)
+        {
+            EndPending(_stopFault);
+            return;
+        }
         Wake();
     }
 
