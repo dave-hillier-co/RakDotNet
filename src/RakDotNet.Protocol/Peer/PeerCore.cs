@@ -64,6 +64,8 @@ internal sealed class PeerCore
     private readonly BanTable _bans = new();
     private byte[] _offlinePingResponse = [];
     private long _defaultTimeoutMs;
+    private long _unreliableTimeoutMs;
+    private int _splitMessageProgressInterval;
     private uint _nextSendReceipt = 1;
 
     // firstExternalID (RakPeer.cpp:240): this peer's address as the first system it connected with saw it.
@@ -80,6 +82,11 @@ internal sealed class PeerCore
         MaxIncomingConnections = Math.Min(options.MaxIncomingConnections, options.MaxConnections);
         LimitIpConnectionFrequency = options.LimitIpConnectionFrequency;
         _defaultTimeoutMs = options.TimeoutMs;
+        _unreliableTimeoutMs = options.UnreliableTimeoutMs;
+        _splitMessageProgressInterval = options.SplitMessageProgressInterval;
+        OutgoingBandwidthLimit = options.OutgoingBandwidthLimit;
+        AllowConnectionResponseIpMigration = options.AllowConnectionResponseIpMigration;
+        IncomingPassword = options.IncomingPassword;
     }
 
     public ulong Guid => _options.Guid;
@@ -99,6 +106,73 @@ internal sealed class PeerCore
     /// its first pong (RakPeer.cpp:5924). Off by default, as GET_TIME_SPIKE_LIMIT is 0 (RakPeer.cpp:225-229).
     /// </summary>
     public bool OccasionalPing { get; set; }
+
+    /// <summary>
+    /// SetUnreliableTimeout (RakPeer.cpp:2719-2725): unreliable messages still queued this long after they were sent are
+    /// discarded. Applies to every connection, now and later.
+    /// </summary>
+    public long UnreliableTimeoutMs
+    {
+        get => _unreliableTimeoutMs;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _unreliableTimeoutMs = value;
+            foreach (var system in _slots)
+            {
+                if (system is not null)
+                    system.Session.UnreliableTimeoutMs = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// SetSplitMessageProgressInterval (RakPeer.cpp:2697-2704): while a split message arrives, ID_DOWNLOAD_PROGRESS is
+    /// delivered every this many parts; 0 never. Applies to every connection, now and later.
+    /// </summary>
+    public int SplitMessageProgressInterval
+    {
+        get => _splitMessageProgressInterval;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _splitMessageProgressInterval = value;
+            foreach (var system in _slots)
+            {
+                if (system is not null)
+                    system.Session.SplitMessageProgressInterval = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// SetPerConnectionOutgoingBandwidthLimit (RakPeer.cpp:2961-2964): bits per second of new user data each connection
+    /// may send, passed to every reliability layer update (RakPeer.cpp:5871); 0 is unlimited.
+    /// </summary>
+    public uint OutgoingBandwidthLimit { get; set; }
+
+    /// <summary>
+    /// AllowConnectionResponseIPMigration (RakPeer.cpp:2666-2670): accept ID_CONNECTION_REQUEST_ACCEPTED from a system
+    /// that is not waiting for one (RakPeer.cpp:6133-6137).
+    /// </summary>
+    public bool AllowConnectionResponseIpMigration { get; set; }
+
+    /// <summary>SetIncomingPassword: what later ID_CONNECTION_REQUEST messages must carry.</summary>
+    public ReadOnlyMemory<byte> IncomingPassword { get; set; }
+
+    /// <summary>The ban list. Thread-safe, as RakPeer's is, so the layer above may query and change it from any thread.</summary>
+    public BanTable Bans => _bans;
+
+    /// <summary>
+    /// ChangeSystemAddress (RakPeer.cpp:2846-2856, 5646-5654): the system with <paramref name="guid"/> is from now on
+    /// reached at, and recognised by, <paramref name="address"/>. Nothing happens when no system has the GUID.
+    /// </summary>
+    public void ChangeSystemAddress(ulong guid, IPEndPoint address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        if (FindActive(guid) is { } system)
+            system.Address = address;
+    }
 
     /// <summary>
     /// SetTimeoutTime (RakPeer.cpp:2524-2547): how long a connection may go without hearing from the remote system
@@ -410,6 +484,17 @@ internal sealed class PeerCore
         return receipt;
     }
 
+    /// <summary>Sends <paramref name="bitLength"/> bits of <paramref name="data"/>, as Send(BitStream*) does (RakPeer.cpp:1408).</summary>
+    public uint Send(ulong guid, ReadOnlySpan<byte> data, int bitLength, Reliability reliability, Priority priority, byte channel, long nowUs)
+    {
+        if (guid == RakNetConstants.UnassignedGuid)
+            return 0;
+        var receipt = NextSendReceipt();
+        if (FindActive(guid) is { } system)
+            SendImmediate(system, data, bitLength, reliability, priority, channel, receipt, nowUs);
+        return receipt;
+    }
+
     /// <summary>Sends to the system with <paramref name="guid"/>.</summary>
     public uint Send(ulong guid, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, long nowUs)
     {
@@ -524,7 +609,7 @@ internal sealed class PeerCore
                 system.LastReliableSendMs = nowMs;
             }
 
-            system.Session.Update(nowUs);
+            system.Session.Update(nowUs, OutgoingBandwidthLimit);
             while (system.Session.TryDequeueDatagram(out var datagram))
                 _datagrams.Enqueue(new OutgoingDatagram(system.Address, datagram));
 
@@ -617,7 +702,7 @@ internal sealed class PeerCore
         switch (sessionEvent)
         {
             case MessageDelivered delivered:
-                ProcessMessage(system, delivered.Payload, nowUs);
+                ProcessMessage(system, delivered.Payload, delivered.BitLength, nowUs);
                 break;
             case ReceiptAcknowledged acknowledged:
                 _events.Enqueue(new SendReceiptAcked(system.Address, system.Guid, acknowledged.Receipt));
@@ -625,13 +710,16 @@ internal sealed class PeerCore
             case ReceiptLost lost:
                 _events.Enqueue(new SendReceiptLost(system.Address, system.Guid, lost.Receipt));
                 break;
+            case ReceiptDiscarded discarded:
+                _events.Enqueue(new SendReceiptDiscarded(system.Address, system.Guid, discarded.Receipt));
+                break;
             default:
                 break; // ConnectionDied is acted on by the failure check.
         }
     }
 
     // The Receive loop of RunUpdateCycle, RakPeer.cpp:5939-6248.
-    private void ProcessMessage(RemoteSystem system, ReadOnlyMemory<byte> payload, long nowUs)
+    private void ProcessMessage(RemoteSystem system, ReadOnlyMemory<byte> payload, int bitLength, long nowUs)
     {
         var data = payload.Span;
         var id = (MessageId)data[0];
@@ -715,7 +803,7 @@ internal sealed class PeerCore
             default:
                 // RakPeer.cpp:6226-6241: application messages and receipts; other internal IDs are dropped.
                 if (data[0] >= (byte)MessageId.Timestamp || id is MessageId.SndReceiptAcked or MessageId.SndReceiptLoss)
-                    _events.Enqueue(new MessageReceived(system.Address, system.Guid, payload));
+                    _events.Enqueue(new MessageReceived(system.Address, system.Guid, payload) { BitLength = bitLength });
                 break;
         }
     }
@@ -726,7 +814,7 @@ internal sealed class PeerCore
         // Longer than the ID, a 4-byte address, a port, the system index and two times (RakPeer.cpp:6129).
         if (payload.Length <= 1 + 4 + 2 + 2 + 8 * 2)
             return;
-        if (system.Mode is not (ConnectMode.HandlingConnectionRequest or ConnectMode.RequestedConnection))
+        if (system.Mode is not (ConnectMode.HandlingConnectionRequest or ConnectMode.RequestedConnection) && !AllowConnectionResponseIpMigration)
             return;
         var alreadyConnected = system.Mode == ConnectMode.HandlingConnectionRequest;
         if (!TryDecode<ConnectionRequestAccepted>(payload.Span, out var accepted))
@@ -751,7 +839,7 @@ internal sealed class PeerCore
     {
         if (!TryDecode<ConnectionRequest>(data, out var request))
             return;
-        if (!request.Password.Span.SequenceEqual(_options.IncomingPassword.Span))
+        if (!request.Password.Span.SequenceEqual(IncomingPassword.Span))
         {
             SendImmediate(system, Encode(new InvalidPassword(Guid)), Reliability.Reliable, Priority.Immediate, 0, 0, nowUs);
             system.Mode = ConnectMode.DisconnectAsapSilently;
@@ -786,11 +874,14 @@ internal sealed class PeerCore
         SendImmediate(system, Encode(new ConnectedPing((ulong)(nowUs / 1000))), reliability, Priority.Immediate, 0, receipt, nowUs);
 
     // SendImmediate for one system, RakPeer.cpp:4286-4384.
-    private static void SendImmediate(RemoteSystem system, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs)
+    private static void SendImmediate(RemoteSystem system, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs) =>
+        SendImmediate(system, data, data.Length * 8, reliability, priority, channel, receipt, nowUs);
+
+    private static void SendImmediate(RemoteSystem system, ReadOnlySpan<byte> data, int bitLength, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs)
     {
         if (!system.IsActive || system.Mode is ConnectMode.DisconnectAsap or ConnectMode.DisconnectAsapSilently or ConnectMode.DisconnectOnNoAck)
             return;
-        system.Session.Send(data, reliability, priority, channel, receipt, nowUs);
+        system.Session.Send(data, bitLength, reliability, priority, channel, receipt, nowUs);
         if (reliability.IsReliable())
             system.LastReliableSendMs = nowUs / 1000;
     }
@@ -1096,7 +1187,13 @@ internal sealed class PeerCore
         // MTUSize starts at defaultMTUSize and is raised to the incoming MTU (RakPeer.cpp:3638-3643). The C++ asserts
         // the result is at most MAXIMUM_MTU_SIZE (RakPeer.cpp:3644); larger values are clamped here.
         var mtu = Math.Clamp(incomingMtu, DefaultMtu, RakNetConstants.MaximumMtuSize);
-        var session = new ReliabilityLayer(mtu, nowUs) { TimeoutMs = _defaultTimeoutMs };
+        // RakPeer.cpp:3645-3648.
+        var session = new ReliabilityLayer(mtu, nowUs, _options.SessionLimits)
+        {
+            TimeoutMs = _defaultTimeoutMs,
+            UnreliableTimeoutMs = _unreliableTimeoutMs,
+            SplitMessageProgressInterval = _splitMessageProgressInterval,
+        };
         var system = new RemoteSystem(index, address, guid, session, mode, nowMs) { Mtu = mtu };
         _slots[index] = system;
         _active.Add(system);

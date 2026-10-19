@@ -139,6 +139,9 @@ internal sealed class ReliabilityLayer
             _metrics[i] = new BpsTracker();
     }
 
+    /// <summary>The receive limits this connection enforces.</summary>
+    public SessionLimits Limits => _limits;
+
     /// <summary>SetTimeoutTime: how long reliable messages may go unacknowledged with nothing heard.</summary>
     public long TimeoutMs { get; set; } = DefaultTimeoutMs;
 
@@ -434,12 +437,21 @@ internal sealed class ReliabilityLayer
     /// <summary>KillConnection: the connection is dead from now on.</summary>
     public void Kill() => Die(ConnectionDeathCause.Killed);
 
-    /// <summary>GetStatistics (ReliabilityLayer.cpp:3378-3415).</summary>
+    /// <summary>GetStatistics (ReliabilityLayer.cpp:3378-3415), as a new snapshot.</summary>
     public SessionStatistics GetStatistics(long nowUs)
     {
         _ = nowUs; // GetBPS1Threadsafe ignores the time (ReliabilityLayer.h:92).
-        var lastSecond = new ulong[MetricCount];
-        var total = new ulong[MetricCount];
+        var statistics = new SessionStatistics();
+        CopyStatistics(statistics);
+        return statistics;
+    }
+
+    /// <summary>GetStatistics (ReliabilityLayer.cpp:3378-3415), overwriting <paramref name="target"/> without allocating.</summary>
+    public void CopyStatistics(SessionStatistics target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var lastSecond = target.ValueOverLastSecond;
+        var total = target.RunningTotal;
         for (var i = 0; i < MetricCount; i++)
         {
             lastSecond[i] = _metrics[i].LastSecond;
@@ -448,7 +460,7 @@ internal sealed class ReliabilityLayer
 
         var sentLastSecond = lastSecond[(int)SessionMetric.UserMessageBytesSent];
         var resentLastSecond = lastSecond[(int)SessionMetric.UserMessageBytesResent];
-        var lossLastSecond = sentLastSecond + resentLastSecond > 0
+        target.PacketLossLastSecond = sentLastSecond + resentLastSecond > 0
             ? (float)(resentLastSecond / ((double)sentLastSecond + resentLastSecond))
             : 0f;
 
@@ -460,23 +472,17 @@ internal sealed class ReliabilityLayer
         var denominator = sentTotal + resentTotal;
         if (denominator != 0 && sentTotal / denominator > 0)
             lossTotal = (float)(resentTotal / ((double)sentTotal + resentTotal));
+        target.PacketLossTotal = lossTotal;
 
-        return new SessionStatistics
-        {
-            ValueOverLastSecond = lastSecond,
-            RunningTotal = total,
-            ConnectionStartTimeUs = _connectionStartTimeUs,
-            IsLimitedByCongestionControl = _isLimitedByCongestionControl,
-            BpsLimitByCongestionControl = 0,
-            IsLimitedByOutgoingBandwidthLimit = _isLimitedByOutgoingBandwidthLimit,
-            BpsLimitByOutgoingBandwidthLimit = _bpsLimitByOutgoingBandwidthLimit,
-            MessagesInSendBuffer = [.. _messagesInSendBuffer],
-            BytesInSendBuffer = [.. _bytesInSendBuffer],
-            MessagesInResendBuffer = (uint)MessagesInResendBuffer,
-            BytesInResendBuffer = _bytesInResendBuffer,
-            PacketLossLastSecond = lossLastSecond,
-            PacketLossTotal = lossTotal,
-        };
+        target.ConnectionStartTimeUs = _connectionStartTimeUs;
+        target.IsLimitedByCongestionControl = _isLimitedByCongestionControl;
+        target.BpsLimitByCongestionControl = 0;
+        target.IsLimitedByOutgoingBandwidthLimit = _isLimitedByOutgoingBandwidthLimit;
+        target.BpsLimitByOutgoingBandwidthLimit = _bpsLimitByOutgoingBandwidthLimit;
+        _messagesInSendBuffer.CopyTo(target.MessagesInSendBuffer, 0);
+        _bytesInSendBuffer.CopyTo(target.BytesInSendBuffer, 0);
+        target.MessagesInResendBuffer = (uint)MessagesInResendBuffer;
+        target.BytesInResendBuffer = _bytesInResendBuffer;
     }
 
     private void Die(ConnectionDeathCause cause)

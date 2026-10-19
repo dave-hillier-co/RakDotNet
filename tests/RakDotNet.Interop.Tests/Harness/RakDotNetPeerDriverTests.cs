@@ -112,32 +112,35 @@ public sealed partial class RakDotNetPeerDriverTests
     }
 
     [Fact]
-    public async Task Commands_the_peer_core_cannot_reach_yet_throw_not_supported_so_the_matrix_skips_them()
+    public async Task Connection_commands_report_the_connection_as_interop_peer_does()
     {
-        await using var driver = RakDotNetPeerDriver.Launch();
-        await driver.StartupAsync(new StartupOptions(), Token);
+        await using var server = RakDotNetPeerDriver.Launch();
+        await using var client = RakDotNetPeerDriver.Launch();
+        var serverStarted = await server.StartupAsync(new StartupOptions(MaxIncoming: 4), Token);
+        var clientStarted = await client.StartupAsync(new StartupOptions(MaxIncoming: 0), Token);
+        using var serverInbox = new PacketInbox(server.Packets, "server");
+        using var clientInbox = new PacketInbox(client.Packets, "client");
 
-        Func<Task>[] commands =
-        [
-            () => driver.SendListAsync(new SendListOptions(1, [new byte[] { 0x86 }]), Token),
-            () => driver.CancelConnectionAttemptAsync(Remote.ToIPEndPoint(), Token),
-            () => driver.PingConnectedAsync(1, Token),
-            () => driver.AdvertiseSystemAsync(Remote.ToIPEndPoint(), ReadOnlyMemory<byte>.Empty, Token),
-            () => driver.SetTimeoutAsync(TimeSpan.FromSeconds(1), cancellationToken: Token),
-            () => driver.SetMaximumIncomingConnectionsAsync(1, Token),
-            () => driver.SetOccasionalPingAsync(true, Token),
-            () => driver.SetSplitMessageProgressIntervalAsync(1, Token),
-            () => driver.SetOutgoingBandwidthLimitAsync(1, Token),
-            () => driver.BanAsync("127.0.0.1", TimeSpan.Zero, Token),
-            () => driver.GetStatisticsAsync(1, Token),
-            () => driver.GetInfoAsync(Token),
-            () => driver.GetTimeAsync(Token),
-        ];
+        Assert.Equal("CONNECTION_ATTEMPT_STARTED", await client.ConnectAsync(new ConnectOptions(serverStarted.BoundAddress), Token));
+        await clientInbox.WaitForPacketAsync(p => p.MessageId == (byte)MessageId.ConnectionRequestAccepted, "accepted", TimeSpan.FromSeconds(5), Token);
+        await client.PingConnectedAsync(serverStarted.PeerGuid, Token);
+        await client.SendListAsync(new SendListOptions(serverStarted.PeerGuid, [new byte[] { 0x86, 1 }, new byte[] { 2, 3 }]), Token);
+        var listed = await serverInbox.WaitForPacketAsync(p => p.MessageId == 0x86, "the list", TimeSpan.FromSeconds(5), Token);
 
-        foreach (var command in commands)
-        {
-            await Assert.ThrowsAsync<NotSupportedException>(command);
-        }
+        var info = await client.GetInfoAsync(Token);
+        var stats = await client.GetStatisticsAsync(serverStarted.PeerGuid, Token);
+
+        Assert.Equal(new byte[] { 0x86, 1, 2, 3 }, listed.Data.ToArray());
+        Assert.Equal(clientStarted.PeerGuid, info.PeerGuid);
+        var connection = Assert.Single(info.Connections);
+        Assert.Equal(serverStarted.PeerGuid, connection.PeerGuid);
+        Assert.Equal(1492, connection.Mtu);
+        Assert.True(connection.AveragePing >= 0);
+        Assert.Equal(clientStarted.BoundAddress.Port, connection.ExternalAddress.Port);
+        Assert.True(stats.RunningTotal[PerSecondMetric.UserMessageBytesSent] >= 4);
+        Assert.True(await client.GetTimeAsync(Token) > 0);
+        await Assert.ThrowsAsync<PeerCommandException>(() => client.GetStatisticsAsync(12345, Token));
+        await Assert.ThrowsAsync<PeerCommandException>(() => client.PingConnectedAsync(12345, Token));
     }
 
     [GeneratedRegex(@"X\((ID_[A-Za-z0-9_]+)\)")]

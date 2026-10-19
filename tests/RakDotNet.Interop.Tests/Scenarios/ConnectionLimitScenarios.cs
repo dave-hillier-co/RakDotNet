@@ -101,7 +101,6 @@ public sealed class ConnectionLimitScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_cancelled_attempt_is_dropped_silently_and_can_be_started_again(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone4.CancelConnectionAttempt);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         session.Proxy.Faults = new FaultOptions(LossProbability: 1.0);
         // Two attempts 100 ms apart fail within half a second unless cancelled.

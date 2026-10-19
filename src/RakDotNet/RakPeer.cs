@@ -84,6 +84,15 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private volatile byte[] _offlinePingResponse;
     private volatile int _maxIncomingConnections;
     private volatile SystemAddressBox _externalAddress = new(SystemAddress.Unassigned);
+    private readonly BanList _banList;
+    private volatile byte[] _incomingPassword;
+    private long _defaultTimeoutMs;
+    private long _unreliableTimeoutMs;
+    private volatile bool _occasionalPing;
+    private volatile int _splitMessageProgressInterval;
+    private volatile bool _limitIpConnectionFrequency;
+    private volatile bool _allowConnectionResponseIpMigration;
+    private long _outgoingBandwidthLimit;
 
     private RakPeer(RakPeerOptions options, RakNetGuid guid, IDatagramTransport[] transports, IPAddress[] localAddresses,
                     IPEndPoint[] internalAddresses, PeerCore core, int eventCapacity)
@@ -101,6 +110,15 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         _eventCapacity = eventCapacity;
         _offlinePingResponse = options.OfflinePingResponse.ToArray();
         _maxIncomingConnections = Math.Min(options.MaxIncomingConnections, options.MaxConnections);
+        _banList = new BanList(this, core.Bans);
+        _incomingPassword = options.IncomingPassword.ToArray();
+        _defaultTimeoutMs = (long)options.DefaultTimeout.TotalMilliseconds;
+        _unreliableTimeoutMs = (long)options.UnreliableTimeout.TotalMilliseconds;
+        _occasionalPing = options.OccasionalPing;
+        _splitMessageProgressInterval = options.SplitMessageProgressInterval;
+        _limitIpConnectionFrequency = options.LimitIpConnectionFrequency;
+        _allowConnectionResponseIpMigration = options.AllowConnectionResponseIpMigration;
+        _outgoingBandwidthLimit = options.PerConnectionOutgoingBandwidthLimit;
         _reader = new PeerEventReader(this);
         _plugins = new PluginCollection(this);
         _lowLevel = new RakPeerLowLevel(this, options.NetworkSimulator);
@@ -131,10 +149,19 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
                 LocalAddresses = internalAddresses,
                 IncomingPassword = options.IncomingPassword.ToArray(),
                 TimeoutMs = (long)options.DefaultTimeout.TotalMilliseconds,
-            });
+                UnreliableTimeoutMs = (long)options.UnreliableTimeout.TotalMilliseconds,
+                SplitMessageProgressInterval = options.SplitMessageProgressInterval,
+                LimitIpConnectionFrequency = options.LimitIpConnectionFrequency,
+                AllowConnectionResponseIpMigration = options.AllowConnectionResponseIpMigration,
+                OutgoingBandwidthLimit = (uint)options.PerConnectionOutgoingBandwidthLimit,
+                SessionLimits = options.Limits.ToSessionLimits(),
+            })
+            {
+                OccasionalPing = options.OccasionalPing,
+            };
             core.SetOfflinePingResponse(options.OfflinePingResponse.Span);
             var peer = new RakPeer(options, guid, transports, [.. localAddresses.Where(a => a.AddressFamily == AddressFamily.InterNetwork)],
-                                   internalAddresses, core, EventQueueCapacity(options));
+                                   internalAddresses, core, options.Limits.EventQueueCapacity);
             peer.StartPlugins();
             peer.StartLoop();
             return peer;
@@ -384,10 +411,22 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// Removes a queued attempt with no stream event (RakPeer.cpp:1686-1710). Does nothing once the attempt has an entry
     /// in the connection table.
     /// </summary>
+    /// <remarks>
+    /// As in RakNet, where the attempt leaves requestedConnectionQueue under its mutex at once, the address is free for
+    /// a new <see cref="Connect"/> as soon as this returns. An attempt that the I/O cycle finds already has a table entry
+    /// carries on.
+    /// </remarks>
     public void CancelConnectionAttempt(SystemAddress remote)
     {
         ThrowIfStopped();
-        Enqueue(new PeerCommand { Kind = CommandKind.CancelConnect, Target = remote });
+        PendingConnect? attempt;
+        lock (_attemptsGate)
+        {
+            if (!_attempts.TryGetValue(remote, out attempt) || attempt.State != ConnectionState.Pending)
+                return;
+            _attempts.Remove(remote);
+        }
+        Enqueue(new PeerCommand { Kind = CommandKind.CancelConnect, Target = remote, State = attempt });
     }
 
     /// <summary>
@@ -415,9 +454,11 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// </summary>
     /// <remarks>
     /// Only the *WithAckReceipt reliabilities produce receipt events: a reliable receipt ends with ReceiptAcked, an
-    /// unreliable one with ReceiptAcked or, once <see cref="UnreliableTimeout"/> passes without an ACK, ReceiptLost
-    /// (ReliabilityLayer.cpp:1860-1876). A receipt whose connection ends, or whose target the I/O cycle cannot find, ends
-    /// with ReceiptAbandoned; at shutdown <see cref="PeerEventReader.Completion"/> ends it. No socket I/O happens on the
+    /// unreliable one with ReceiptAcked or, once its datagram's retransmission timeout passes without an ACK,
+    /// ReceiptLost (ReliabilityLayer.cpp:1860-1876). An unreliable message still unsent when
+    /// <see cref="UnreliableTimeout"/> passes is discarded with no RakNet packet (ReliabilityLayer.cpp:1745-1793), so its
+    /// receipt ends with ReceiptAbandoned, as does a receipt whose connection ends or whose target the I/O cycle cannot
+    /// find; at shutdown <see cref="PeerEventReader.Completion"/> ends it. No socket I/O happens on the
     /// caller's thread: <see cref="Priority.Immediate"/> wakes the loop at once in Background mode and goes out first in
     /// the next <see cref="Update"/> in Manual mode.
     /// </remarks>
@@ -688,65 +729,124 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         return address is { } remote && AdvertiseSystem(remote, data.Span, socketIndex);
     }
 
-    /// <summary>SetIncomingPassword. Copied on set; more than 255 bytes throws.</summary>
-    /// <remarks>Set at start through <see cref="RakPeerOptions.IncomingPassword"/>; the core fixes it then.</remarks>
+    /// <summary>SetIncomingPassword. Copied on set; more than 255 bytes throws. Applies to later connection requests.</summary>
     public ReadOnlyMemory<byte> IncomingPassword
     {
-        get => _options.IncomingPassword;
-        set => throw new NotImplementedException();
+        get => _incomingPassword;
+        set
+        {
+            if (value.Length > 255)
+                throw new ArgumentException("The incoming password is at most 255 bytes.", nameof(value));
+            ThrowIfStopped();
+            var copy = value.ToArray();
+            _incomingPassword = copy;
+            Enqueue(new PeerCommand { Kind = CommandKind.SetIncomingPassword, State = copy });
+        }
     }
 
     /// <summary>SetTimeoutTime(t, UNASSIGNED_SYSTEM_ADDRESS): the default and every live connection (RakPeer.cpp:2526-2538).</summary>
-    /// <remarks>Set at start through <see cref="RakPeerOptions.DefaultTimeout"/>; the core fixes the default then.</remarks>
     public TimeSpan DefaultTimeout
     {
-        get => _options.DefaultTimeout;
-        set => throw new NotImplementedException();
+        get => TimeSpan.FromMilliseconds(Interlocked.Read(ref _defaultTimeoutMs));
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
+            ThrowIfStopped();
+            var ms = (long)value.TotalMilliseconds;
+            Interlocked.Exchange(ref _defaultTimeoutMs, ms);
+            Enqueue(new PeerCommand { Kind = CommandKind.SetDefaultTimeout, Value = ms });
+        }
     }
 
-    /// <summary>SetUnreliableTimeout</summary>
+    /// <summary>
+    /// SetUnreliableTimeout (RakPeer.cpp:2719-2725): unreliable messages still queued this long after they were sent
+    /// are discarded unsent, on every connection. <see cref="TimeSpan.Zero"/> keeps them until sent.
+    /// </summary>
     public TimeSpan UnreliableTimeout
     {
-        get => _options.UnreliableTimeout;
-        set => throw new NotImplementedException();
+        get => TimeSpan.FromMilliseconds(Interlocked.Read(ref _unreliableTimeoutMs));
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, TimeSpan.Zero);
+            ThrowIfStopped();
+            var ms = (long)value.TotalMilliseconds;
+            Interlocked.Exchange(ref _unreliableTimeoutMs, ms);
+            Enqueue(new PeerCommand { Kind = CommandKind.SetUnreliableTimeout, Value = ms });
+        }
     }
 
-    /// <summary>SetOccasionalPing</summary>
+    /// <summary>SetOccasionalPing: keep pinging every connection every 5 s rather than only until its first pong (RakPeer.cpp:5924).</summary>
     public bool OccasionalPing
     {
-        get => _options.OccasionalPing;
-        set => throw new NotImplementedException();
+        get => _occasionalPing;
+        set
+        {
+            ThrowIfStopped();
+            _occasionalPing = value;
+            Enqueue(new PeerCommand { Kind = CommandKind.SetOccasionalPing, Flag = value });
+        }
     }
 
-    /// <summary>SetSplitMessageProgressInterval; progress arrives as DownloadProgress events.</summary>
+    /// <summary>SetSplitMessageProgressInterval; progress arrives as DownloadProgress events every this many parts, 0 never.</summary>
     public int SplitMessageProgressInterval
     {
-        get => _options.SplitMessageProgressInterval;
-        set => throw new NotImplementedException();
+        get => _splitMessageProgressInterval;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            ThrowIfStopped();
+            _splitMessageProgressInterval = value;
+            Enqueue(new PeerCommand { Kind = CommandKind.SetSplitMessageProgressInterval, Value = value });
+        }
     }
 
-    /// <summary>SetLimitIPConnectionFrequency</summary>
+    /// <summary>
+    /// SetLimitIPConnectionFrequency: refuse a new connection from an address other than this host's own that took a
+    /// slot less than 100 ms ago, with ID_IP_RECENTLY_CONNECTED (RakPeer.cpp:3604-3625).
+    /// </summary>
     public bool LimitIpConnectionFrequency
     {
-        get => _options.LimitIpConnectionFrequency;
-        set => throw new NotImplementedException();
+        get => _limitIpConnectionFrequency;
+        set
+        {
+            ThrowIfStopped();
+            _limitIpConnectionFrequency = value;
+            Enqueue(new PeerCommand { Kind = CommandKind.SetLimitIpConnectionFrequency, Flag = value });
+        }
     }
 
-    /// <summary>AllowConnectionResponseIPMigration</summary>
+    /// <summary>AllowConnectionResponseIPMigration: accept ID_CONNECTION_REQUEST_ACCEPTED from a system not waiting for one (RakPeer.cpp:6133-6137).</summary>
     public bool AllowConnectionResponseIpMigration
     {
-        get => _options.AllowConnectionResponseIpMigration;
-        set => throw new NotImplementedException();
+        get => _allowConnectionResponseIpMigration;
+        set
+        {
+            ThrowIfStopped();
+            _allowConnectionResponseIpMigration = value;
+            Enqueue(new PeerCommand { Kind = CommandKind.SetAllowConnectionResponseIpMigration, Flag = value });
+        }
     }
 
-    /// <summary>SetPerConnectionOutgoingBandwidthLimit, in bits per second; 0 is unlimited.</summary>
+    /// <summary>
+    /// SetPerConnectionOutgoingBandwidthLimit, in bits per second; 0 is unlimited. New data on a connection waits once it
+    /// sent more than this in the last second; resends and acknowledgements are not limited (ReliabilityLayer.cpp:2002-2006).
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">Negative, or more than RakNet's unsigned 32-bit limit.</exception>
     public long PerConnectionOutgoingBandwidthLimit
     {
-        get => _options.PerConnectionOutgoingBandwidthLimit;
-        set => throw new NotImplementedException();
+        get => Interlocked.Read(ref _outgoingBandwidthLimit);
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, uint.MaxValue);
+            ThrowIfStopped();
+            Interlocked.Exchange(ref _outgoingBandwidthLimit, value);
+            Enqueue(new PeerCommand { Kind = CommandKind.SetOutgoingBandwidthLimit, Value = value });
+        }
     }
 
-    public BanList BanList => throw new NotImplementedException();
+    /// <summary>The ban list (AddToBanList, RemoveFromBanList, ClearBanList, IsBanned).</summary>
+    public BanList BanList => _banList;
 
     /// <summary>The security exception list; applies to incoming connections only.</summary>
     public AddressPatternCollection SecurityExceptions => throw new NotImplementedException();
@@ -820,6 +920,24 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         Enqueue(new PeerCommand { Kind = CommandKind.SetNetworkSimulator, State = options });
     }
 
+    /// <summary>Ping(SystemAddress): one unreliable ID_CONNECTED_PING on the next cycle (RakPeer.cpp:2073-2076).</summary>
+    internal void PingConnected(RakConnection connection)
+    {
+        ThrowIfStopped();
+        Enqueue(new PeerCommand { Kind = CommandKind.PingConnected, Target = connection.RakNetGuid });
+    }
+
+    /// <summary>ChangeSystemAddress (RakPeer.cpp:2846-2856), applied on the next cycle.</summary>
+    internal void ChangeSystemAddress(RakNetGuid rakNetGuid, SystemAddress address)
+    {
+        if (!rakNetGuid.IsAssigned)
+            throw new ArgumentException("The GUID is unassigned.", nameof(rakNetGuid));
+        if (!address.IsAssigned)
+            throw new ArgumentException("The address is unassigned.", nameof(address));
+        ThrowIfStopped();
+        Enqueue(new PeerCommand { Kind = CommandKind.ChangeSystemAddress, Target = rakNetGuid, State = new SystemAddressBox(address) });
+    }
+
     internal void SetConnectionTimeout(RakConnection connection, long timeoutMs)
     {
         ThrowIfStopped();
@@ -857,31 +975,24 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.DefaultTimeout, TimeSpan.Zero, nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(options.PluginUpdateInterval, TimeSpan.Zero, nameof(options));
 
-        // Features the peer core does not have yet.
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.UnreliableTimeout, TimeSpan.Zero, nameof(options));
+        ArgumentOutOfRangeException.ThrowIfNegative(options.SplitMessageProgressInterval, nameof(options));
+        ArgumentOutOfRangeException.ThrowIfNegative(options.PerConnectionOutgoingBandwidthLimit, nameof(options));
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(options.PerConnectionOutgoingBandwidthLimit, uint.MaxValue, nameof(options));
+        ArgumentNullException.ThrowIfNull(options.Limits);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.Limits.EventQueueCapacity, nameof(options));
+        _ = options.Limits.ToSessionLimits();
+        NetworkSimulator.Validate(options.NetworkSimulator, nameof(options));
+
+        // Milestone 7: the secure handshake.
         if (options.Security is not null || options.SecurityExceptions.Count > 0)
             throw new NotImplementedException("Secure connections are not implemented.");
-        NetworkSimulator.Validate(options.NetworkSimulator, nameof(options));
-        if (options.UnreliableTimeout != TimeSpan.FromMilliseconds(1000) || options.OccasionalPing || options.SplitMessageProgressInterval != 0
-            || options.LimitIpConnectionFrequency || options.AllowConnectionResponseIpMigration || options.PerConnectionOutgoingBandwidthLimit != 0)
-            throw new NotImplementedException("Only RakNet's default unreliable timeout, ping, progress, rate-limit, migration and bandwidth settings are implemented.");
     }
 
     private static void ValidateOfflinePingResponse(ReadOnlyMemory<byte> response, string parameter)
     {
         if (response.Length >= RakNetConstants.MaxOfflineDataLength)
             throw new ArgumentException($"The offline ping response must be under {RakNetConstants.MaxOfflineDataLength} bytes (RakPeer.cpp:2271).", parameter);
-    }
-
-    private static int EventQueueCapacity(RakPeerOptions options)
-    {
-        try
-        {
-            return options.Limits.EventQueueCapacity;
-        }
-        catch (NotImplementedException)
-        {
-            return new PeerLimits().EventQueueCapacity;
-        }
     }
 
     private static IDatagramTransport[] Bind(RakPeerOptions options)

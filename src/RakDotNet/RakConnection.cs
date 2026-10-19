@@ -27,18 +27,20 @@ public sealed class RakConnection
     private volatile int _systemIndex;
     private volatile int _mtu;
     private long _timeoutMs;
+    private volatile int _averagePing = -1;
     private volatile int _lastPing = ushort.MaxValue;
     private volatile int _lowestPing = ushort.MaxValue;
     private long _clockDifferential;
     private volatile IReadOnlyList<SystemAddress> _remoteInternalAddresses = [];
     private IReadOnlyList<System.Net.IPEndPoint>? _internalAddressesSource;
+    private volatile SystemAddressBox _address;
 
     internal RakConnection(RakPeer peer, RakNetGuid rakNetGuid, SystemAddress address, bool isIncoming, RakSocket socket,
                            SystemAddress externalAddress, long nowUs)
     {
         Peer = peer;
         RakNetGuid = rakNetGuid;
-        Address = address;
+        _address = new SystemAddressBox(address);
         IsIncoming = isIncoming;
         Socket = socket;
         ExternalAddress = externalAddress;
@@ -50,7 +52,7 @@ public sealed class RakConnection
     public RakNetGuid RakNetGuid { get; }
 
     /// <summary>Changes only through <see cref="RakPeerLowLevel.ChangeSystemAddress"/>.</summary>
-    public SystemAddress Address { get; }
+    public SystemAddress Address => _address.Value;
 
     /// <summary>GetIndexFromSystemAddress</summary>
     public int SystemIndex => _systemIndex;
@@ -79,9 +81,8 @@ public sealed class RakConnection
         }
     }
 
-    /// <summary>GetAveragePing; null where RakNet returns -1 (no sample yet).</summary>
-    /// <remarks>Needs the ping history of RakNet's pingAndClockDifferential, which the peer core does not keep.</remarks>
-    public TimeSpan? AveragePing => throw new NotImplementedException();
+    /// <summary>GetAveragePing: the mean of the last five round trips (RakPeer.cpp:2149-2170); null where RakNet returns -1 (no sample yet).</summary>
+    public TimeSpan? AveragePing => _averagePing < 0 ? null : TimeSpan.FromMilliseconds(_averagePing);
 
     /// <summary>GetLastPing; null for -1.</summary>
     public TimeSpan? LastPing => PingOrNull(_lastPing);
@@ -132,9 +133,11 @@ public sealed class RakConnection
                                                         CancellationToken cancellationToken = default) =>
         Peer.SendAndTrackAsync(message, this, reliability, priority, orderingChannel, cancellationToken);
 
-    /// <summary>Ping(SystemAddress): a connected ping.</summary>
-    /// <remarks>The peer core sends connected pings only on its own schedule.</remarks>
-    public void Ping() => throw new NotImplementedException();
+    /// <summary>
+    /// Ping(SystemAddress): one unreliable ID_CONNECTED_PING on the next cycle, whose pong adds to <see cref="LastPing"/>,
+    /// <see cref="AveragePing"/>, <see cref="LowestPing"/> and <see cref="ClockDifferential"/> (RakPeer.cpp:2073-2076).
+    /// </summary>
+    public void Ping() => Peer.PingConnected(this);
 
     /// <inheritdoc cref="RakPeer.Close"/>
     public void Close(bool notify = true, byte orderingChannel = 0, Priority notificationPriority = Priority.Low) =>
@@ -164,6 +167,7 @@ public sealed class RakConnection
         _systemIndex = system.Index;
         _mtu = system.Session.Mtu;
         Interlocked.Exchange(ref _timeoutMs, system.Session.TimeoutMs);
+        _averagePing = PeerCore.AveragePing(system);
         _lastPing = PeerCore.LastPing(system);
         _lowestPing = system.LowestPing;
         Interlocked.Exchange(ref _clockDifferential, PeerCore.ClockDifferential(system));
@@ -172,8 +176,11 @@ public sealed class RakConnection
             _internalAddressesSource = system.TheirInternalAddresses;
             _remoteInternalAddresses = system.TheirInternalAddresses.Select(a => (SystemAddress)a).ToArray();
         }
-        Counters.Tick(nowUs, system.Session.MessagesInResendBuffer);
+        Counters.Publish(system.Session);
     }
+
+    /// <summary>ChangeSystemAddress moved the connection. Called by the I/O cycle.</summary>
+    internal void MoveTo(SystemAddress address) => _address = new SystemAddressBox(address);
 
     /// <summary>The connection ended; it stays readable with its last values.</summary>
     internal void MarkClosed()
@@ -183,4 +190,9 @@ public sealed class RakConnection
     }
 
     private static TimeSpan? PingOrNull(int ping) => ping == ushort.MaxValue ? null : TimeSpan.FromMilliseconds(ping);
+
+    private sealed class SystemAddressBox(SystemAddress value)
+    {
+        public SystemAddress Value { get; } = value;
+    }
 }

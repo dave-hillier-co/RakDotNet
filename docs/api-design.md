@@ -263,7 +263,7 @@ A local `Close` is reported by the packets RakNet itself enqueues: `ID_CONNECTIO
 
 ### 11.4 Synthetic events are flagged, carry no RakNet bytes and skip plugins
 
-The only event kind the C# peer adds is `ReceiptAbandoned`, needed so that every untracked receipt completes. It has `IsRakNetPacket == false` and empty `Data`, so it can never be mistaken for `ID_SND_RECEIPT_LOSS`, which RakNet emits only for unreliable receipts after the unreliable timeout (`ReliabilityLayer.cpp:1860-1876`). It is not dispatched to plugins, because plugins are ports of RakNet code that observe RakNet's stream; RakNet plugins learn about lost connections from `OnClosedConnection`, which they still get. The facade and the interop driver filter on the flag.
+The only event kind the C# peer adds is `ReceiptAbandoned`, needed so that every untracked receipt completes: RakNet reports nothing for a receipt whose connection ends, or whose unreliable message the unreliable timeout discards unsent (`ReliabilityLayer.cpp:1745-1793`). It has `IsRakNetPacket == false` and empty `Data`, so it can never be mistaken for `ID_SND_RECEIPT_LOSS`, which RakNet emits only for an unreliable message that was sent and not acknowledged within its retransmission timeout (`ReliabilityLayer.cpp:1860-1876`). It is not dispatched to plugins, because plugins are ports of RakNet code that observe RakNet's stream; RakNet plugins learn about lost connections from `OnClosedConnection`, which they still get. The facade and the interop driver filter on the flag.
 
 ### 11.5 The event is a `ref struct` and the reader is purpose-built
 

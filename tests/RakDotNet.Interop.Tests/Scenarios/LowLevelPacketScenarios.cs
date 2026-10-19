@@ -20,7 +20,6 @@ public sealed class LowLevelPacketScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Send_list_delivers_its_parts_joined_as_one_message(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone5.SendList);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, _) = await session.ConnectAsync(Token);
 

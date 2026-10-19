@@ -24,7 +24,6 @@ public sealed class DroppedConnectionScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_client_that_closes_without_notification_is_lost_by_the_server_and_can_connect_again(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(server, PeerMatrix.Milestone4.TimeoutDetection);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         await session.Server.SetTimeoutAsync(Timeout, cancellationToken: Token);
         var (serverGuid, clientGuid) = await session.ConnectAsync(Token);
@@ -48,7 +47,6 @@ public sealed class DroppedConnectionScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Both_sides_report_the_connection_lost_when_the_network_drops_everything(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.TimeoutDetection);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         await session.Server.SetTimeoutAsync(Timeout, cancellationToken: Token);
         await session.Client.SetTimeoutAsync(Timeout, cancellationToken: Token);

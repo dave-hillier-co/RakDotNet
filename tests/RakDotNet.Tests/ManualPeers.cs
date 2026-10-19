@@ -17,11 +17,12 @@ internal sealed record SeenEvent(
     bool IsIncoming,
     DisconnectReason DisconnectReason,
     bool ClosedLocally,
-    ConnectFailure ConnectFailure)
+    ConnectFailure ConnectFailure,
+    int BitLength)
 {
     public static SeenEvent From(in PeerEvent e) => new(
         e.Kind, e.Id, e.ToArray(), e.RakNetGuid, e.Address, e.IsLocal, e.Connection, e.Receipt, e.IsIncoming,
-        e.DisconnectReason, e.ClosedLocally, e.ConnectFailure);
+        e.DisconnectReason, e.ClosedLocally, e.ConnectFailure, e.BitLength);
 }
 
 /// <summary>

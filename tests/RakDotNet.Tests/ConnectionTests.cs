@@ -171,6 +171,21 @@ public class ConnectionTests
     }
 
     [Fact]
+    public void Cancelling_frees_the_address_for_a_new_attempt_at_once()
+    {
+        using var peers = new ManualPeers();
+
+        // RakPeer.cpp:1686-1710 takes the attempt out of requestedConnectionQueue under its mutex, on the caller.
+        Assert.Equal(ConnectAttemptResult.Started, peers.Client.Connect(peers.ServerAddress));
+        peers.Client.CancelConnectionAttempt(peers.ServerAddress);
+        Assert.Equal(ConnectionState.NotConnected, peers.Client.GetConnectionState(peers.ServerAddress));
+        Assert.Equal(ConnectAttemptResult.Started, peers.Client.Connect(peers.ServerAddress));
+
+        peers.RunUntil(() => peers.ClientEvents.Any(e => e.Kind == PeerEventKind.Connected), "connected");
+        Assert.DoesNotContain(peers.ClientEvents, e => e.Kind == PeerEventKind.ConnectFailed);
+    }
+
+    [Fact]
     public void Messages_arrive_in_order_before_the_disconnection_a_notifying_close_produces()
     {
         using var peers = new ManualPeers();

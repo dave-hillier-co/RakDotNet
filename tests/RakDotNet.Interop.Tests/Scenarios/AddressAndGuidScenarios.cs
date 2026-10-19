@@ -45,7 +45,6 @@ public sealed class AddressAndGuidScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task The_connection_list_reports_each_remote_guid_address_mtu_and_our_external_address(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone5.ConnectionQueries);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var clientAtServer = session.AddressAtServer(session.ClientPeer);
         await session.ConnectAsync(Token);
@@ -69,7 +68,6 @@ public sealed class AddressAndGuidScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_banned_address_is_refused_with_connection_banned(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(server, PeerMatrix.Milestone4.BanList);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
 
         await AddressFlows.ConnectWhileBannedAsync(session, Token);

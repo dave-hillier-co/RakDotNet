@@ -186,7 +186,10 @@ public class SendTests
         peers.RunUntil(() => peers.ServerEvents.Any(e => e.Data.Length == 100), "the message");
         var stats = server.GetStatistics();
 
-        Assert.Equal(100UL, stats.RunningTotal[RnsPerSecondMetric.UserMessageBytesPushed]);
+        // The reliability layer counts every message it is given, the handshake and pings included
+        // (ReliabilityLayer.cpp:1587-1588).
+        Assert.True(stats.RunningTotal[RnsPerSecondMetric.UserMessageBytesPushed] >= 100);
+        Assert.True(stats.RunningTotal[RnsPerSecondMetric.UserMessageBytesSent] >= 100);
         Assert.True(stats.RunningTotal[RnsPerSecondMetric.ActualBytesSent] > 100);
         Assert.True(stats.RunningTotal[RnsPerSecondMetric.ActualBytesReceived] > 0);
         var serverSide = peers.ServerEvents.Single(e => e.Data.Length == 100).Connection!.GetStatistics();

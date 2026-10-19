@@ -61,6 +61,21 @@ internal sealed record PeerOptions
 
     /// <summary>SetLimitIPConnectionFrequency. Off by default (RakPeer.cpp:312).</summary>
     public bool LimitIpConnectionFrequency { get; init; }
+
+    /// <summary>SetUnreliableTimeout, given to each new connection: RakPeer's 1000 ms (RakPeer.cpp:238, 3647).</summary>
+    public long UnreliableTimeoutMs { get; init; } = ReliabilityLayer.RakPeerUnreliableTimeoutMs;
+
+    /// <summary>SetSplitMessageProgressInterval, given to each new connection; 0, never (RakPeer.cpp:236, 3646).</summary>
+    public int SplitMessageProgressInterval { get; init; }
+
+    /// <summary>SetPerConnectionOutgoingBandwidthLimit in bits per second; 0, unlimited (RakPeer.cpp:239).</summary>
+    public uint OutgoingBandwidthLimit { get; init; }
+
+    /// <summary>AllowConnectionResponseIPMigration. Off by default (RakPeer.cpp:233).</summary>
+    public bool AllowConnectionResponseIpMigration { get; init; }
+
+    /// <summary>The receive limits every connection's reliability layer enforces.</summary>
+    public SessionLimits SessionLimits { get; init; } = SessionLimits.Default;
 }
 
 /// <summary>
@@ -98,7 +113,8 @@ internal sealed class RemoteSystem(int index, IPEndPoint address, ulong guid, Re
     /// <summary>The slot index, sent as the SystemIndex of ID_CONNECTION_REQUEST_ACCEPTED.</summary>
     public int Index { get; } = index;
 
-    public IPEndPoint Address { get; } = address;
+    /// <summary>Where the system is reached; changed only by <see cref="PeerCore.ChangeSystemAddress"/>.</summary>
+    public IPEndPoint Address { get; set; } = address;
 
     public ulong Guid { get; set; } = guid;
 

@@ -12,48 +12,6 @@ public enum PeerKind
 /// </summary>
 public static class PeerMatrix
 {
-    /// <summary>
-    /// Milestone 4 items of docs/plan.md that scenarios wait for before they run against RakDotNet: what the peer core
-    /// (layers 1 and 2) does not do yet.
-    /// </summary>
-    public static class Milestone4
-    {
-        public static readonly PendingFeature Loss = new(4, "Loss: resends, NAKs, RTO and sliding-window congestion control");
-
-        public static readonly PendingFeature SplitMessages = new(4, "Split messages and reassembly");
-
-        public static readonly PendingFeature SplitMessageProgress = new(4, "Split messages and reassembly: ID_DOWNLOAD_PROGRESS");
-
-        public static readonly PendingFeature OutgoingBandwidthLimit = new(4, "Sliding-window congestion control: the per-connection outgoing bandwidth limit");
-
-        public static readonly PendingFeature ConnectedPings = new(4, "Connected pings and ping statistics");
-
-        public static readonly PendingFeature Timestamps = new(4, "ID_TIMESTAMP and clock differential");
-
-        public static readonly PendingFeature TimeoutDetection = new(4, "Timeout detection with SetTimeoutTime");
-
-        public static readonly PendingFeature BanList = new(4, "Ban list");
-
-        public static readonly PendingFeature AdvertiseSystem = new(4, "AdvertiseSystem");
-
-        public static readonly PendingFeature CancelConnectionAttempt = new(4, "Connection limits: CancelConnectionAttempt");
-    }
-
-    /// <summary>
-    /// Milestone 5 items: what the core already does, or does not need, but RakDotNetPeerDriver cannot reach until it
-    /// moves onto the public API.
-    /// </summary>
-    public static class Milestone5
-    {
-        public static readonly PendingFeature Statistics = new(5, "RakPeer statistics: GetStatistics");
-
-        public static readonly PendingFeature ConnectionQueries = new(5, "RakPeer connection queries: GetSystemList, GetMTUSize, GetExternalID and pings");
-
-        public static readonly PendingFeature SendList = new(5, "RakPeer SendList");
-
-        public static readonly PendingFeature Time = new(5, "RakNet::GetTime for ID_TIMESTAMP senders");
-    }
-
     public static TheoryData<PeerKind, PeerKind> ClientServer
     {
         get
