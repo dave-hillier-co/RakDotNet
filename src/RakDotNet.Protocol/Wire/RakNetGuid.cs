@@ -9,9 +9,20 @@ namespace RakDotNet.Protocol.Wire;
 /// <c>default</c> is GUID 0, which RakNet treats as assigned but never generates: a peer redraws its GUID until it is
 /// neither 0 nor <see cref="Unassigned"/> (RakPeer.cpp:382).
 /// </remarks>
-public readonly record struct RakNetGuid(ulong Value) : ISpanFormattable, ISpanParsable<RakNetGuid>
+public readonly record struct RakNetGuid(ulong Value) : IComparable<RakNetGuid>, ISpanFormattable, ISpanParsable<RakNetGuid>
 {
     private const string UnassignedText = "UNASSIGNED_RAKNET_GUID";
+
+    /// <summary>RakNetGUID::operator&lt; and operator&gt; (RakNetTypes.cpp:764-771): by <see cref="Value"/>.</summary>
+    public int CompareTo(RakNetGuid other) => Value.CompareTo(other.Value);
+
+    public static bool operator <(RakNetGuid left, RakNetGuid right) => left.Value < right.Value;
+
+    public static bool operator >(RakNetGuid left, RakNetGuid right) => left.Value > right.Value;
+
+    public static bool operator <=(RakNetGuid left, RakNetGuid right) => left.Value <= right.Value;
+
+    public static bool operator >=(RakNetGuid left, RakNetGuid right) => left.Value >= right.Value;
 
     /// <summary>UNASSIGNED_RAKNET_GUID (RakNetTypes.h:364), <see cref="RakNetConstants.UnassignedGuid"/>.</summary>
     public static RakNetGuid Unassigned => new(RakNetConstants.UnassignedGuid);

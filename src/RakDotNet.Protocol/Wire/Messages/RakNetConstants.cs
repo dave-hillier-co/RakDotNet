@@ -23,4 +23,26 @@ public static class RakNetConstants
 
     /// <summary>UNASSIGNED_RAKNET_GUID, RakNetTypes.h:364.</summary>
     public const ulong UnassignedGuid = ulong.MaxValue;
+
+    /// <summary>RAKNET_VERSION, RakNetVersion.h:11: the library version this port matches.</summary>
+    public const string RakNetVersion = "4.081";
+
+    /// <summary>RAKNET_VERSION_NUMBER, RakNetVersion.h:12.</summary>
+    public const double RakNetVersionNumber = 4.081;
+
+    /// <summary>RAKNET_VERSION_NUMBER_INT, RakNetVersion.h:13.</summary>
+    public const int RakNetVersionNumberInt = 4081;
+
+    /// <summary>RAKNET_DATE, RakNetVersion.h:15: the release date of that version.</summary>
+    public const string RakNetDate = "5/28/2014";
+
+    /// <summary>
+    /// UNASSIGNED_PLAYER_INDEX, RakNetTypes.h:457: the SystemIndex (an unsigned short) of no system.
+    /// </summary>
+    public const ushort UnassignedPlayerIndex = ushort.MaxValue;
+
+    /// <summary>
+    /// UNASSIGNED_NETWORK_ID, RakNetTypes.h:460: the NetworkID (a uint64_t, so a <see cref="ulong"/> here) of no object.
+    /// </summary>
+    public const ulong UnassignedNetworkId = ulong.MaxValue;
 }
