@@ -154,4 +154,95 @@ public class SlidingWindowTests
         var rejected = new SlidingWindow(Payload);
         Assert.False(rejected.OnGotPacket(new UInt24(50_001), 0, out _));
     }
+
+    [Fact]
+    public void A_resend_during_a_continuous_send_drops_the_window_to_one_datagram_and_halves_the_threshold()
+    {
+        var window = WindowGrownToThreeDatagrams();
+
+        // CCRakNetSlidingWindow.cpp:168-179.
+        window.OnResend();
+
+        Assert.Equal(Payload, window.GetTransmissionBandwidth(0, isContinuousSend: true));
+        Assert.True(window.IsInSlowStart);
+        // Slow start now stops at the threshold of 1.5 datagrams: cwnd = ssThresh + mtu * mtu / cwnd (line 243).
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(0));
+        Assert.Equal(2 * Payload, window.GetTransmissionBandwidth(0, isContinuousSend: true));
+        Assert.False(window.IsInSlowStart);
+    }
+
+    [Fact]
+    public void The_window_backs_off_once_per_congestion_control_block()
+    {
+        var window = WindowGrownToThreeDatagrams();
+        window.OnResend();
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(0));
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(0));
+
+        // The block began at datagram 0, so this resend belongs to it and changes nothing (line 168).
+        window.OnResend();
+
+        Assert.Equal(2 * Payload, window.GetTransmissionBandwidth(0, isContinuousSend: true));
+    }
+
+    [Fact]
+    public void Congestion_avoidance_grows_the_window_by_a_fraction_of_a_datagram_once_per_block()
+    {
+        var window = WindowGrownToThreeDatagrams();
+        window.OnResend();
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(0)); // cwnd 2 datagrams, avoidance from now on
+        window.TakeNextDatagramNumber();
+        window.TakeNextDatagramNumber();
+
+        // Datagram 1 is past the block that began at 0 (lines 230-237): grow by mtu * mtu / cwnd, half a datagram.
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(1));
+        Assert.Equal((int)(2.5 * Payload), window.GetTransmissionBandwidth(0, isContinuousSend: true));
+
+        // The new block starts at datagram 2, so datagram 1 again is not new and does not grow the window.
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(1));
+        Assert.Equal((int)(2.5 * Payload), window.GetTransmissionBandwidth(0, isContinuousSend: true));
+    }
+
+    [Fact]
+    public void A_resend_outside_a_continuous_send_leaves_the_window_alone()
+    {
+        var window = WindowGrownToThreeDatagrams();
+        window.GetTransmissionBandwidth(0, isContinuousSend: false);
+
+        window.OnResend();
+
+        Assert.Equal(3 * Payload, window.GetTransmissionBandwidth(0, isContinuousSend: false));
+    }
+
+    [Fact]
+    public void A_nak_during_a_continuous_send_ends_slow_start_without_shrinking_the_window()
+    {
+        var window = WindowGrownToThreeDatagrams();
+
+        // CCRakNetSlidingWindow.cpp:191-195: ssThresh = cwnd / 2.
+        window.OnNak();
+
+        Assert.False(window.IsInSlowStart);
+        Assert.Equal(3 * Payload, window.GetTransmissionBandwidth(0, isContinuousSend: true));
+    }
+
+    [Fact]
+    public void A_nak_outside_a_continuous_send_changes_nothing()
+    {
+        var window = WindowGrownToThreeDatagrams();
+        window.GetTransmissionBandwidth(0, isContinuousSend: false);
+
+        window.OnNak();
+
+        Assert.True(window.IsInSlowStart);
+    }
+
+    private static SlidingWindow WindowGrownToThreeDatagrams()
+    {
+        var window = new SlidingWindow(Payload);
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(0));
+        window.OnAck(rttUs: 1_000, isContinuousSend: true, new UInt24(0));
+        Assert.Equal(3 * Payload, window.GetTransmissionBandwidth(0, isContinuousSend: true));
+        return window;
+    }
 }
