@@ -561,7 +561,10 @@ public sealed partial class RakPeer
         {
             connection = new RakConnection(this, new RakNetGuid(guid), address, isIncoming, _sockets[SocketOf(address)], external, nowUs);
             if (_core.TryGetRemoteSystem(guid, out var system))
+            {
+                connection.System = system;
                 connection.Refresh(system, ConnectionState.Connected, nowUs);
+            }
             _byGuid[guid] = connection;
             _byAddress[address] = connection;
             PublishTable();
@@ -640,13 +643,15 @@ public sealed partial class RakPeer
             var guid = connection.RakNetGuid.Value;
             if (!_byGuid.ContainsKey(guid))
                 continue;
-            if (!_core.TryGetRemoteSystem(guid, out var system))
+            // The slot the connection was made on, kept so the poll costs no lookup; the core deactivates a slot when it
+            // forgets the system and never reuses the object.
+            if (connection.System is not { IsActive: true } system)
             {
                 AbandonReceipts(connection);
                 EndConnection(connection);
                 continue;
             }
-            connection.Refresh(system, (ConnectionState)_core.GetConnectionState(guid), nowUs);
+            connection.Refresh(system, (ConnectionState)PeerCore.GetConnectionState(system), nowUs);
         }
         if (ConnectedChanged())
             PublishTable();

@@ -153,6 +153,9 @@ public sealed class RakConnection
     internal void MarkDisconnecting() =>
         Interlocked.CompareExchange(ref _state, (int)ConnectionState.Disconnecting, (int)ConnectionState.Connected);
 
+    /// <summary>The core's slot for this connection, set when it is reported. Read and written by the I/O cycle only.</summary>
+    internal RemoteSystem? System { get; set; }
+
     /// <summary>Copies what the core's slot holds. Called by the I/O cycle.</summary>
     internal void Refresh(RemoteSystem system, ConnectionState state, long nowUs)
     {

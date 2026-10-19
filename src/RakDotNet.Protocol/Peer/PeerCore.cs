@@ -791,6 +791,12 @@ internal sealed class PeerCore
             _attempts.Remove(attempt);
     }
 
+    /// <summary>
+    /// The state of a slot the layer above already holds, without a lookup; <see cref="ConnectionState.IsDisconnected"/>
+    /// once the slot is deactivated.
+    /// </summary>
+    public static ConnectionState GetConnectionState(RemoteSystem system) => StateOf(system);
+
     /// <summary>The slot of the active system with <paramref name="guid"/>, read by the layer above for its queries.</summary>
     public bool TryGetRemoteSystem(ulong guid, [NotNullWhen(true)] out RemoteSystem? system)
     {
