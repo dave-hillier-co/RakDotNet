@@ -379,12 +379,20 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
 
     private void Drain(RakPeer peer)
     {
-        while (peer.Events.TryRead(out var e))
+        try
         {
-            if (e.IsRakNetPacket)
+            while (peer.Events.TryRead(out var e))
             {
-                _packets.Writer.TryWrite(ToReceivedPacket(e.Data, e.RakNetGuid, e.Address, (long)e.ReceivedTime));
+                if (e.IsRakNetPacket)
+                {
+                    _packets.Writer.TryWrite(ToReceivedPacket(e.Data, e.RakNetGuid, e.Address, (long)e.ReceivedTime));
+                }
             }
+        }
+        catch (ObjectDisposedException) when (!peer.IsActive)
+        {
+            // Shutdown released the event being read. It discards undelivered entries, as RakNet clears its queue
+            // (docs/api-design.md section 7), so the stream ends here and no data is lost.
         }
     }
 }

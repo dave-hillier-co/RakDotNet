@@ -112,6 +112,35 @@ public sealed partial class RakDotNetPeerDriverTests
     }
 
     [Fact]
+    public async Task Shutdown_while_events_are_being_drained_completes_without_a_fault()
+    {
+        // Shutdown releases the borrowed event the pump may be reading (docs/api-design.md sections 5 and 7). A flood
+        // of messages keeps the pump draining, so shutdown lands mid-read in some of the rounds.
+        for (var round = 0; round < 20; round++)
+        {
+            await using var sender = RakDotNetPeerDriver.Launch();
+            await using var receiver = RakDotNetPeerDriver.Launch();
+            var receiverStarted = await receiver.StartupAsync(new StartupOptions(), Token);
+            await sender.StartupAsync(new StartupOptions(MaxIncoming: 0), Token);
+            using (var receiverInbox = new PacketInbox(receiver.Packets, "receiver"))
+            {
+                await sender.ConnectAsync(new ConnectOptions(receiverStarted.BoundAddress), Token);
+                await receiverInbox.WaitForPacketAsync(p => p.MessageId == (byte)MessageId.NewIncomingConnection, "the connection", TimeSpan.FromSeconds(5), Token);
+                var message = new byte[1000];
+                message[0] = 0x86;
+                for (var i = 0; i < 2000; i++)
+                {
+                    await sender.SendAsync(new SendOptions(receiverStarted.PeerGuid, message, Reliability.Reliable), Token);
+                }
+                await receiverInbox.WaitForPacketAsync(p => p.MessageId == 0x86, "the first message", TimeSpan.FromSeconds(5), Token);
+
+                // Shutdown awaits the pump, so a read that faulted it fails here.
+                await receiver.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
     public async Task Connection_commands_report_the_connection_as_interop_peer_does()
     {
         await using var server = RakDotNetPeerDriver.Launch();
