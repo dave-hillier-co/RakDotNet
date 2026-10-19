@@ -1,6 +1,6 @@
-// Prints the bytes native RakNet's BitStream encodings produce, for the known-answer tests in
-// tests/RakDotNet.Protocol.Tests/Wire/BitStreamEncodingsTests.cs. Every case starts with one 1 bit so the encoding is
-// checked off a byte boundary. Build and run with build.sh.
+// Prints the bytes native RakNet's BitStream, string, StringTable and SystemAddress code produces, for the known-answer
+// tests in tests/RakDotNet.Protocol.Tests/Wire. Every BitStream case starts with one 1 bit so the encoding is checked
+// off a byte boundary. Build and run with build.sh.
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
