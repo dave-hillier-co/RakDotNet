@@ -16,9 +16,42 @@ public sealed class CrossConnectionScenarios
 
     [Theory]
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
+    public async Task Peers_that_connect_to_each_other_at_the_same_time_can_send_to_each_other(PeerKind client, PeerKind server)
+    {
+        await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
+        await ConnectAtOnceAndSendAsync(session);
+    }
+
+    // CrossConnectionTest.cpp's failure was a second, half-open connection; a peer that can list its connections must
+    // list exactly one. Native peers are checked in every combination; the scenario then skips if a RakDotNet peer
+    // could not be checked, so the gap shows in the matrix.
+    [Theory]
+    [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Peers_that_connect_to_each_other_at_the_same_time_end_with_one_connection_each(PeerKind client, PeerKind server)
     {
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
+        await ConnectAtOnceAndSendAsync(session);
+
+        var serverGuid = session.ServerStarted.PeerGuid;
+        var clientGuid = session.ClientStarted.PeerGuid;
+        var clientPending = PeerMatrix.PendingReason(client, PeerMatrix.Milestone5.ConnectionQueries);
+        var serverPending = PeerMatrix.PendingReason(server, PeerMatrix.Milestone5.ConnectionQueries);
+        if (clientPending is null)
+        {
+            await AssertOneConnectionAsync(session.ClientPeer, serverGuid);
+        }
+        if (serverPending is null)
+        {
+            await AssertOneConnectionAsync(session.ServerPeer, clientGuid);
+        }
+        if ((clientPending ?? serverPending) is { } reason)
+        {
+            Assert.Skip(reason);
+        }
+    }
+
+    private static async Task ConnectAtOnceAndSendAsync(InteropSession session)
+    {
         var serverGuid = session.ServerStarted.PeerGuid;
         var clientGuid = session.ClientStarted.PeerGuid;
 
@@ -50,21 +83,13 @@ public sealed class CrossConnectionScenarios
         Assert.Equal(clientGuid, atServer.PeerGuid);
         Assert.Equal(serverGuid, atClient.PeerGuid);
         Assert.Equal(2, atClient.Data.Span[1]);
-        await AssertOneConnectionAsync(session.ClientPeer, serverGuid);
-        await AssertOneConnectionAsync(session.ServerPeer, clientGuid);
     }
 
     private static Func<ReceivedPacket, bool> IsConnectedNotification(ulong guid) =>
         p => p.PeerGuid == guid && p.MessageId is (byte)MessageId.ConnectionRequestAccepted or (byte)MessageId.NewIncomingConnection;
 
-    // CrossConnectionTest.cpp's failure was a second, half-open connection; a peer that can list its connections must
-    // list exactly one.
     private static async Task AssertOneConnectionAsync(InteropPeer peer, ulong remote)
     {
-        if (PeerMatrix.PendingReason(peer.Kind, PeerMatrix.Milestone5.ConnectionQueries) is not null)
-        {
-            return;
-        }
         var connection = Assert.Single((await peer.Driver.GetInfoAsync(Token)).Connections);
         Assert.Equal(remote, connection.PeerGuid);
     }

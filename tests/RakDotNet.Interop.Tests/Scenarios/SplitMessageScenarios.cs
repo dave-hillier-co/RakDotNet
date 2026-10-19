@@ -96,12 +96,8 @@ public sealed class SplitMessageScenarios
 
     [Theory]
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
-    public async Task Split_parts_that_arrive_out_of_order_are_joined_in_arrival_order(PeerKind client, PeerKind server)
+    public async Task Split_parts_that_arrive_out_of_order_are_joined_in_index_order_except_by_native_receivers(PeerKind client, PeerKind server)
     {
-        // Native RakNet 4.081 appends each part to the split list as it arrives (List::Insert, ReliabilityLayer.cpp:3141)
-        // and joins the list in that order (BuildPacketFromSplitPacketList, ReliabilityLayer.cpp:3192-3210), so a message
-        // whose parts are reordered on the way is delivered with its parts swapped. Byte-for-byte parity means a
-        // RakDotNet receiver is held to the same result.
         PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.SplitMessages);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, _) = await session.ConnectAsync(Token);
@@ -119,9 +115,21 @@ public sealed class SplitMessageScenarios
         await session.Client.SendAsync(new SendOptions(serverGuid, data, Reliability.ReliableOrdered), Token);
 
         var received = await session.ServerInbox.WaitForPacketAsync(p => p.Data.Length == size, $"the {size}-byte message", InteropSession.DefaultTimeout, Token);
-        byte[] swapped = [.. data.AsSpan(LargestUnsplitSize), .. data.AsSpan(0, LargestUnsplitSize)];
-        Assert.Equal(Convert.ToHexStringLower(swapped), Convert.ToHexStringLower(received.Data.Span));
+        Assert.Equal(Convert.ToHexStringLower(ExpectedAfterReordering(server, data)), Convert.ToHexStringLower(received.Data.Span));
     }
+
+    /// <summary>
+    /// What a receiver of <paramref name="kind"/> delivers when a two-part message's second part arrives first. Native
+    /// RakNet 4.081 joins parts in arrival order, so it swaps the halves (docs/plan.md, "Wire format notes"). That is a
+    /// receive-side defect, not wire format, and the pass criterion is that the receiver observes the message sent, so
+    /// RakDotNet joins parts by split index.
+    /// </summary>
+    private static byte[] ExpectedAfterReordering(PeerKind kind, byte[] data) => kind switch
+    {
+        PeerKind.Native => [.. data.AsSpan(LargestUnsplitSize), .. data.AsSpan(0, LargestUnsplitSize)],
+        PeerKind.RakDotNet => data,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+    };
 
     /// <summary>MessageSizeTest.cpp:37-74: for each stride, enough messages of that size to cover 4000 bytes.</summary>
     private static async Task SendStridesAsync(InteropSession session, IEnumerable<int> strides)

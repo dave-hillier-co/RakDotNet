@@ -18,12 +18,13 @@ public sealed class OrderingScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Ordered_and_sequenced_messages_keep_their_order_on_all_32_channels_under_loss_and_reordering(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.Loss);
+        // Only the client sends, so only it resends after NAKs and RTOs; the server's ACKs, NAKs and reordering suffice.
+        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone4.Loss);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var faults = new FaultOptions(Seed: 20261019, LossProbability: 0.1, DuplicationProbability: 0.05, Jitter: TimeSpan.FromMilliseconds(30));
 
         // Below the MTU. The samples pad past it, but native RakNet joins split parts in arrival order
-        // (SplitMessageScenarios), so split messages cannot survive loss between native peers.
+        // (docs/plan.md, "Wire format notes"), so split messages cannot survive loss into a native receiver.
         await OrderingFlows.SendOnEveryChannelAsync(session, faults, messagesPerChannel: 12, maxSize: 1000, Token);
 
         Assert.True(session.Proxy.Datagrams.Any(d => d.Fault.Drop), "The proxy dropped nothing, so the scenario did not exercise loss.");
