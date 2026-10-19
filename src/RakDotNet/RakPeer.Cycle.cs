@@ -262,7 +262,51 @@ public sealed partial class RakPeer
             case CommandKind.SetNetworkSimulator:
                 _simulator.Configure((NetworkSimulatorOptions?)command.State);
                 break;
+            case CommandKind.SetIncomingPassword:
+                _core.IncomingPassword = (byte[])command.State!;
+                break;
+            case CommandKind.SetDefaultTimeout:
+                _core.SetTimeoutTime(command.Value, remote: null);
+                break;
+            case CommandKind.SetUnreliableTimeout:
+                _core.UnreliableTimeoutMs = command.Value;
+                break;
+            case CommandKind.SetOccasionalPing:
+                _core.OccasionalPing = command.Flag;
+                break;
+            case CommandKind.SetSplitMessageProgressInterval:
+                _core.SplitMessageProgressInterval = (int)command.Value;
+                break;
+            case CommandKind.SetLimitIpConnectionFrequency:
+                _core.LimitIpConnectionFrequency = command.Flag;
+                break;
+            case CommandKind.SetAllowConnectionResponseIpMigration:
+                _core.AllowConnectionResponseIpMigration = command.Flag;
+                break;
+            case CommandKind.SetOutgoingBandwidthLimit:
+                _core.OutgoingBandwidthLimit = (uint)command.Value;
+                break;
+            case CommandKind.PingConnected:
+                if (_byGuid.TryGetValue(command.Target.RakNetGuid.Value, out var pinged) && pinged.System is { IsActive: true } pingedSystem)
+                    _core.PingConnected(pingedSystem.Address, nowUs);
+                break;
+            case CommandKind.ChangeSystemAddress:
+                ApplyChangeSystemAddress(command.Target.RakNetGuid, ((SystemAddressBox)command.State!).Value);
+                break;
         }
+    }
+
+    // BCS_CHANGE_SYSTEM_ADDRESS (RakPeer.cpp:5646-5654).
+    private void ApplyChangeSystemAddress(RakNetGuid rakNetGuid, SystemAddress address)
+    {
+        _core.ChangeSystemAddress(rakNetGuid.Value, ToEndPoint(address));
+        if (!_byGuid.TryGetValue(rakNetGuid.Value, out var connection))
+            return;
+        if (_byAddress.TryGetValue(connection.Address, out var byAddress) && ReferenceEquals(byAddress, connection))
+            _byAddress.Remove(connection.Address);
+        connection.MoveTo(address);
+        _byAddress[address] = connection;
+        PublishTable();
     }
 
     private void ApplyConnect(PendingConnect attempt, long nowUs)
@@ -379,11 +423,10 @@ public sealed partial class RakPeer
 
     private void SendTo(RakConnection connection, in PeerCommand command, long nowUs)
     {
-        var bytes = command.ByteLength;
-        var coreReceipt = _core.Send(connection.RakNetGuid.Value, command.Payload.AsSpan(0, bytes), command.Reliability, command.Priority, command.Channel, nowUs);
+        var coreReceipt = _core.Send(connection.RakNetGuid.Value, command.Payload.AsSpan(0, command.ByteLength), command.BitLength,
+                                     command.Reliability, command.Priority, command.Channel, nowUs);
         if (command.Reliability.HasAckReceipt())
             _receipts[coreReceipt] = new ReceiptRecord(command.Receipt, connection, command.State as TrackedSend, command.Version);
-        connection.Counters.Add(RnsPerSecondMetric.UserMessageBytesPushed, bytes);
     }
 
     private void ReceiveDatagrams(long nowUs)
@@ -424,8 +467,6 @@ public sealed partial class RakPeer
                 foreach (var observer in _plugins.Observers)
                     observer.OnDatagramReceived(datagram, remote);
                 RememberSocket(remote, socket);
-                if (_byAddress.TryGetValue(remote, out var connection))
-                    connection.Counters.Add(RnsPerSecondMetric.ActualBytesReceived, length);
                 _core.Receive(ToEndPoint(remote), datagram, nowUs);
             }
         }
@@ -467,8 +508,6 @@ public sealed partial class RakPeer
         foreach (var observer in _plugins.Observers)
             observer.OnDatagramSent(datagram, remote);
         _transports[socket].TrySend(datagram, remote, ttl);
-        if (_byAddress.TryGetValue(remote, out var connection))
-            connection.Counters.Add(RnsPerSecondMetric.ActualBytesSent, datagram.Length);
     }
 
     private void ProcessCoreEvents(long nowUs)
@@ -503,6 +542,15 @@ public sealed partial class RakPeer
                     break;
                 case SendReceiptLost lost:
                     OnReceipt(lost.Receipt, acked: false);
+                    break;
+                case SendReceiptDiscarded discarded:
+                    // RakNet reports nothing for an unreliable message culled unsent; the receipt still has to end.
+                    if (_receipts.Remove(discarded.Receipt, out var record))
+                        Abandon(record.Receipt, record.Connection, record.Connection.RakNetGuid, record.Tracker, record.Version);
+                    break;
+                case AdvertiseSystemReceived or OutOfBandReceived:
+                    SystemAddress sender = coreEvent.Remote;
+                    EnqueueEvent(NewSegment(coreEvent.Packet.Span, coreEvent.Guid, sender, _byAddress.GetValueOrDefault(sender)));
                     break;
                 case Protocol.Peer.Disconnected disconnected:
                     OnDisconnected(disconnected.Remote, disconnected.Guid, DisconnectReason.DisconnectionNotification);
@@ -587,7 +635,7 @@ public sealed partial class RakPeer
     {
         _byGuid.TryGetValue(message.Guid, out var connection);
         var segment = NewSegment(message.Data.Span, message.Guid, message.Remote, connection);
-        connection?.Counters.Add(RnsPerSecondMetric.UserMessageBytesReceivedProcessed, segment.Length);
+        segment.BitLength = message.BitLength;
         EnqueueEvent(segment);
     }
 

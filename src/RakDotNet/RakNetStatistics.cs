@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
+using RakDotNet.Protocol.Session;
 using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet;
@@ -43,13 +44,20 @@ public struct PriorityValues<T>
     private T _element;
 
     public readonly T this[Priority priority] => ((ReadOnlySpan<T>)this)[(int)priority];
+
+    internal static PriorityValues<T> From(ReadOnlySpan<T> values)
+    {
+        var result = default(PriorityValues<T>);
+        values.CopyTo(result);
+        return result;
+    }
 }
 
 /// <summary>RakNet's RakNetStatistics, by value with no arrays, so copying a snapshot allocates nothing.</summary>
 /// <remarks>
-/// The I/O cycle keeps each connection's counters and readers copy them without waiting for a cycle. The field set
-/// covers the interop <c>stats</c> command, so the interop driver maps it field for field. Values the reliability
-/// layer does not measure are 0, as RakNet reports before it has measured them.
+/// The I/O cycle copies each connection's statistics from its reliability layer every cycle, and readers take that copy
+/// without waiting for a cycle. The field set covers the interop <c>stats</c> command, so the interop driver maps it
+/// field for field.
 /// </remarks>
 public readonly struct RakNetStatistics
 {
@@ -57,18 +65,46 @@ public readonly struct RakNetStatistics
     private readonly MetricValues _runningTotal;
     private readonly ulong _snapshotTimeUs;
 
-    internal RakNetStatistics(ReadOnlySpan<ulong> valueOverLastSecond, ReadOnlySpan<ulong> runningTotal, ulong connectionStartTimeUs,
-                              uint messagesInResendBuffer, ulong snapshotTimeUs)
+    /// <summary>ReliabilityLayer::GetStatistics' fields (ReliabilityLayer.cpp:3378-3415).</summary>
+    internal RakNetStatistics(SessionStatistics session)
     {
-        _valueOverLastSecond = MetricValues.From(valueOverLastSecond);
-        _runningTotal = MetricValues.From(runningTotal);
-        ConnectionStartTimeUs = connectionStartTimeUs;
-        MessagesInResendBuffer = messagesInResendBuffer;
+        _valueOverLastSecond = MetricValues.From(session.ValueOverLastSecond);
+        _runningTotal = MetricValues.From(session.RunningTotal);
+        ConnectionStartTimeUs = (ulong)session.ConnectionStartTimeUs;
+        IsLimitedByCongestionControl = session.IsLimitedByCongestionControl;
+        BpsLimitByCongestionControl = session.BpsLimitByCongestionControl;
+        IsLimitedByOutgoingBandwidthLimit = session.IsLimitedByOutgoingBandwidthLimit;
+        BpsLimitByOutgoingBandwidthLimit = session.BpsLimitByOutgoingBandwidthLimit;
+        MessagesInSendBuffer = PriorityValues<uint>.From(session.MessagesInSendBuffer);
+        BytesInSendBuffer = PriorityValues<double>.From(session.BytesInSendBuffer);
+        MessagesInResendBuffer = session.MessagesInResendBuffer;
+        BytesInResendBuffer = session.BytesInResendBuffer;
+        PacketLossLastSecond = session.PacketLossLastSecond;
+        PacketLossTotal = session.PacketLossTotal;
+    }
+
+    private RakNetStatistics(in RakNetStatistics statistics, ulong snapshotTimeUs)
+    {
+        this = statistics;
         _snapshotTimeUs = snapshotTimeUs;
     }
 
+    private RakNetStatistics(ulong connectionStartTimeUs)
+    {
+        ConnectionStartTimeUs = connectionStartTimeUs;
+    }
+
+    /// <summary>All zero, for a connection whose reliability layer has not reported yet.</summary>
+    internal static RakNetStatistics Empty(ulong connectionStartTimeUs) => new(connectionStartTimeUs);
+
+    /// <summary>This snapshot, taken at <paramref name="snapshotTimeUs"/> for StatisticsToString's elapsed time.</summary>
+    internal RakNetStatistics At(ulong snapshotTimeUs) => new(this, snapshotTimeUs);
+
+    // RakNetStatistics::operator+= (RakNetStatistics.h:102-118): the send buffers and the per-second metrics add up; every
+    // other field is the left operand's.
     private RakNetStatistics(in RakNetStatistics left, in RakNetStatistics right)
     {
+        this = left;
         Span<ulong> last = stackalloc ulong[7];
         Span<ulong> total = stackalloc ulong[7];
         for (var i = 0; i < 7; i++)
@@ -78,10 +114,15 @@ public readonly struct RakNetStatistics
         }
         _valueOverLastSecond = MetricValues.From(last);
         _runningTotal = MetricValues.From(total);
-        ConnectionStartTimeUs = Math.Min(left.ConnectionStartTimeUs, right.ConnectionStartTimeUs);
-        MessagesInResendBuffer = left.MessagesInResendBuffer + right.MessagesInResendBuffer;
-        BytesInResendBuffer = left.BytesInResendBuffer + right.BytesInResendBuffer;
-        _snapshotTimeUs = Math.Max(left._snapshotTimeUs, right._snapshotTimeUs);
+        Span<uint> messages = stackalloc uint[4];
+        Span<double> bytes = stackalloc double[4];
+        for (var i = 0; i < 4; i++)
+        {
+            messages[i] = left.MessagesInSendBuffer[(Priority)i] + right.MessagesInSendBuffer[(Priority)i];
+            bytes[i] = left.BytesInSendBuffer[(Priority)i] + right.BytesInSendBuffer[(Priority)i];
+        }
+        MessagesInSendBuffer = PriorityValues<uint>.From(messages);
+        BytesInSendBuffer = PriorityValues<double>.From(bytes);
     }
 
     public MetricValues ValueOverLastSecond => _valueOverLastSecond;

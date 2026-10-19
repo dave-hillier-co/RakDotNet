@@ -21,6 +21,16 @@ internal enum CommandKind : byte
     SendRaw,
     SetInternalAddress,
     SetNetworkSimulator,
+    SetIncomingPassword,
+    SetDefaultTimeout,
+    SetUnreliableTimeout,
+    SetOccasionalPing,
+    SetSplitMessageProgressInterval,
+    SetLimitIpConnectionFrequency,
+    SetAllowConnectionResponseIpMigration,
+    SetOutgoingBandwidthLimit,
+    PingConnected,
+    ChangeSystemAddress,
 }
 
 /// <summary>

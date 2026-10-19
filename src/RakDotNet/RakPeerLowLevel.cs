@@ -52,8 +52,12 @@ public sealed class RakPeerLowLevel
     /// </summary>
     public bool SendTtl(SystemAddress remote, int ttl, int socketIndex = 0) => _peer.SendTtl(remote, ttl, socketIndex);
 
-    /// <summary>ChangeSystemAddress, for Router2.</summary>
-    public void ChangeSystemAddress(RakNetGuid rakNetGuid, SystemAddress address) => throw new NotImplementedException();
+    /// <summary>
+    /// ChangeSystemAddress, for Router2 (RakPeer.cpp:2846-2856, 5646-5654): the connection with
+    /// <paramref name="rakNetGuid"/> is from the next cycle on reached at, and recognised by, <paramref name="address"/>,
+    /// and its <see cref="RakConnection.Address"/> changes. Nothing happens when no connection has the GUID.
+    /// </summary>
+    public void ChangeSystemAddress(RakNetGuid rakNetGuid, SystemAddress address) => _peer.ChangeSystemAddress(rakNetGuid, address);
 
     /// <summary>SetIncomingDatagramEventHandler.</summary>
     public IncomingDatagramFilter? IncomingDatagramFilter
