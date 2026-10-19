@@ -84,6 +84,23 @@ public sealed class PacketInboxTests
     }
 
     [Fact]
+    public async Task Waiting_until_a_condition_collects_matching_packets_until_the_condition_holds()
+    {
+        using var inbox = new PacketInbox(_channel.Reader, "server");
+        for (byte i = 0; i < 6; i++)
+        {
+            _channel.Writer.TryWrite(Packet(134, "ID_USER_PACKET_ENUM", i));
+            _channel.Writer.TryWrite(Packet(3, "ID_CONNECTED_PONG"));
+        }
+
+        var packets = await inbox.WaitForPacketsAsync(
+            p => p.MessageId == 134, found => found[^1].Data.Span[1] == 3, "user packets up to 3", Timeout, Token);
+
+        Assert.Equal(new byte[] { 0, 1, 2, 3 }, packets.Select(p => p.Data.Span[1]));
+        Assert.Equal(4, (await inbox.WaitForPacketAsync(p => p.MessageId == 134, "the next user packet", Timeout, Token)).Data.Span[1]);
+    }
+
+    [Fact]
     public async Task A_count_timeout_says_how_many_arrived()
     {
         using var inbox = new PacketInbox(_channel.Reader, "server");

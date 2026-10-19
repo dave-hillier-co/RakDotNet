@@ -37,6 +37,15 @@ public sealed class PeerMatrixTests
     }
 
     [Fact]
+    public void A_feature_needed_by_one_role_is_pending_only_when_that_role_is_a_RakDotNet_peer()
+    {
+        Assert.Null(PeerMatrix.PendingReason(PeerKind.Native, PeerMatrix.Milestone5.Statistics));
+        Assert.Equal(
+            "RakDotNet waits for milestone 5: RakPeer statistics: GetStatistics",
+            PeerMatrix.PendingReason(PeerKind.RakDotNet, PeerMatrix.Milestone5.Statistics));
+    }
+
+    [Fact]
     public void A_missing_native_binary_is_reported_with_where_it_was_looked_for()
     {
         var reason = PeerMatrix.UnavailableReason(PeerKind.Native);

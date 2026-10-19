@@ -250,6 +250,122 @@ public sealed class NativePeerDriver : IPeerDriver
         return (string?)reply["state"] ?? "";
     }
 
+    public async Task<uint> SendListAsync(SendListOptions options, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var reply = await SendCommandAsync("sendList", new JsonObject
+        {
+            ["target"] = FormatGuid(options.Target),
+            ["parts"] = new JsonArray([.. options.Parts.Select(p => (JsonNode)Convert.ToHexStringLower(p.Span))]),
+            ["reliability"] = ToProtocolName(options.Reliability),
+            ["priority"] = ToProtocolName(options.Priority),
+            ["channel"] = options.Channel,
+            ["broadcast"] = options.Broadcast,
+        }, cancellationToken).ConfigureAwait(false);
+        return (uint)reply["receipt"]!;
+    }
+
+    public Task CancelConnectionAttemptAsync(IPEndPoint remote, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        return SendCommandAsync("cancelConnect", new JsonObject { ["host"] = remote.Address.ToString(), ["port"] = remote.Port }, cancellationToken);
+    }
+
+    public Task PingConnectedAsync(ulong target, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("pingConnected", new JsonObject { ["target"] = FormatGuid(target) }, cancellationToken);
+
+    public async Task<bool> AdvertiseSystemAsync(IPEndPoint remote, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        var reply = await SendCommandAsync("advertise", new JsonObject
+        {
+            ["host"] = remote.Address.ToString(),
+            ["port"] = remote.Port,
+            ["data"] = Convert.ToHexStringLower(data.Span),
+        }, cancellationToken).ConfigureAwait(false);
+        return (bool?)reply["sent"] ?? false;
+    }
+
+    public Task SetTimeoutAsync(TimeSpan timeout, ulong? target = null, CancellationToken cancellationToken = default)
+    {
+        var fields = new JsonObject { ["ms"] = (long)timeout.TotalMilliseconds };
+        if (target is { } guid)
+        {
+            fields["target"] = FormatGuid(guid);
+        }
+        return SendCommandAsync("setTimeout", fields, cancellationToken);
+    }
+
+    public Task SetMaximumIncomingConnectionsAsync(int count, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("setMaxIncoming", new JsonObject { ["count"] = count }, cancellationToken);
+
+    public Task SetOccasionalPingAsync(bool enabled, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("setOccasionalPing", new JsonObject { ["enabled"] = enabled }, cancellationToken);
+
+    public Task SetSplitMessageProgressIntervalAsync(int interval, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("setSplitMessageProgressInterval", new JsonObject { ["interval"] = interval }, cancellationToken);
+
+    public Task SetOutgoingBandwidthLimitAsync(uint bitsPerSecond, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("setOutgoingBandwidthLimit", new JsonObject { ["bitsPerSecond"] = bitsPerSecond }, cancellationToken);
+
+    public Task BanAsync(string ip, TimeSpan duration, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("ban", new JsonObject { ["ip"] = ip, ["ms"] = (long)duration.TotalMilliseconds }, cancellationToken);
+
+    public async Task<PeerStatistics> GetStatisticsAsync(ulong target, CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("stats", new JsonObject { ["target"] = FormatGuid(target) }, cancellationToken).ConfigureAwait(false);
+        var stats = reply["stats"]!.AsObject();
+        return new PeerStatistics(
+            (int)stats["messagesInResendBuffer"]!,
+            (ulong)stats["bytesInResendBuffer"]!,
+            (double)stats["packetlossLastSecond"]!,
+            (double)stats["packetlossTotal"]!,
+            (bool)stats["isLimitedByCongestionControl"]!,
+            (ulong)stats["bpsLimitByCongestionControl"]!,
+            (bool)stats["isLimitedByOutgoingBandwidthLimit"]!,
+            (ulong)stats["bpsLimitByOutgoingBandwidthLimit"]!,
+            ParseMetrics(stats["runningTotal"]!.AsObject()),
+            ParseMetrics(stats["valueOverLastSecond"]!.AsObject()));
+    }
+
+    public async Task<PeerInfo> GetInfoAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("info", new JsonObject(), cancellationToken).ConfigureAwait(false);
+        var connections = reply["connections"]!.AsArray()
+            .Select(c => new ConnectionInfo(
+                ParseGuid(c!["guid"]),
+                IPEndPoint.Parse((string)c["address"]!),
+                (int)c["mtu"]!,
+                (int)c["averagePing"]!,
+                (int)c["lastPing"]!,
+                (int)c["lowestPing"]!,
+                IPEndPoint.Parse((string)c["externalAddress"]!)))
+            .ToList();
+        return new PeerInfo(ParseGuid(reply["guid"]), IPEndPoint.Parse((string)reply["boundAddress"]!), connections);
+    }
+
+    public async Task<ulong> GetTimeAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("time", new JsonObject(), cancellationToken).ConfigureAwait(false);
+        return ulong.Parse((string)reply["time"]!, NumberStyles.None, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>The C++ name of each RNSPerSecondMetrics value (RakNetStatistics.h), as interop-peer reports it.</summary>
+    public static string ToProtocolName(PerSecondMetric metric) => metric switch
+    {
+        PerSecondMetric.UserMessageBytesPushed => "USER_MESSAGE_BYTES_PUSHED",
+        PerSecondMetric.UserMessageBytesSent => "USER_MESSAGE_BYTES_SENT",
+        PerSecondMetric.UserMessageBytesResent => "USER_MESSAGE_BYTES_RESENT",
+        PerSecondMetric.UserMessageBytesReceivedProcessed => "USER_MESSAGE_BYTES_RECEIVED_PROCESSED",
+        PerSecondMetric.UserMessageBytesReceivedIgnored => "USER_MESSAGE_BYTES_RECEIVED_IGNORED",
+        PerSecondMetric.ActualBytesSent => "ACTUAL_BYTES_SENT",
+        PerSecondMetric.ActualBytesReceived => "ACTUAL_BYTES_RECEIVED",
+        _ => throw new ArgumentOutOfRangeException(nameof(metric), metric, null),
+    };
+
+    private static Dictionary<PerSecondMetric, ulong> ParseMetrics(JsonObject metrics) =>
+        Enum.GetValues<PerSecondMetric>().ToDictionary(m => m, m => (ulong)metrics[ToProtocolName(m)]!);
+
     public Task ShutdownAsync(int blockMs = 100, CancellationToken cancellationToken = default) =>
         SendCommandAsync("shutdown", new JsonObject { ["blockMs"] = blockMs }, cancellationToken);
 

@@ -108,6 +108,35 @@ public sealed partial class RakDotNetPeerDriverTests
         await driver.Packets.Completion.WaitAsync(TimeSpan.FromSeconds(5), Token);
     }
 
+    [Fact]
+    public async Task Commands_the_peer_core_cannot_reach_yet_throw_not_supported_so_the_matrix_skips_them()
+    {
+        await using var driver = RakDotNetPeerDriver.Launch();
+        await driver.StartupAsync(new StartupOptions(), Token);
+
+        Func<Task>[] commands =
+        [
+            () => driver.SendListAsync(new SendListOptions(1, [new byte[] { 0x86 }]), Token),
+            () => driver.CancelConnectionAttemptAsync(Remote, Token),
+            () => driver.PingConnectedAsync(1, Token),
+            () => driver.AdvertiseSystemAsync(Remote, ReadOnlyMemory<byte>.Empty, Token),
+            () => driver.SetTimeoutAsync(TimeSpan.FromSeconds(1), cancellationToken: Token),
+            () => driver.SetMaximumIncomingConnectionsAsync(1, Token),
+            () => driver.SetOccasionalPingAsync(true, Token),
+            () => driver.SetSplitMessageProgressIntervalAsync(1, Token),
+            () => driver.SetOutgoingBandwidthLimitAsync(1, Token),
+            () => driver.BanAsync("127.0.0.1", TimeSpan.Zero, Token),
+            () => driver.GetStatisticsAsync(1, Token),
+            () => driver.GetInfoAsync(Token),
+            () => driver.GetTimeAsync(Token),
+        ];
+
+        foreach (var command in commands)
+        {
+            await Assert.ThrowsAsync<NotSupportedException>(command);
+        }
+    }
+
     [GeneratedRegex(@"X\((ID_[A-Za-z0-9_]+)\)")]
     private static partial Regex NativeNamePattern();
 }

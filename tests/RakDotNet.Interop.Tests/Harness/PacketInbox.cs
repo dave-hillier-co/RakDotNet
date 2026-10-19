@@ -33,29 +33,55 @@ public sealed class PacketInbox(ChannelReader<ReceivedPacket> packets, string la
         int count,
         string expectation,
         TimeSpan timeout,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        await WaitForPacketsAsync(predicate, found => found.Count >= count, expectation, timeout, count, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Collects matching packets, oldest first, until <paramref name="done"/> holds for those collected so far, and
+    /// removes them. Matching packets after that stay in the inbox.
+    /// </summary>
+    public Task<IReadOnlyList<ReceivedPacket>> WaitForPacketsAsync(
+        Func<ReceivedPacket, bool> predicate,
+        Func<IReadOnlyList<ReceivedPacket>, bool> done,
+        string expectation,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        WaitForPacketsAsync(predicate, done, expectation, timeout, expectedCount: null, cancellationToken);
+
+    private async Task<IReadOnlyList<ReceivedPacket>> WaitForPacketsAsync(
+        Func<ReceivedPacket, bool> predicate,
+        Func<IReadOnlyList<ReceivedPacket>, bool> done,
+        string expectation,
+        TimeSpan timeout,
+        int? expectedCount,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(predicate);
+        ArgumentNullException.ThrowIfNull(done);
+        string Progress(int arrived) => expectedCount is { } count ? $"{arrived} of {count} arrived" : $"{arrived} matching arrived";
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
         var found = new List<ReceivedPacket>();
+        // The condition is checked after each match, so it never sees an empty list unless no packet is wanted.
+        var complete = expectedCount == 0;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             lock (_unconsumed)
             {
-                for (var i = 0; i < _unconsumed.Count && found.Count < count; i++)
+                for (var i = 0; i < _unconsumed.Count && !complete; i++)
                 {
                     if (predicate(_unconsumed[i]))
                     {
                         found.Add(_unconsumed[i]);
                         _unconsumed.RemoveAt(i--);
+                        complete = done(found);
                     }
                 }
             }
 
-            while (found.Count < count)
+            while (!complete)
             {
                 ReceivedPacket packet;
                 try
@@ -64,7 +90,7 @@ public sealed class PacketInbox(ChannelReader<ReceivedPacket> packets, string la
                     {
                         Restore(found);
                         throw new InvalidOperationException(
-                            $"{Label} packet stream ended (the peer exited) while waiting for {expectation}; {found.Count} of {count} arrived. {Describe()}");
+                            $"{Label} packet stream ended (the peer exited) while waiting for {expectation}; {Progress(found.Count)}. {Describe()}");
                     }
                     if (!packets.TryRead(out packet!))
                     {
@@ -76,12 +102,13 @@ public sealed class PacketInbox(ChannelReader<ReceivedPacket> packets, string la
                     var arrived = found.Count;
                     Restore(found);
                     throw new TimeoutException(
-                        $"{Label} did not receive {expectation} within {timeout.TotalSeconds:0.###} s; {arrived} of {count} arrived. {Describe()}");
+                        $"{Label} did not receive {expectation} within {timeout.TotalSeconds:0.###} s; {Progress(arrived)}. {Describe()}");
                 }
 
                 if (predicate(packet))
                 {
                     found.Add(packet);
+                    complete = done(found);
                 }
                 else
                 {

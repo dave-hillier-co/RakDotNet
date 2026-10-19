@@ -28,7 +28,44 @@ public interface IPeerDriver : IAsyncDisposable
 
     Task SetOfflinePingResponseAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
 
+    /// <summary>RakPeer::SendList: the parts are sent concatenated as one message.</summary>
+    Task<uint> SendListAsync(SendListOptions options, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::CancelConnectionAttempt: drops a pending attempt silently.</summary>
+    Task CancelConnectionAttemptAsync(IPEndPoint remote, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::Ping(SystemAddress): a connected ping, which updates the ping statistics.</summary>
+    Task PingConnectedAsync(ulong target, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::AdvertiseSystem: sends ID_ADVERTISE_SYSTEM and the data to an unconnected system.</summary>
+    Task<bool> AdvertiseSystemAsync(IPEndPoint remote, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::SetTimeoutTime for one connection, or for every connection and the default when target is null.</summary>
+    Task SetTimeoutAsync(TimeSpan timeout, ulong? target = null, CancellationToken cancellationToken = default);
+
+    Task SetMaximumIncomingConnectionsAsync(int count, CancellationToken cancellationToken = default);
+
+    Task SetOccasionalPingAsync(bool enabled, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::SetSplitMessageProgressInterval: report ID_DOWNLOAD_PROGRESS every interval parts; 0 never.</summary>
+    Task SetSplitMessageProgressIntervalAsync(int interval, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::SetPerConnectionOutgoingBandwidthLimit; 0 is unlimited.</summary>
+    Task SetOutgoingBandwidthLimitAsync(uint bitsPerSecond, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::AddToBanList; a zero duration bans forever.</summary>
+    Task BanAsync(string ip, TimeSpan duration, CancellationToken cancellationToken = default);
+
     Task<string> GetConnectionStateAsync(ulong target, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::GetStatistics for one connection.</summary>
+    Task<PeerStatistics> GetStatisticsAsync(ulong target, CancellationToken cancellationToken = default);
+
+    /// <summary>The peer's GUID and bound address, and every connection with its MTU, pings and our external address.</summary>
+    Task<PeerInfo> GetInfoAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>RakNet::GetTime in the peer: the clock ID_TIMESTAMP values are written in.</summary>
+    Task<ulong> GetTimeAsync(CancellationToken cancellationToken = default);
 
     Task ShutdownAsync(int blockMs = 100, CancellationToken cancellationToken = default);
 }
@@ -64,4 +101,44 @@ public sealed record ReceivedPacket(
     ReadOnlyMemory<byte> Data,
     long TimeMs,
     ulong? Timestamp
+);
+
+public sealed record SendListOptions(
+    ulong Target,
+    IReadOnlyList<ReadOnlyMemory<byte>> Parts,
+    Reliability Reliability = Reliability.ReliableOrdered,
+    Priority Priority = Priority.High,
+    byte Channel = 0,
+    bool Broadcast = false
+);
+
+/// <param name="ExternalAddress">Our address as this connection sees it (RakPeer::GetExternalID).</param>
+public sealed record ConnectionInfo(ulong PeerGuid, IPEndPoint Address, int Mtu, int AveragePing, int LastPing, int LowestPing, IPEndPoint ExternalAddress);
+
+public sealed record PeerInfo(ulong PeerGuid, IPEndPoint BoundAddress, IReadOnlyList<ConnectionInfo> Connections);
+
+/// <summary>RNSPerSecondMetrics (RakNetStatistics.h), named in the protocol by their C++ names.</summary>
+public enum PerSecondMetric
+{
+    UserMessageBytesPushed,
+    UserMessageBytesSent,
+    UserMessageBytesResent,
+    UserMessageBytesReceivedProcessed,
+    UserMessageBytesReceivedIgnored,
+    ActualBytesSent,
+    ActualBytesReceived,
+}
+
+/// <summary>The RakNetStatistics fields the interop protocol reports.</summary>
+public sealed record PeerStatistics(
+    int MessagesInResendBuffer,
+    ulong BytesInResendBuffer,
+    double PacketLossLastSecond,
+    double PacketLossTotal,
+    bool IsLimitedByCongestionControl,
+    ulong BpsLimitByCongestionControl,
+    bool IsLimitedByOutgoingBandwidthLimit,
+    ulong BpsLimitByOutgoingBandwidthLimit,
+    IReadOnlyDictionary<PerSecondMetric, ulong> RunningTotal,
+    IReadOnlyDictionary<PerSecondMetric, ulong> ValueOverLastSecond
 );

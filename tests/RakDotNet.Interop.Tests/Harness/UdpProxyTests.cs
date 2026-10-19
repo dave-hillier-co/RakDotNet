@@ -92,6 +92,25 @@ public sealed class UdpProxyTests : IDisposable
     }
 
     [Fact]
+    public async Task The_server_can_reach_a_client_through_its_upstream_before_the_client_sends_anything()
+    {
+        await using var proxy = UdpProxy.Start(ServerEndPoint);
+        var clientEndPoint = (IPEndPoint)_client.Client.LocalEndPoint!;
+
+        var upstream = proxy.UpstreamEndPointFor(clientEndPoint);
+        await _server.SendAsync(new byte[] { 7 }, upstream, Token);
+        var atClient = await ReceiveAsync(_client);
+        await _client.SendAsync(new byte[] { 8 }, proxy.ListenEndPoint, Token);
+        var atServer = await ReceiveAsync(_server);
+
+        Assert.Equal(new byte[] { 7 }, atClient.Buffer);
+        Assert.Equal(proxy.ListenEndPoint, atClient.RemoteEndPoint);
+        Assert.Equal(upstream, atServer.RemoteEndPoint);
+        Assert.Equal(upstream, proxy.UpstreamEndPointFor(clientEndPoint));
+        Assert.Equal(upstream, proxy.UpstreamEndPoints[clientEndPoint]);
+    }
+
+    [Fact]
     public async Task Records_every_datagram_with_direction_payload_and_time_since_the_first()
     {
         var time = new FakeTimeProvider();
@@ -216,6 +235,29 @@ public sealed class UdpProxyTests : IDisposable
 
         Assert.Empty(beforeDue);
         Assert.Equal(expected, received.Select(d => d[0]));
+    }
+
+    [Fact]
+    public async Task A_rule_decides_the_fault_for_the_datagrams_it_matches_and_the_seeded_faults_apply_to_the_rest()
+    {
+        var time = new FakeTimeProvider();
+        await using var proxy = UdpProxy.Start(ServerEndPoint, new FaultOptions(LossProbability: 1.0), time);
+        proxy.Rule = (direction, payload) => direction == ProxyDirection.AToB && payload.Span[0] < 3
+            ? new FaultDecision(false, false, payload.Span[0] == 1 ? TimeSpan.FromMilliseconds(50) : TimeSpan.Zero)
+            : null;
+
+        for (byte i = 0; i < 4; i++)
+        {
+            await _client.SendAsync(new[] { i }, proxy.ListenEndPoint, Token);
+            await WaitForRecordedAsync(proxy, i + 1);
+        }
+        var beforeDelay = await ReceiveForAsync(_server, TimeSpan.FromMilliseconds(200));
+        time.Advance(TimeSpan.FromMilliseconds(60));
+        var afterDelay = await ReceiveForAsync(_server, TimeSpan.FromMilliseconds(200));
+
+        Assert.Equal(new byte[] { 0, 2 }, beforeDelay.Select(d => d[0]));
+        Assert.Equal(new byte[] { 1 }, afterDelay.Select(d => d[0]));
+        Assert.True(proxy.Datagrams[3].Fault.Drop);
     }
 
     [Fact]

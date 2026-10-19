@@ -69,19 +69,61 @@ public static class ScenarioFlows
 
         foreach (var receipt in receipts)
         {
-            // ReliabilityLayer.cpp:2493-2494: the receipt serial is memcpy'd after the ID, so it is host order
-            // (little-endian on every platform we run), not BitStream big-endian.
-            await session.ClientInbox.WaitForPacketAsync(
-                p => p.MessageId == (byte)MessageId.SndReceiptAcked && p.Data.Length >= 5 && BinaryPrimitives.ReadUInt32LittleEndian(p.Data.Span[1..]) == receipt,
-                $"ID_SND_RECEIPT_ACKED for receipt {receipt}",
-                Timeout,
-                cancellationToken);
+            await WaitForReceiptAsync(session.ClientInbox, MessageId.SndReceiptAcked, receipt, cancellationToken);
         }
 
         await session.Client.CloseAsync(serverGuid, notify: true, cancellationToken);
         var disconnected = await session.ServerInbox.WaitForPacketAsync(
             p => p.MessageId == (byte)MessageId.DisconnectionNotification, "ID_DISCONNECTION_NOTIFICATION", Timeout, cancellationToken);
         Assert.Equal(clientGuid, disconnected.PeerGuid);
+    }
+
+    /// <summary>
+    /// The MTU every combination negotiates on loopback: the first probe, MAXIMUM_MTU_SIZE (RakPeer.cpp:104, MTUSize.h:33),
+    /// fits.
+    /// </summary>
+    public const int LoopbackMtu = Protocol.Wire.Datagrams.DatagramLimits.MaximumMtuSize;
+
+    /// <summary>Decodes a packet the application received with the wire codec, failing the test if it does not parse.</summary>
+    public static T Decode<T>(ReadOnlyMemory<byte> packet)
+        where T : Protocol.Wire.Messages.IWireMessage<T>
+    {
+        var reader = new BitStreamReader(packet.Span);
+        Assert.True(T.TryRead(ref reader, out var value), $"{typeof(T).Name} did not decode from {Convert.ToHexStringLower(packet.Span)}.");
+        return value;
+    }
+
+    /// <summary>Polls GetConnectionState until the peer reports <paramref name="state"/> for <paramref name="target"/>.</summary>
+    public static async Task WaitForStateAsync(IPeerDriver driver, ulong target, string state, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(driver);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(Timeout);
+        var last = "";
+        try
+        {
+            while ((last = await driver.GetConnectionStateAsync(target, cancellationToken)) != state)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10), deadline.Token);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"{driver.Kind} peer did not reach {state} for {target} within {Timeout.TotalSeconds} s; it is {last}.");
+        }
+    }
+
+    /// <summary>Waits for ID_SND_RECEIPT_ACKED or ID_SND_RECEIPT_LOSS carrying <paramref name="receipt"/>.</summary>
+    public static Task<ReceivedPacket> WaitForReceiptAsync(PacketInbox inbox, MessageId id, uint receipt, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(inbox);
+        // ReliabilityLayer.cpp:2493-2494: the receipt serial is memcpy'd after the ID, so it is host order
+        // (little-endian on every platform we run), not BitStream big-endian.
+        return inbox.WaitForPacketAsync(
+            p => p.MessageId == (byte)id && p.Data.Length >= 5 && BinaryPrimitives.ReadUInt32LittleEndian(p.Data.Span[1..]) == receipt,
+            $"{MessageNames.Of((byte)id)} for receipt {receipt}",
+            Timeout,
+            cancellationToken);
     }
 
     public static async Task SplitPacketAsync(InteropSession session, CancellationToken cancellationToken)
@@ -100,21 +142,28 @@ public static class ScenarioFlows
         Assert.Equal(data, received.Data.ToArray());
     }
 
-    public static async Task ReliableOrderedUnderLossAsync(InteropSession session, FaultOptions faults, CancellationToken cancellationToken)
+    public static Task ReliableOrderedUnderLossAsync(InteropSession session, FaultOptions faults, CancellationToken cancellationToken) =>
+        ReliableOrderedUnderLossAsync(session, faults, count: 200, MessageSizeUnderLoss, cancellationToken);
+
+    /// <summary>
+    /// Connects, switches on <paramref name="faults"/> and sends <paramref name="count"/> RELIABLE_ORDERED messages of
+    /// <paramref name="messageSize"/> bytes over four channels; every one must arrive, in order per channel.
+    /// </summary>
+    public static async Task ReliableOrderedUnderLossAsync(InteropSession session, FaultOptions faults, int count, int messageSize, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(faults);
         var (serverGuid, _) = await session.ConnectAsync(cancellationToken);
         // Faults start after the handshake: this scenario is about ordered delivery, not connection setup.
         session.Proxy.Faults = faults;
 
-        const int count = 200;
         const int channels = 4;
         for (var i = 0; i < count; i++)
         {
             var channel = (byte)(i % channels);
             var sequence = (ushort)(i / channels);
             // Padding spreads the messages over many datagrams; tiny messages would share a handful and see little loss.
-            var data = new byte[MessageSizeUnderLoss];
+            var data = new byte[messageSize];
             data[0] = UserPacket;
             data[1] = channel;
             BinaryPrimitives.WriteUInt16BigEndian(data.AsSpan(2), sequence);
