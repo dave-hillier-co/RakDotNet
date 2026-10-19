@@ -149,6 +149,70 @@ public class EventStreamTests
     }
 
     [Fact]
+    public void Injecting_an_owned_event_consumes_it_without_a_copy()
+    {
+        using var peers = new ManualPeers();
+        peers.Client.SendLoopback([0x86, 1]);
+        peers.Client.SendLoopback([0x86, 2]);
+        peers.Client.Update();
+        Assert.True(peers.Client.Events.TryRead(out var first));
+        var owned = first.Detach();
+
+        peers.Client.Inject(owned, atHead: true);
+
+        Assert.False(owned.IsValid);
+        owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => peers.Client.Inject(owned));
+        var seen = new List<SeenEvent>();
+        ManualPeers.Drain(peers.Client, seen);
+        Assert.Equal([[0x86, 1], [0x86, 2]], seen.Select(e => e.Data));
+    }
+
+    [Fact]
+    public void Update_releases_the_borrowed_event()
+    {
+        using var peers = new ManualPeers();
+        peers.Client.SendLoopback([0x86]);
+        peers.Client.Update();
+        Assert.True(peers.Client.Events.TryRead(out var e));
+
+        peers.Client.Update();
+
+        Assert.True(Throws<ObjectDisposedException>(e, static e => e.Kind));
+    }
+
+    [Fact]
+    public void A_full_stream_stops_the_cycle_reading_datagrams_until_the_consumer_drains_it()
+    {
+        using var peers = new ManualPeers(client: o => o with { Limits = new PeerLimits { EventQueueCapacity = 4 } });
+        var connection = peers.Connect();
+        peers.Settle();
+        var toClient = peers.ServerEvents.Single(e => e.Kind == PeerEventKind.Connected).Connection!;
+
+        for (byte i = 0; i < 6; i++)
+            toClient.Send(new byte[] { 0x86, i }, Reliability.ReliableOrdered);
+        peers.Time.Advance(TimeSpan.FromMilliseconds(1));
+        peers.Server.Update();
+        for (var i = 0; i < 50 && peers.Client.Events.Count == 0; i++)
+        {
+            Thread.Sleep(1);
+            peers.Client.Update();
+        }
+        Assert.Equal(6, peers.Client.Events.Count);
+        for (byte i = 6; i < 12; i++)
+            toClient.Send(new byte[] { 0x86, i }, Reliability.ReliableOrdered);
+        peers.Time.Advance(TimeSpan.FromMilliseconds(1));
+        peers.Server.Update();
+        Thread.Sleep(20);
+        peers.Client.Update();
+        Assert.Equal(6, peers.Client.Events.Count);
+
+        peers.RunUntil(() => peers.ClientEvents.Count(e => e.Id == (MessageId)0x86) == 12, "all twelve messages");
+        Assert.Equal(Enumerable.Range(0, 12).Select(i => (byte)i), peers.ClientEvents.Where(e => e.Id == (MessageId)0x86).Select(e => e.Data[1]));
+        Assert.True(connection.IsConnected);
+    }
+
+    [Fact]
     public async Task ReadAllAsync_yields_owned_events()
     {
         await using var peer = RakPeer.Start(new RakPeerOptions { MaxConnections = 2, Bindings = [ManualPeers.Loopback] });
