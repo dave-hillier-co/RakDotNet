@@ -20,13 +20,24 @@ namespace RakDotNet.Protocol.Session;
 /// joined in split index order. And a second part with a split index already held, which only a broken or hostile
 /// sender could produce past the duplicate filter, is ignored here, where the C++ counts it towards completion.
 /// </para>
+/// <para>
+/// The C++ has no limits here. This class enforces the split limits of <see cref="SessionLimits"/>: parts per message,
+/// bytes per message, incomplete messages at once, and time without a new part. Each part's payload is copied, so a
+/// held part costs its own length (plus <see cref="SessionLimits.BufferedEntryOverheadBytes"/>), never its datagram.
+/// </para>
 /// </remarks>
 internal sealed class SplitMessageAssembler
 {
     // ID_DOWNLOAD_PROGRESS, then three host-order unsigned ints (ReliabilityLayer.cpp:3151-3160).
     private const int ProgressHeaderBytes = 1 + 3 * sizeof(uint);
 
+    private readonly SessionLimits _limits;
     private readonly Dictionary<ushort, PartialMessage> _messages = [];
+
+    public SplitMessageAssembler(SessionLimits? limits = null)
+    {
+        _limits = (limits ?? SessionLimits.Default).Validated();
+    }
 
     /// <summary>
     /// SetSplitMessageProgressInterval (ReliabilityLayer.cpp:2378-2381): every this many parts of an incomplete message,
@@ -37,53 +48,120 @@ internal sealed class SplitMessageAssembler
     /// <summary>Messages with some but not all parts received.</summary>
     public int IncompleteCount => _messages.Count;
 
+    /// <summary>The bytes held in parts of incomplete messages, each charged its payload plus the entry overhead.</summary>
+    public long BufferedBytes { get; private set; }
+
     /// <summary>
-    /// InsertIntoSplitPacketList followed by BuildPacketFromSplitPacketList for one part. Returns false when the part
-    /// was ignored as a repeat of a split index already held.
+    /// InsertIntoSplitPacketList followed by BuildPacketFromSplitPacketList for one part, after checking it against the
+    /// limits. Nothing is held when the result is not <see cref="SplitInsertResult.Accepted"/>.
     /// </summary>
     /// <param name="part">A part: a message with a <see cref="EncapsulatedMessage.Split"/> header.</param>
+    /// <param name="nowUs">The current time, which restarts the message's reassembly timeout.</param>
+    /// <param name="availableBytes">How many more bytes the connection may buffer.</param>
     /// <param name="progress">The ID_DOWNLOAD_PROGRESS message this part produced, if any.</param>
     /// <param name="complete">The whole message, when this was its last missing part.</param>
-    public bool TryInsert(EncapsulatedMessage part, out byte[]? progress, out ReceivedMessage? complete)
+    public SplitInsertResult TryInsert(
+        EncapsulatedMessage part,
+        long nowUs,
+        long availableBytes,
+        out byte[]? progress,
+        out ReceivedMessage? complete
+    )
     {
         ArgumentNullException.ThrowIfNull(part);
         var split = part.Split ?? throw new ArgumentException("The message is not a split part.", nameof(part));
         progress = null;
         complete = null;
 
-        if (!_messages.TryGetValue(split.Id, out var message))
+        if (split.Count > (uint)_limits.MaxSplitCount)
+            return SplitInsertResult.SplitCountExceeded;
+
+        var isNew = !_messages.TryGetValue(split.Id, out var message);
+        if (isNew)
+        {
+            if (_messages.Count >= _limits.MaxConcurrentSplits)
+                return SplitInsertResult.TooManyConcurrentSplits;
+        }
+        else if (message!.Parts.ContainsKey(split.Index))
+        {
+            return SplitInsertResult.Ignored;
+        }
+
+        var length = part.Payload.Length;
+        // Every part but the last fills a whole block, so for any RakNet sender (count - 1) blocks are less than the
+        // message: a part that is not the last and implies more than the limit is refused before the rest is buffered.
+        var impliedBytes = split.Index + 1 < split.Count ? (long)(split.Count - 1) * length : 0;
+        var messageBytes = (isNew ? 0 : message!.Bytes) + length;
+        if (messageBytes > _limits.MaxSplitMessageBytes || impliedBytes > _limits.MaxSplitMessageBytes)
+            return SplitInsertResult.SplitMessageTooLarge;
+
+        var cost = (long)length + SessionLimits.BufferedEntryOverheadBytes;
+        if (cost > availableBytes)
+            return SplitInsertResult.ReceiveBufferFull;
+
+        if (isNew)
         {
             message = new PartialMessage(part);
             _messages.Add(split.Id, message);
         }
-        if (!message.Parts.TryAdd(split.Index, part))
-            return false;
+        var held = new HeldPart(part.Payload.ToArray(), part.PayloadBitLength);
+        message!.Parts.Add(split.Index, held);
+        message.Bytes = messageBytes;
+        message.Cost += cost;
+        message.LastArrivalUs = nowUs;
+        BufferedBytes += cost;
         if (split.Index == 0)
-            message.FirstPart = part;
+        {
+            message.FirstPart = held;
+            message.FirstPartCount = split.Count;
+        }
 
         var arrived = message.Parts.Count;
         // ReliabilityLayer.cpp:3135-3138.
         if (
             ProgressInterval != 0
             && message.FirstPart is { } first
-            && arrived != first.Split!.Value.Count
+            && arrived != message.FirstPartCount
             && arrived % ProgressInterval == 0
         )
-            progress = Progress((uint)arrived, split.Count, first);
+            progress = Progress((uint)arrived, split.Count, first.Data);
 
         // ReliabilityLayer.cpp:3241: the count of the first part to arrive decides.
-        if (arrived == message.FirstArrived.Split!.Value.Count)
+        if (arrived == message.Count)
         {
-            _messages.Remove(split.Id);
+            Remove(split.Id, message);
             complete = Build(message);
         }
-        return true;
+        return SplitInsertResult.Accepted;
+    }
+
+    /// <summary>True when an incomplete message has gone longer than the reassembly timeout without a new part.</summary>
+    public bool HasTimedOut(long nowUs)
+    {
+        foreach (var message in _messages.Values)
+        {
+            if (nowUs - message.LastArrivalUs > _limits.SplitReassemblyTimeoutUs)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Releases every incomplete message.</summary>
+    public void Clear()
+    {
+        _messages.Clear();
+        BufferedBytes = 0;
+    }
+
+    private void Remove(ushort id, PartialMessage message)
+    {
+        _messages.Remove(id);
+        BufferedBytes -= message.Cost;
     }
 
     // ReliabilityLayer.cpp:3140-3171.
-    private static byte[] Progress(uint arrived, uint count, EncapsulatedMessage first)
+    private static byte[] Progress(uint arrived, uint count, byte[] firstBytes)
     {
-        var firstBytes = first.Payload.Span;
         var progress = new byte[ProgressHeaderBytes + firstBytes.Length];
         progress[0] = (byte)MessageId.DownloadProgress;
         BinaryPrimitives.WriteUInt32LittleEndian(progress.AsSpan(1), arrived);
@@ -104,8 +182,8 @@ internal sealed class SplitMessageAssembler
         foreach (var index in indexes)
         {
             var part = message.Parts[index];
-            bufferLength = Math.Max(bufferLength, ((bitLength + 7) >> 3) + part.Payload.Length);
-            bitLength += part.PayloadBitLength;
+            bufferLength = Math.Max(bufferLength, ((bitLength + 7) >> 3) + part.Data.Length);
+            bitLength += part.BitLength;
         }
         if (bitLength > int.MaxValue || bufferLength > Array.MaxLength)
             return null;
@@ -115,24 +193,65 @@ internal sealed class SplitMessageAssembler
         foreach (var index in indexes)
         {
             var part = message.Parts[index];
-            part.Payload.Span.CopyTo(data.AsSpan((int)((offset + 7) >> 3)));
-            offset += part.PayloadBitLength;
+            part.Data.CopyTo(data.AsSpan((int)((offset + 7) >> 3)));
+            offset += part.BitLength;
         }
 
-        var header = message.FirstArrived;
-        var payload = data.AsMemory(0, (int)((bitLength + 7) >> 3));
+        var header = message.Header;
+        var byteLength = (int)((bitLength + 7) >> 3);
+        // The payload owns its array whenever the parts tile it, so ordering buffers can hold it without a copy.
+        ReadOnlyMemory<byte> payload = byteLength == data.Length ? data : data.AsMemory(0, byteLength);
         return new ReceivedMessage(header.Reliability, payload, (int)bitLength, header.SequencingIndex, header.OrderingIndex, header.OrderingChannel);
     }
+
+    private readonly record struct HeldPart(byte[] Data, int BitLength);
 
     /// <summary>A SplitPacketChannel.</summary>
     private sealed class PartialMessage(EncapsulatedMessage firstArrived)
     {
-        /// <summary>splitPacketList[0]: the part whose header the rebuilt message takes.</summary>
-        public EncapsulatedMessage FirstArrived { get; } = firstArrived;
+        /// <summary>splitPacketList[0]'s header: the fields the rebuilt message takes.</summary>
+        public (Reliability Reliability, UInt24 SequencingIndex, UInt24 OrderingIndex, byte OrderingChannel) Header { get; } =
+            (firstArrived.Reliability, firstArrived.SequencingIndex, firstArrived.OrderingIndex, firstArrived.OrderingChannel);
+
+        /// <summary>The part count of the first part to arrive, which decides when the message is complete.</summary>
+        public uint Count { get; } = firstArrived.Split!.Value.Count;
 
         /// <summary>firstPacket: split index 0, once it has arrived; progress reports carry it.</summary>
-        public EncapsulatedMessage? FirstPart { get; set; }
+        public HeldPart? FirstPart { get; set; }
 
-        public Dictionary<uint, EncapsulatedMessage> Parts { get; } = [];
+        /// <summary>firstPacket->splitPacketCount.</summary>
+        public uint FirstPartCount { get; set; }
+
+        public Dictionary<uint, HeldPart> Parts { get; } = [];
+
+        /// <summary>The payload bytes held.</summary>
+        public long Bytes { get; set; }
+
+        /// <summary>The bytes charged to the connection's receive buffer.</summary>
+        public long Cost { get; set; }
+
+        public long LastArrivalUs { get; set; }
     }
+}
+
+/// <summary>What <see cref="SplitMessageAssembler.TryInsert"/> did with a part.</summary>
+internal enum SplitInsertResult
+{
+    /// <summary>The part is held, or completed its message.</summary>
+    Accepted,
+
+    /// <summary>A repeat of a split index already held; nothing changed.</summary>
+    Ignored,
+
+    /// <summary>The part declared more parts than <see cref="SessionLimits.MaxSplitCount"/>.</summary>
+    SplitCountExceeded,
+
+    /// <summary>The message would grow, or declares it will grow, past <see cref="SessionLimits.MaxSplitMessageBytes"/>.</summary>
+    SplitMessageTooLarge,
+
+    /// <summary>The part starts a new message with <see cref="SessionLimits.MaxConcurrentSplits"/> already incomplete.</summary>
+    TooManyConcurrentSplits,
+
+    /// <summary>Holding the part would take the connection past its receive buffer limit.</summary>
+    ReceiveBufferFull,
 }

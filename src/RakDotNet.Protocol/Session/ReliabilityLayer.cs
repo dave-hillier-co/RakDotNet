@@ -34,6 +34,14 @@ namespace RakDotNet.Protocol.Session;
 /// RakNet forces. Received parts are held by <see cref="SplitMessageAssembler"/> until the message is whole; it then
 /// passes through ordering like any other message, and acknowledgements go out at once.
 /// </para>
+/// <para>
+/// Receiving is bounded by <see cref="SessionLimits"/>, which RakNet does not have: parts per split message, bytes per
+/// split message, incomplete split messages at once, time without a new part, messages waiting per ordering channel,
+/// and the bytes all waiting messages and parts hold together. Exceeding one closes the connection
+/// (<see cref="ConnectionDied"/> with its <see cref="ConnectionDeathCause"/>), except an UNRELIABLE_SEQUENCED message
+/// that finds no room to wait, which is dropped. Pending NAK ranges stop at
+/// <see cref="SessionLimits.MaxPendingNakRanges"/>. A closed layer ignores everything it receives.
+/// </para>
 /// </remarks>
 internal sealed class ReliabilityLayer
 {
@@ -60,6 +68,7 @@ internal sealed class ReliabilityLayer
     private static readonly UInt24 UnassignedMessageNumber = UInt24.MaxValue;
 
     private readonly int _mtu;
+    private readonly SessionLimits _limits;
     private readonly long _connectionStartTimeUs;
     private readonly SlidingWindow _window;
 
@@ -91,8 +100,8 @@ internal sealed class ReliabilityLayer
     private readonly RangeList _acknowledgements = new();
     private readonly RangeList _naks = new();
     private readonly ReceivedMessageNumbers _receivedMessageNumbers = new();
-    private readonly OrderingChannels _orderingChannels = new();
-    private readonly SplitMessageAssembler _splitMessages = new();
+    private readonly OrderingChannels _orderingChannels;
+    private readonly SplitMessageAssembler _splitMessages;
     private readonly List<ReceivedMessage> _released = [];
     private long _timeLastDatagramArrivedMs;
 
@@ -113,11 +122,15 @@ internal sealed class ReliabilityLayer
     /// <summary>ReliabilityLayer::Reset(true, MTUSize, false) (ReliabilityLayer.cpp:345-363).</summary>
     /// <param name="mtu">The negotiated MTU including the 28-byte IP and UDP header.</param>
     /// <param name="nowUs">The current time.</param>
-    public ReliabilityLayer(int mtu, long nowUs)
+    /// <param name="limits">The receive limits; <see cref="SessionLimits.Default"/> when null.</param>
+    public ReliabilityLayer(int mtu, long nowUs, SessionLimits? limits = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(mtu, DatagramLimits.MinimumMtuSize);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(mtu, DatagramLimits.MaximumMtuSize);
         _mtu = mtu;
+        _limits = (limits ?? SessionLimits.Default).Validated();
+        _orderingChannels = new OrderingChannels(_limits.MaxOrderingBufferMessagesPerChannel);
+        _splitMessages = new SplitMessageAssembler(_limits);
         _window = new SlidingWindow(mtu - DatagramLimits.UdpHeaderBytes);
         _connectionStartTimeUs = nowUs;
         _lastUpdateUs = nowUs;
@@ -159,6 +172,15 @@ internal sealed class ReliabilityLayer
 
     /// <summary>Split messages with some but not all of their parts received.</summary>
     public int IncompleteSplitMessages => _splitMessages.IncompleteCount;
+
+    /// <summary>
+    /// The bytes held in incomplete split messages and ordering buffers, as charged against
+    /// <see cref="SessionLimits.MaxReceiveBufferBytes"/>.
+    /// </summary>
+    public long BufferedReceiveBytes => _splitMessages.BufferedBytes + _orderingChannels.BufferedBytes;
+
+    /// <summary>Disjoint ranges of datagram numbers waiting to be NAKed.</summary>
+    public int PendingNakRanges => _naks.Count;
 
     public int Mtu => _mtu;
 
@@ -303,6 +325,9 @@ internal sealed class ReliabilityLayer
     /// </summary>
     public bool Receive(ReadOnlySpan<byte> datagram, long nowUs)
     {
+        if (IsDead)
+            return true; // Closed: nothing more is processed.
+
         _metrics[(int)SessionMetric.ActualBytesReceived].Push(nowUs, (ulong)datagram.Length);
 
         // A length of 1 or 2 is a connection request resend that is ignored (ReliabilityLayer.cpp:653).
@@ -347,6 +372,12 @@ internal sealed class ReliabilityLayer
         if (IsDead)
             return;
 
+        if (_splitMessages.HasTimedOut(nowUs))
+        {
+            Die(ConnectionDeathCause.SplitReassemblyTimedOut);
+            return;
+        }
+
         // "This line is necessary because the timer isn't accurate" (ReliabilityLayer.cpp:1727-1733).
         if (nowUs <= _lastUpdateUs)
         {
@@ -360,7 +391,7 @@ internal sealed class ReliabilityLayer
 
         if (MessagesInResendBuffer != 0 && AckTimeout(nowUs / 1000))
         {
-            Die();
+            Die(ConnectionDeathCause.AckTimeout);
             return;
         }
 
@@ -401,7 +432,7 @@ internal sealed class ReliabilityLayer
     public bool AckTimeout(long nowMs) => nowMs - _timeLastDatagramArrivedMs > TimeoutMs;
 
     /// <summary>KillConnection: the connection is dead from now on.</summary>
-    public void Kill() => Die();
+    public void Kill() => Die(ConnectionDeathCause.Killed);
 
     /// <summary>GetStatistics (ReliabilityLayer.cpp:3378-3415).</summary>
     public SessionStatistics GetStatistics(long nowUs)
@@ -448,12 +479,15 @@ internal sealed class ReliabilityLayer
         };
     }
 
-    private void Die()
+    private void Die(ConnectionDeathCause cause)
     {
         if (IsDead)
             return;
         IsDead = true;
-        _events.Enqueue(new ConnectionDied());
+        // Nothing buffered can be delivered any more.
+        _splitMessages.Clear();
+        _orderingChannels.Clear();
+        _events.Enqueue(new ConnectionDied(cause));
     }
 
     // ReliabilityLayer.cpp:1745-1793. Messages are culled from the front of the unreliable list, which is in send
@@ -487,14 +521,15 @@ internal sealed class ReliabilityLayer
             return;
 
         // NAK every datagram number jumped over (ReliabilityLayer.cpp:871-877).
-        for (var offset = skippedMessageCount; offset > 0; offset--)
+        // Past the limit, numbers are left to the retransmission timeout.
+        for (var offset = skippedMessageCount; offset > 0 && _naks.Count < SessionLimits.MaxPendingNakRanges; offset--)
             _naks.Insert(header.DatagramNumber - offset);
 
         // Every data datagram is acknowledged, reliable or not (ReliabilityLayer.cpp:880-886).
         _acknowledgements.Insert(header.DatagramNumber);
 
         var messages = new EncapsulatedMessageReader(body);
-        while (messages.TryReadNext(out var message))
+        while (!IsDead && messages.TryReadNext(out var message))
             ReceiveMessage(message, nowUs);
     }
 
@@ -516,10 +551,26 @@ internal sealed class ReliabilityLayer
         else
         {
             // ReliabilityLayer.cpp:1221-1242.
-            if (!_splitMessages.TryInsert(message, out var progress, out var complete))
+            var available = _limits.MaxReceiveBufferBytes - BufferedReceiveBytes;
+            switch (_splitMessages.TryInsert(message, nowUs, available, out var progress, out var complete))
             {
-                _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
-                return;
+                case SplitInsertResult.Accepted:
+                    break;
+                case SplitInsertResult.Ignored:
+                    _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
+                    return;
+                case SplitInsertResult.SplitCountExceeded:
+                    Die(ConnectionDeathCause.SplitCountExceeded);
+                    return;
+                case SplitInsertResult.SplitMessageTooLarge:
+                    Die(ConnectionDeathCause.SplitMessageTooLarge);
+                    return;
+                case SplitInsertResult.TooManyConcurrentSplits:
+                    Die(ConnectionDeathCause.TooManyConcurrentSplits);
+                    return;
+                default:
+                    Die(ConnectionDeathCause.ReceiveBufferFull);
+                    return;
             }
             // Progress goes straight to the output queue, ahead of ordering (ReliabilityLayer.cpp:3171).
             if (progress is not null)
@@ -532,7 +583,18 @@ internal sealed class ReliabilityLayer
         }
 
         _released.Clear();
-        _orderingChannels.Receive(received, _released);
+        var ordering = _orderingChannels.Receive(received, _released, _limits.MaxReceiveBufferBytes - BufferedReceiveBytes);
+        if (ordering != OrderingResult.Accepted)
+        {
+            // An unreliable message may be lost anyway; a reliable one was acknowledged with its datagram and cannot be.
+            if (received.Reliability == Reliability.UnreliableSequenced)
+            {
+                _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(received.BitLength));
+                return;
+            }
+            Die(ordering == OrderingResult.ChannelFull ? ConnectionDeathCause.OrderingBufferFull : ConnectionDeathCause.ReceiveBufferFull);
+            return;
+        }
         foreach (var released in _released)
         {
             // Counted as each message reaches the output queue (ReliabilityLayer.cpp:1346, 1412, 1481).
