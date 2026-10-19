@@ -38,6 +38,6 @@ Each concept has one definition. RakNet enums and wire types (`Reliability`, `Pr
 
 - xUnit v3. Test names are sentences with underscores.
 - Classic TDD: real collaborators, no mocking frameworks. Fakes are hand-written and only stand in for I/O or time.
-- Expected bytes either come from a golden vector or are derived from the C++ source, with a comment saying which.
+- Expected bytes come from a golden vector, from known answers printed by native RakNet code (`tools/bitstream-vectors` for the BitStream encodings), or are derived from the C++ source, with a comment saying which.
 - Round-trip tests only prove nothing is lost. Every codec also needs tests asserting decoded field values against known inputs: exact bytes derived from the C++, or the peers' values recorded in a golden vector.
 - Time is injected (`TimeProvider`, or an explicit `long nowUs` parameter in sans-IO code), never read from the system clock in layers 0 to 2. Sans-IO time is in microseconds because RakNet's congestion control works in microseconds (`CCTimeType`); `RakNet::Time` values written on the wire are that time in milliseconds.
