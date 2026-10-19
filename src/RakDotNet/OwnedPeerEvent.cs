@@ -8,13 +8,29 @@ namespace RakDotNet;
 /// </remarks>
 public struct OwnedPeerEvent : IDisposable
 {
-    public readonly bool IsValid => throw new NotImplementedException();
+    private readonly EventSegment? _segment;
+    private readonly int _generation;
+
+    internal OwnedPeerEvent(EventSegment segment, int generation)
+    {
+        _segment = segment;
+        _generation = generation;
+    }
+
+    public readonly bool IsValid => _segment is not null && Volatile.Read(ref _segment.Generation) == _generation;
 
     /// <summary>A view, valid while owned; throws <see cref="ObjectDisposedException"/> after.</summary>
-    public readonly PeerEvent Event => throw new NotImplementedException();
+    public readonly PeerEvent Event => new(Segment, _generation);
 
     /// <summary>The same bytes as <see cref="PeerEvent.Data"/>, usable across <c>await</c>.</summary>
-    public readonly ReadOnlyMemory<byte> Data => throw new NotImplementedException();
+    public readonly ReadOnlyMemory<byte> Data => Segment.Memory;
 
-    public void Dispose() => throw new NotImplementedException();
+    internal readonly EventSegment? Handle => _segment;
+
+    internal readonly int HandleGeneration => _generation;
+
+    public readonly void Dispose() => _segment?.TryRelease(_generation);
+
+    private readonly EventSegment Segment =>
+        IsValid ? _segment! : throw new ObjectDisposedException(nameof(OwnedPeerEvent), "The owned event was disposed or consumed.");
 }

@@ -20,13 +20,34 @@ namespace RakDotNet;
 /// </remarks>
 public readonly ref struct OutgoingMessage
 {
-    public OutgoingMessage(ReadOnlySpan<byte> data) => throw new NotImplementedException();
+    private readonly ReadOnlySpan<byte> _data;
+    private readonly ReadOnlySequence<byte> _parts;
+    private readonly bool _isSequence;
+    private readonly int _bitLength;
+
+    public OutgoingMessage(ReadOnlySpan<byte> data)
+    {
+        _data = data;
+        _bitLength = checked(data.Length * 8);
+    }
 
     /// <summary>A message whose final byte is partial, as Send(BitStream*) sends it.</summary>
-    public OutgoingMessage(ReadOnlySpan<byte> data, int bitLength) => throw new NotImplementedException();
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="bitLength"/> is negative or longer than <paramref name="data"/>.</exception>
+    public OutgoingMessage(ReadOnlySpan<byte> data, int bitLength)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bitLength);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(bitLength, data.Length * 8);
+        _data = data[..((bitLength + 7) / 8)];
+        _bitLength = bitLength;
+    }
 
     /// <summary>SendList: the parts are concatenated into the outgoing segment without an intermediate copy.</summary>
-    public OutgoingMessage(in ReadOnlySequence<byte> parts) => throw new NotImplementedException();
+    public OutgoingMessage(in ReadOnlySequence<byte> parts)
+    {
+        _parts = parts;
+        _isSequence = true;
+        _bitLength = checked((int)parts.Length * 8);
+    }
 
     public static implicit operator OutgoingMessage(ReadOnlySpan<byte> data) => new(data);
 
@@ -42,5 +63,16 @@ public readonly ref struct OutgoingMessage
         return new(stream.Written, stream.BitsWritten);
     }
 
-    public int BitLength => throw new NotImplementedException();
+    public int BitLength => _bitLength;
+
+    internal int ByteLength => (_bitLength + 7) / 8;
+
+    /// <summary>Copies the message into <paramref name="destination"/>, which holds at least <see cref="ByteLength"/> bytes.</summary>
+    internal void CopyTo(Span<byte> destination)
+    {
+        if (_isSequence)
+            _parts.CopyTo(destination);
+        else
+            _data.CopyTo(destination);
+    }
 }

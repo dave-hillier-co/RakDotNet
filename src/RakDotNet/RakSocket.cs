@@ -10,22 +10,36 @@ namespace RakDotNet;
 /// </remarks>
 public sealed class RakSocket
 {
-    private RakSocket() { }
+    private readonly IDatagramTransport _transport;
+    private volatile bool _isOpen = true;
+
+    internal RakSocket(int index, IDatagramTransport transport)
+    {
+        Index = index;
+        _transport = transport;
+        LocalAddress = transport.LocalAddress;
+    }
 
     /// <summary>The binding's index in <see cref="RakPeerOptions.Bindings"/>.</summary>
-    public int Index => throw new NotImplementedException();
+    public int Index { get; }
 
     /// <summary>GetMyBoundAddress(index)</summary>
-    public SystemAddress LocalAddress => throw new NotImplementedException();
+    public SystemAddress LocalAddress { get; }
 
-    public AddressFamily AddressFamily => throw new NotImplementedException();
+    public AddressFamily AddressFamily => LocalAddress.AddressFamily;
 
     /// <summary>False after shutdown.</summary>
-    public bool IsOpen => throw new NotImplementedException();
+    public bool IsOpen => _isOpen;
 
     /// <summary>Sends a raw datagram, without RakNet framing.</summary>
-    public bool SendTo(ReadOnlySpan<byte> datagram, SystemAddress remote) => throw new NotImplementedException();
+    public bool SendTo(ReadOnlySpan<byte> datagram, SystemAddress remote) => _isOpen && _transport.TrySend(datagram, remote);
 
     /// <summary>Sends a raw datagram with a time-to-live, as SendTTL does.</summary>
-    public bool SendTo(ReadOnlySpan<byte> datagram, SystemAddress remote, int ttl) => throw new NotImplementedException();
+    public bool SendTo(ReadOnlySpan<byte> datagram, SystemAddress remote, int ttl)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(ttl);
+        return _isOpen && _transport.TrySend(datagram, remote, ttl);
+    }
+
+    internal void Close() => _isOpen = false;
 }

@@ -778,4 +778,23 @@ internal sealed class PeerCore
         var reader = new BitStreamReader(data);
         return T.TryRead(ref reader, out value);
     }
+
+    /// <summary>
+    /// RakPeer::CancelConnectionAttempt (RakPeer.cpp:1686-1710): forgets a queued attempt without an event. An attempt
+    /// that already has a slot is unaffected.
+    /// </summary>
+    public void CancelConnectionAttempt(IPEndPoint remote)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        var attempt = FindAttempt(remote);
+        if (attempt is not null)
+            _attempts.Remove(attempt);
+    }
+
+    /// <summary>The slot of the active system with <paramref name="guid"/>, read by the layer above for its queries.</summary>
+    public bool TryGetRemoteSystem(ulong guid, [NotNullWhen(true)] out RemoteSystem? system)
+    {
+        system = FindActive(guid);
+        return system is not null;
+    }
 }
