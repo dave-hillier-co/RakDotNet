@@ -45,7 +45,7 @@ Usage is shown by the projects in [samples/](../samples): a server loop ([RakDot
 
 ## 4. Event ordering
 
-The stream is `peer.Events`, RakNet's `Receive()`. Each entry is a borrowed `PeerEvent` whose `Data` holds exactly RakNet's `Packet::data`, rewrites included. Internal traffic (connected pings, unconnected pings, handshake messages, `ID_DETECT_LOST_CONNECTIONS`) never reaches it.
+The stream is `peer.Events`, RakNet's `Receive()`. Each entry is a borrowed `PeerEvent` whose `Data` holds exactly RakNet's `Packet::data`, rewrites included. Internal traffic (connected pings, handshake messages, `ID_DETECT_LOST_CONNECTIONS`) never reaches it. An unconnected ping this peer answers does, as RakNet queues it: a one-byte `Message` holding `ID_UNCONNECTED_PING` or `ID_UNCONNECTED_PING_OPEN_CONNECTIONS`, from the sender's address and GUID (`RakPeer.cpp:4672-4678`).
 
 - Entries are delivered in the order the I/O cycle produced them, which is RakNet's `packetReturnQueue` order. Per-channel ordering and sequencing hold within the stream.
 - `Connected` precedes that connection's first message. A connection's last delivered message precedes its `Disconnected`, and nothing for that connection follows it.
@@ -139,7 +139,7 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `Send(data, length, priority, reliability, channel, target, broadcast, forceReceipt)` | `peer.Send(message, target, reliability, priority, channel, forceReceipt)` or `connection.Send(...)`; `broadcast = true` → `peer.Broadcast(..., except: target)` |
 | `Send(BitStream*, ...)` | the same calls with an `OutgoingMessage` from `BitStream` or `BitStreamWriter` (bit-exact length), or `Send<TState>` with a `MessageWriter` |
 | `SendList` | `new OutgoingMessage(in ReadOnlySequence<byte>)` |
-| `SendLoopback` | `peer.SendLoopback(span)`; arrives as `Message` with `IsLocal` |
+| `SendLoopback` | `peer.SendLoopback(span)`; arrives as `Message` from this peer's GUID, with `IsLocal` clear as RakNet's `AllocPacket` leaves it (`RakPeer.cpp:165`) |
 | `Receive` | `peer.Events.TryRead(out PeerEvent)` (after `peer.Update()` in Manual mode); `WaitToReadAsync`; `ReadAllAsync` |
 | `DeallocatePacket` | automatic at the next read; `OwnedPeerEvent.Dispose` for detached events |
 | `GetMaximumNumberOfPeers` | `peer.MaxConnections` |
@@ -168,7 +168,7 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `GetClientPublicKeyFromSystemAddress` | `connection.RemoteIdentityKey` |
 | `SetTimeoutTime(ms, UNASSIGNED)` | `peer.DefaultTimeout` (default and every live connection) |
 | `SetTimeoutTime(ms, target)` / `GetTimeoutTime(target)` | `connection.Timeout` |
-| `GetMTUSize(target)` | `connection.Mtu`; `RakNetConstants.MaximumMtuSize` for `UNASSIGNED` |
+| `GetMTUSize(target)` | `connection.Mtu`; for `UNASSIGNED` RakNet's `defaultMTUSize`, the smallest of `RakNetConstants.MtuSizes` (`RakPeer.cpp:206`, `2580`) |
 | `GetNumberOfAddresses` / `GetLocalIP(i)` | `peer.LocalAddresses.Count` / `peer.LocalAddresses[i]` |
 | `IsLocalIP` | `peer.IsLocalAddress(IPAddress)` |
 | `AllowConnectionResponseIPMigration` | `peer.AllowConnectionResponseIpMigration` |

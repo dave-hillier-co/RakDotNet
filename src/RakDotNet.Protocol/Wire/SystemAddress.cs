@@ -17,6 +17,8 @@ namespace RakDotNet.Protocol.Wire;
 public readonly struct SystemAddress : IEquatable<SystemAddress>, ISpanFormattable, ISpanParsable<SystemAddress>
 {
     private const string UnassignedText = "UNASSIGNED_SYSTEM_ADDRESS";
+    private const int Ipv4SocketAddressSize = 16;
+    private const int Ipv6SocketAddressSize = 28;
 
     // Big-endian address bytes as a number; IPv4 occupies the low 32 bits.
     private readonly UInt128 _address;
@@ -50,6 +52,21 @@ public readonly struct SystemAddress : IEquatable<SystemAddress>, ISpanFormattab
         _port = (ushort)port;
     }
 
+    /// <summary>An IPv4 address from its big-endian value.</summary>
+    internal SystemAddress(uint ipv4, ushort port)
+    {
+        _address = ipv4;
+        _port = port;
+    }
+
+    private SystemAddress(UInt128 ipv6, ushort port, uint scopeId)
+    {
+        _address = ipv6;
+        _port = port;
+        _isIPv6 = true;
+        _scopeId = scopeId;
+    }
+
     /// <summary>UNASSIGNED_SYSTEM_ADDRESS: IPv4 0.0.0.0, port 0 (RakNetTypes.h:363, RakNetTypes.cpp:378-385).</summary>
     public static SystemAddress Unassigned => default;
 
@@ -69,10 +86,46 @@ public readonly struct SystemAddress : IEquatable<SystemAddress>, ISpanFormattab
     /// <summary>
     /// Copies the address out of a <see cref="SocketAddress"/> filled by <c>Socket.ReceiveFrom</c>, without allocating.
     /// </summary>
-    public static SystemAddress FromSocketAddress(SocketAddress address) => throw new NotImplementedException();
+    /// <exception cref="ArgumentException">The address is neither IPv4 nor IPv6.</exception>
+    public static SystemAddress FromSocketAddress(SocketAddress address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        // The sockaddr layouts every platform shares: the port at 2, then sin_addr at 4, or sin6_flowinfo at 4,
+        // sin6_addr at 8 and sin6_scope_id at 24. The family field is read by the runtime, as its encoding differs.
+        var buffer = address.Buffer.Span;
+        var port = BinaryPrimitives.ReadUInt16BigEndian(buffer[2..]);
+        return address.Family switch
+        {
+            AddressFamily.InterNetwork => new SystemAddress(BinaryPrimitives.ReadUInt32BigEndian(buffer[4..]), port),
+            AddressFamily.InterNetworkV6 => new SystemAddress(
+                BinaryPrimitives.ReadUInt128BigEndian(buffer[8..]), port, BinaryPrimitives.ReadUInt32LittleEndian(buffer[24..])),
+            _ => throw new ArgumentException($"Address family {address.Family} is not supported.", nameof(address)),
+        };
+    }
 
     /// <summary>Writes this address into a <see cref="SocketAddress"/> for <c>Socket.SendTo</c>, without allocating.</summary>
-    public void CopyTo(SocketAddress destination) => throw new NotImplementedException();
+    /// <exception cref="ArgumentException"><paramref name="destination"/> is of another address family.</exception>
+    public void CopyTo(SocketAddress destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        if (destination.Family != AddressFamily)
+            throw new ArgumentException($"The destination is {destination.Family}, not {AddressFamily}.", nameof(destination));
+        var buffer = destination.Buffer.Span;
+        BinaryPrimitives.WriteUInt16BigEndian(buffer[2..], _port);
+        if (_isIPv6)
+        {
+            destination.Size = Ipv6SocketAddressSize;
+            buffer[4..8].Clear();
+            BinaryPrimitives.WriteUInt128BigEndian(buffer[8..], _address);
+            BinaryPrimitives.WriteUInt32LittleEndian(buffer[24..], _scopeId);
+        }
+        else
+        {
+            destination.Size = Ipv4SocketAddressSize;
+            BinaryPrimitives.WriteUInt32BigEndian(buffer[4..], (uint)_address);
+            buffer[8..Ipv4SocketAddressSize].Clear();
+        }
+    }
 
     public static implicit operator SystemAddress(IPEndPoint endPoint)
     {

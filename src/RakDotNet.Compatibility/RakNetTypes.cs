@@ -44,25 +44,61 @@ public readonly record struct SocketDescriptor(ushort Port, string? HostAddress 
 /// </summary>
 public sealed class Packet : IDisposable
 {
-    private Packet() { }
+    private readonly SystemAddress _systemAddress;
+    private readonly RakNetGuid _rakNetGuid;
+    private readonly int _length;
+    private readonly int _bitSize;
+    private readonly bool _wasGeneratedLocally;
+    private OwnedPeerEvent _owned;
+    private int _released;
+
+    internal Packet(OwnedPeerEvent owned)
+    {
+        _owned = owned;
+        var e = owned.Event;
+        _systemAddress = e.Address;
+        _rakNetGuid = e.RakNetGuid;
+        _length = e.Data.Length;
+        _bitSize = e.BitLength;
+        _wasGeneratedLocally = e.IsLocal;
+    }
 
     /// <summary>Packet::systemAddress</summary>
-    public SystemAddress SystemAddress => throw new NotImplementedException();
+    public SystemAddress SystemAddress => Live(_systemAddress);
 
     /// <summary>Packet::guid</summary>
-    public RakNetGuid RakNetGuid => throw new NotImplementedException();
+    public RakNetGuid RakNetGuid => Live(_rakNetGuid);
 
     /// <summary>Packet::length</summary>
-    public int Length => throw new NotImplementedException();
+    public int Length => Live(_length);
 
     /// <summary>Packet::bitSize</summary>
-    public int BitSize => throw new NotImplementedException();
+    public int BitSize => Live(_bitSize);
 
     /// <summary>Packet::data</summary>
-    public ReadOnlyMemory<byte> Data => throw new NotImplementedException();
+    public ReadOnlyMemory<byte> Data => Live(_owned.Data);
 
     /// <summary>Packet::wasGeneratedLocally</summary>
-    public bool WasGeneratedLocally => throw new NotImplementedException();
+    public bool WasGeneratedLocally => Live(_wasGeneratedLocally);
 
-    public void Dispose() => throw new NotImplementedException();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _released, 1) == 0)
+            _owned.Dispose();
+    }
+
+    /// <summary>Hands the owned event over (PushBackPacket); the packet is deallocated without releasing it.</summary>
+    internal OwnedPeerEvent Take()
+    {
+        ObjectDisposedException.ThrowIf(Interlocked.Exchange(ref _released, 1) != 0, this);
+        var owned = _owned;
+        _owned = default;
+        return owned;
+    }
+
+    private T Live<T>(T value)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _released) != 0, this);
+        return value;
+    }
 }

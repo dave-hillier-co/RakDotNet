@@ -237,7 +237,7 @@ internal sealed class PeerCore
     }
 
     // RakPeer.cpp:2157-2169.
-    private static int AveragePing(RemoteSystem? system)
+    internal static int AveragePing(RemoteSystem? system)
     {
         if (system is null)
             return -1;
@@ -253,13 +253,13 @@ internal sealed class PeerCore
     }
 
     // RakPeer.cpp:2187-2190.
-    private static int LastPing(RemoteSystem? system) =>
+    internal static int LastPing(RemoteSystem? system) =>
         system is null
             ? -1
             : system.PingHistory[system.PingWriteIndex == 0 ? RemoteSystem.PingHistoryLength - 1 : system.PingWriteIndex - 1].PingTime;
 
     // GetClockDifferentialInt, RakPeer.cpp:2238-2258.
-    private static long ClockDifferential(RemoteSystem? system)
+    internal static long ClockDifferential(RemoteSystem? system)
     {
         if (system is null)
             return 0;
@@ -1183,5 +1183,18 @@ internal sealed class PeerCore
     {
         var reader = new BitStreamReader(data);
         return T.TryRead(ref reader, out value);
+    }
+
+    /// <summary>
+    /// The state of a slot the layer above already holds, without a lookup; <see cref="ConnectionState.IsDisconnected"/>
+    /// once the slot is deactivated.
+    /// </summary>
+    public static ConnectionState GetConnectionState(RemoteSystem system) => StateOf(system);
+
+    /// <summary>The slot of the active system with <paramref name="guid"/>, read by the layer above for its queries.</summary>
+    public bool TryGetRemoteSystem(ulong guid, [NotNullWhen(true)] out RemoteSystem? system)
+    {
+        system = FindActive(guid);
+        return system is not null;
     }
 }

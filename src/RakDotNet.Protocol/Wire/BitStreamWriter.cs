@@ -189,7 +189,18 @@ public ref struct BitStreamWriter
     /// Writes a SystemAddress as BitStream::Write(SystemAddress) does. IPv6 follows the platform sockaddr_in6 caveat in
     /// docs/plan.md.
     /// </summary>
-    public void WriteAddress(SystemAddress address) => throw new NotImplementedException();
+    /// <exception cref="NotSupportedException">The address is IPv6.</exception>
+    public void WriteAddress(SystemAddress address)
+    {
+        if (address.AddressFamily != AddressFamily.InterNetwork)
+            throw new NotSupportedException("Only IPv4 SystemAddress serialisation is supported.");
+        WriteByte(4);
+        Span<byte> bytes = stackalloc byte[4];
+        address.TryWriteAddressBytes(bytes, out _);
+        foreach (var b in bytes)
+            WriteByte((byte)~b);
+        WriteUInt16(address.Port);
+    }
 
     private readonly void EnsureCapacity(int bits)
     {

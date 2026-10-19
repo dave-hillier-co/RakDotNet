@@ -12,9 +12,13 @@
     <Project Path="src/RakDotNet/RakDotNet.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/RakDotNet.Compatibility.Tests/RakDotNet.Compatibility.Tests.csproj" />
+    <Project Path="tests/RakDotNet.Connections.Tests/RakDotNet.Connections.Tests.csproj" />
     <Project Path="tests/RakDotNet.Interop.FakePeer/RakDotNet.Interop.FakePeer.csproj" />
     <Project Path="tests/RakDotNet.Interop.Tests/RakDotNet.Interop.Tests.csproj" />
     <Project Path="tests/RakDotNet.Protocol.Tests/RakDotNet.Protocol.Tests.csproj" />
+    <Project Path="tests/RakDotNet.Samples.Tests/RakDotNet.Samples.Tests.csproj" />
+    <Project Path="tests/RakDotNet.Testing.Tests/RakDotNet.Testing.Tests.csproj" />
     <Project Path="tests/RakDotNet.Tests/RakDotNet.Tests.csproj" />
   </Folder>
 </Solution>

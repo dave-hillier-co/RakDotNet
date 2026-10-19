@@ -44,6 +44,10 @@ public sealed class UdpTransportFactory : IDatagramTransportFactory
 
     public static UdpTransportFactory Instance { get; } = new();
 
-    public bool TryBind(SocketBinding binding, [NotNullWhen(true)] out IDatagramTransport? transport, out StartupError startupError, out SocketError socketError) =>
-        throw new NotImplementedException();
+    public bool TryBind(SocketBinding binding, [NotNullWhen(true)] out IDatagramTransport? transport, out StartupError startupError, out SocketError socketError)
+    {
+        var bound = Transport.UdpDatagramTransport.TryBind(binding, out var udp, out startupError, out socketError);
+        transport = udp;
+        return bound;
+    }
 }

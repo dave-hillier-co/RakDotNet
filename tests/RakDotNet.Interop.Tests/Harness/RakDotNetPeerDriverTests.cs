@@ -1,13 +1,12 @@
 using System.Net;
 using System.Text.RegularExpressions;
-using RakDotNet.Protocol.Peer;
 using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Interop.Tests.Harness;
 
 public sealed partial class RakDotNetPeerDriverTests
 {
-    private static readonly IPEndPoint Remote = new(IPAddress.Loopback, 61234);
+    private static readonly SystemAddress Remote = new(IPAddress.Loopback, 61234);
 
     private static CancellationToken Token => TestContext.Current.CancellationToken;
 
@@ -24,18 +23,18 @@ public sealed partial class RakDotNetPeerDriverTests
     }
 
     [Fact]
-    public void A_pong_is_reported_with_RakNets_rewrite_and_the_servers_guid()
+    public void A_packet_is_reported_with_its_sender_and_data()
     {
-        var pong = new UnconnectedPongReceived(Remote, 42, SendPingTime: 0x1_0000_0102, "hello"u8.ToArray());
+        // RakPeer.cpp:4693-4699: a pong is the ID, the time as a 4-byte big-endian TimeMS, then the response.
+        byte[] pong = [(byte)MessageId.UnconnectedPong, 0, 0, 1, 2, .. "hello"u8];
 
-        var packet = RakDotNetPeerDriver.ToReceivedPacket(pong, timeMs: 7);
+        var packet = RakDotNetPeerDriver.ToReceivedPacket(pong, new RakNetGuid(42), Remote, timeMs: 7);
 
         Assert.Equal((byte)MessageId.UnconnectedPong, packet.MessageId);
         Assert.Equal("ID_UNCONNECTED_PONG", packet.MessageName);
         Assert.Equal(42UL, packet.PeerGuid);
-        Assert.Equal(Remote, packet.Address);
-        // RakPeer.cpp:4693-4699: the ID, the time truncated to a 4-byte big-endian TimeMS, then the response.
-        Assert.Equal("1c00000102" + Convert.ToHexStringLower("hello"u8), Convert.ToHexStringLower(packet.Data.Span));
+        Assert.Equal(Remote.ToIPEndPoint(), packet.Address);
+        Assert.Equal(pong, packet.Data.ToArray());
         Assert.Equal(7, packet.TimeMs);
         Assert.Null(packet.Timestamp);
     }
@@ -45,21 +44,12 @@ public sealed partial class RakDotNetPeerDriverTests
     {
         byte[] data = [(byte)MessageId.Timestamp, 0, 0, 0, 0, 0, 0, 0x30, 0x39, (byte)MessageId.UserPacketEnum + 2, 0xff];
 
-        var packet = RakDotNetPeerDriver.ToReceivedPacket(new MessageReceived(Remote, 1, data), timeMs: 0);
+        var packet = RakDotNetPeerDriver.ToReceivedPacket(data, new RakNetGuid(1), Remote, timeMs: 0);
 
         Assert.Equal((byte)MessageId.UserPacketEnum + 2, packet.MessageId);
         Assert.Equal("ID_USER_PACKET_ENUM+2", packet.MessageName);
         Assert.Equal(12345UL, packet.Timestamp);
         Assert.Equal(data, packet.Data.ToArray());
-    }
-
-    [Fact]
-    public void A_send_receipt_is_reported_as_ID_SND_RECEIPT_ACKED_with_the_serial_in_host_order()
-    {
-        var packet = RakDotNetPeerDriver.ToReceivedPacket(new SendReceiptAcked(Remote, 1, Receipt: 0x01020304), timeMs: 0);
-
-        Assert.Equal("ID_SND_RECEIPT_ACKED", packet.MessageName);
-        Assert.Equal("0e04030201", Convert.ToHexStringLower(packet.Data.Span));
     }
 
     [Fact]
@@ -74,6 +64,18 @@ public sealed partial class RakDotNetPeerDriverTests
         Assert.NotEqual(0, started.BoundAddress.Port);
         var error = await Assert.ThrowsAsync<PeerCommandException>(() => driver.StartupAsync(new StartupOptions(), Token));
         Assert.Equal("startup", error.Command);
+    }
+
+    [Fact]
+    public async Task Startup_on_a_port_in_use_fails_with_RakNets_result_name()
+    {
+        await using var first = RakDotNetPeerDriver.Launch();
+        var taken = await first.StartupAsync(new StartupOptions(), Token);
+        await using var second = RakDotNetPeerDriver.Launch();
+
+        var error = await Assert.ThrowsAsync<PeerCommandException>(() => second.StartupAsync(new StartupOptions(Port: taken.BoundAddress.Port), Token));
+
+        Assert.Contains("SOCKET_PORT_ALREADY_IN_USE", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -94,6 +96,7 @@ public sealed partial class RakDotNetPeerDriverTests
 
         Assert.Equal(1u, await driver.SendAsync(new SendOptions(1234, new byte[] { 0x86 }), Token));
         Assert.Equal(2u, await driver.SendAsync(new SendOptions(1234, new byte[] { 0x86 }), Token));
+        Assert.Equal(0u, await driver.SendAsync(new SendOptions(RakNetGuid.Unassigned.Value, new byte[] { 0x86 }), Token));
         Assert.Equal("IS_NOT_CONNECTED", await driver.GetConnectionStateAsync(1234, Token));
     }
 
@@ -117,9 +120,9 @@ public sealed partial class RakDotNetPeerDriverTests
         Func<Task>[] commands =
         [
             () => driver.SendListAsync(new SendListOptions(1, [new byte[] { 0x86 }]), Token),
-            () => driver.CancelConnectionAttemptAsync(Remote, Token),
+            () => driver.CancelConnectionAttemptAsync(Remote.ToIPEndPoint(), Token),
             () => driver.PingConnectedAsync(1, Token),
-            () => driver.AdvertiseSystemAsync(Remote, ReadOnlyMemory<byte>.Empty, Token),
+            () => driver.AdvertiseSystemAsync(Remote.ToIPEndPoint(), ReadOnlyMemory<byte>.Empty, Token),
             () => driver.SetTimeoutAsync(TimeSpan.FromSeconds(1), cancellationToken: Token),
             () => driver.SetMaximumIncomingConnectionsAsync(1, Token),
             () => driver.SetOccasionalPingAsync(true, Token),

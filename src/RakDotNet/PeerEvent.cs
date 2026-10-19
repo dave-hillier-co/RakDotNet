@@ -1,4 +1,5 @@
 using RakDotNet.Protocol.Wire;
+using RakDotNet.Protocol.Wire.Messages;
 
 namespace RakDotNet;
 
@@ -25,111 +26,208 @@ namespace RakDotNet;
 /// </remarks>
 public readonly ref struct PeerEvent
 {
-    public PeerEventKind Kind => throw new NotImplementedException();
+    private readonly EventSegment? _segment;
+    private readonly int _generation;
+
+    internal PeerEvent(EventSegment segment, int generation)
+    {
+        _segment = segment;
+        _generation = generation;
+    }
+
+    public PeerEventKind Kind => Segment.Kind;
 
     /// <summary>False only for kinds RakNet never produces (<see cref="PeerEventKind.ReceiptAbandoned"/>).</summary>
-    public bool IsRakNetPacket => throw new NotImplementedException();
+    public bool IsRakNetPacket => Segment.Kind != PeerEventKind.ReceiptAbandoned;
 
     /// <summary><c>Data[0]</c>, or the ID after the ID_TIMESTAMP header.</summary>
-    public MessageId Id => throw new NotImplementedException();
+    public MessageId Id
+    {
+        get
+        {
+            var data = Segment.Data;
+            if (data.IsEmpty)
+                return default;
+            return data[0] == (byte)MessageId.Timestamp && data.Length > TimestampHeader.Length
+                ? (MessageId)data[TimestampHeader.Length]
+                : (MessageId)data[0];
+        }
+    }
 
     /// <summary>Null for offline, loopback and some injected events.</summary>
-    public RakConnection? Connection => throw new NotImplementedException();
+    public RakConnection? Connection => Segment.Connection;
 
     /// <summary>Packet::guid</summary>
-    public RakNetGuid RakNetGuid => throw new NotImplementedException();
+    public RakNetGuid RakNetGuid => Segment.RakNetGuid;
 
     /// <summary>Packet::systemAddress</summary>
-    public SystemAddress Address => throw new NotImplementedException();
+    public SystemAddress Address => Segment.Address;
 
-    public int SocketIndex => throw new NotImplementedException();
+    public int SocketIndex => Segment.SocketIndex;
 
     /// <summary><see cref="RakPeer.GetTime"/> when the entry was queued.</summary>
-    public ulong ReceivedTime => throw new NotImplementedException();
+    public ulong ReceivedTime => Segment.ReceivedTime;
 
-    /// <summary>Packet::wasGeneratedLocally</summary>
-    public bool IsLocal => throw new NotImplementedException();
+    /// <summary>
+    /// Packet::wasGeneratedLocally: set only on the ID_CONNECTION_LOST of a silent local close (RakPeer.cpp:1676).
+    /// Loopback and injected packets leave it clear, as AllocPacket does (RakPeer.cpp:165, 183).
+    /// </summary>
+    public bool IsLocal => Segment.IsLocal;
 
     /// <summary>Packet::data. Empty when <see cref="IsRakNetPacket"/> is false.</summary>
-    public ReadOnlySpan<byte> Data => throw new NotImplementedException();
+    public ReadOnlySpan<byte> Data => Segment.Data;
 
     /// <summary>
     /// Packet::bitSize: for connected messages the bit length the reliability layer delivered, which can end mid-byte
     /// (RakPeer.cpp:6046, 6231); whole bytes for ID_CONNECTION_REQUEST_ACCEPTED (RakPeer.cpp:6186).
     /// </summary>
-    public int BitLength => throw new NotImplementedException();
+    public int BitLength => Segment.BitLength;
 
     /// <summary>The bytes after the ID, or after ID_TIMESTAMP, the time and the ID.</summary>
-    public ReadOnlySpan<byte> Body => throw new NotImplementedException();
+    public ReadOnlySpan<byte> Body
+    {
+        get
+        {
+            var data = Segment.Data;
+            var start = HasTimestampIn(data) ? TimestampHeader.Length + 1 : 1;
+            return data.Length > start ? data[start..] : [];
+        }
+    }
 
     /// <summary>A reader over <see cref="Data"/>, limited to <see cref="BitLength"/>.</summary>
-    public BitStreamReader GetReader() => throw new NotImplementedException();
+    public BitStreamReader GetReader()
+    {
+        var segment = Segment;
+        return new BitStreamReader(segment.Data, segment.BitLength);
+    }
 
     /// <summary>A reader positioned at <see cref="Body"/>.</summary>
-    public BitStreamReader GetBodyReader() => throw new NotImplementedException();
+    public BitStreamReader GetBodyReader() => new(Body);
 
-    public bool HasTimestamp => throw new NotImplementedException();
+    public bool HasTimestamp => HasTimestampIn(Segment.Data);
 
     /// <summary>The ID_TIMESTAMP time, already shifted into local time (ShiftIncomingTimestamp).</summary>
-    public ulong Timestamp => throw new NotImplementedException();
+    public ulong Timestamp
+    {
+        get
+        {
+            var data = Segment.Data;
+            return HasTimestampIn(data) ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(data[1..]) : 0;
+        }
+    }
 
     /// <summary><see cref="PeerEventKind.Connected"/>: true for ID_NEW_INCOMING_CONNECTION.</summary>
-    public bool IsIncoming => throw new NotImplementedException();
+    public bool IsIncoming => Segment.IsIncoming;
 
     /// <summary><see cref="PeerEventKind.Disconnected"/> only.</summary>
-    public DisconnectReason DisconnectReason => throw new NotImplementedException();
+    public DisconnectReason DisconnectReason => Segment.DisconnectReason;
 
     /// <summary>
     /// <see cref="PeerEventKind.Disconnected"/>: the connection ended because this peer called Close. Information
     /// RakNet does not expose; it changes neither <see cref="Data"/> nor the plugin callbacks.
     /// </summary>
-    public bool ClosedLocally => throw new NotImplementedException();
+    public bool ClosedLocally => Segment.ClosedLocally;
 
     /// <summary><see cref="PeerEventKind.ConnectFailed"/> only.</summary>
-    public ConnectFailure ConnectFailure => throw new NotImplementedException();
+    public ConnectFailure ConnectFailure => Segment.ConnectFailure;
 
     /// <summary><see cref="PeerEventKind.ConnectFailed"/> with <see cref="ConnectFailure.IncompatibleProtocolVersion"/>.</summary>
-    public byte RemoteProtocolVersion => throw new NotImplementedException();
+    public byte RemoteProtocolVersion => Segment.RemoteProtocolVersion;
 
     /// <summary>The receipt events.</summary>
-    public SendReceipt Receipt => throw new NotImplementedException();
+    public SendReceipt Receipt => Segment.Receipt;
 
     /// <summary><see cref="PeerEventKind.UnconnectedPong"/> only.</summary>
-    public UnconnectedPongView Pong => throw new NotImplementedException();
+    public UnconnectedPongView Pong
+    {
+        get
+        {
+            var segment = Segment;
+            return segment.Kind == PeerEventKind.UnconnectedPong ? new UnconnectedPongView(segment.Data, segment.ReceivedTime) : default;
+        }
+    }
 
     /// <summary><see cref="PeerEventKind.DownloadProgress"/> only.</summary>
-    public DownloadProgressView Progress => throw new NotImplementedException();
+    public DownloadProgressView Progress
+    {
+        get
+        {
+            var segment = Segment;
+            return segment.Kind == PeerEventKind.DownloadProgress ? new DownloadProgressView(segment.Data) : default;
+        }
+    }
 
     /// <summary>
     /// Takes ownership of the event, removing it from automatic release. Detaching twice throws
     /// <see cref="InvalidOperationException"/>.
     /// </summary>
-    public OwnedPeerEvent Detach() => throw new NotImplementedException();
+    public OwnedPeerEvent Detach()
+    {
+        var segment = Segment;
+        if (segment.IsOwned)
+            throw new InvalidOperationException("The event is already detached.");
+        segment.Pool.MarkOwned(segment);
+        return new OwnedPeerEvent(segment, _generation);
+    }
 
     /// <summary>An unpooled copy of <see cref="Data"/>.</summary>
-    public byte[] ToArray() => throw new NotImplementedException();
+    public byte[] ToArray() => Segment.Data.ToArray();
+
+    private EventSegment Segment
+    {
+        get
+        {
+            var segment = _segment;
+            if (segment is null || Volatile.Read(ref segment.Generation) != _generation)
+                throw new ObjectDisposedException(nameof(PeerEvent), "The event was released: it is valid until the next read, Update or shutdown unless detached.");
+            return segment;
+        }
+    }
+
+    private static bool HasTimestampIn(ReadOnlySpan<byte> data) =>
+        data.Length > TimestampHeader.Length && data[0] == (byte)MessageId.Timestamp;
 }
 
 /// <summary>The fields of an ID_UNCONNECTED_PONG event. Borrowed with its event.</summary>
 public readonly ref struct UnconnectedPongView
 {
-    /// <summary>The ping time echoed by the remote, as RakNet's 4-byte TimeMS.</summary>
-    public uint SentTime => throw new NotImplementedException();
+    private readonly ReadOnlySpan<byte> _data;
+    private readonly ulong _receivedTime;
 
-    public TimeSpan RoundTrip => throw new NotImplementedException();
+    internal UnconnectedPongView(ReadOnlySpan<byte> data, ulong receivedTime)
+    {
+        _data = data;
+        _receivedTime = receivedTime;
+    }
+
+    /// <summary>The ping time echoed by the remote, as RakNet's 4-byte TimeMS.</summary>
+    public uint SentTime => _data.Length >= 5 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(_data[1..]) : 0;
+
+    public TimeSpan RoundTrip => _data.Length >= 5 ? TimeSpan.FromMilliseconds(unchecked((uint)_receivedTime - SentTime)) : TimeSpan.Zero;
 
     /// <summary>The remote's offline ping response.</summary>
-    public ReadOnlySpan<byte> Response => throw new NotImplementedException();
+    public ReadOnlySpan<byte> Response => _data.Length > 5 ? _data[5..] : [];
 }
 
 /// <summary>The fields of an ID_DOWNLOAD_PROGRESS event. Borrowed with its event.</summary>
+/// <remarks>
+/// ReliabilityLayer.cpp:3120-3131 writes the ID, then the parts arrived, the part count and the part length, each
+/// memcpy'd in host order (little-endian on every supported platform), then the first part's bytes.
+/// </remarks>
 public readonly ref struct DownloadProgressView
 {
-    public uint PartsArrived => throw new NotImplementedException();
+    private readonly ReadOnlySpan<byte> _data;
 
-    public uint PartCount => throw new NotImplementedException();
+    internal DownloadProgressView(ReadOnlySpan<byte> data) => _data = data;
 
-    public uint PartLength => throw new NotImplementedException();
+    public uint PartsArrived => Field(0);
 
-    public ReadOnlySpan<byte> FirstPart => throw new NotImplementedException();
+    public uint PartCount => Field(1);
+
+    public uint PartLength => Field(2);
+
+    public ReadOnlySpan<byte> FirstPart => _data.Length > 13 ? _data[13..] : [];
+
+    private uint Field(int index) =>
+        _data.Length >= 1 + (index + 1) * 4 ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(_data[(1 + index * 4)..]) : 0;
 }

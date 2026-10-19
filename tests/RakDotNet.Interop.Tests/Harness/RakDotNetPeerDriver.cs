@@ -1,15 +1,14 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Threading.Channels;
-using RakDotNet.Protocol.Peer;
 using RakDotNet.Protocol.Wire;
-using RakDotNet.Transport;
 
 namespace RakDotNet.Interop.Tests.Harness;
 
 /// <summary>
-/// Drives a RakDotNet peer in this process, behaving as tools/interop-peer does: the same command results and errors,
-/// and every event reported as the packet RakPeer::Receive would return for it.
+/// Drives a RakDotNet peer in this process through the public API, behaving as tools/interop-peer does: the same command
+/// results and errors, and every event reported as the packet RakPeer::Receive would return for it
+/// (docs/api-design.md section 10.2).
 /// </summary>
 public sealed class RakDotNetPeerDriver : IPeerDriver
 {
@@ -17,7 +16,7 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
     private const int MaxOfflinePingResponse = 399;
 
     private readonly Channel<ReceivedPacket> _packets = Channel.CreateUnbounded<ReceivedPacket>(new UnboundedChannelOptions { SingleWriter = true });
-    private PeerTransport? _transport;
+    private RakPeer? _peer;
     private Task _pump = Task.CompletedTask;
     private int _disposed;
 
@@ -31,32 +30,43 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
 
     public static RakDotNetPeerDriver Launch() => new();
 
-    public async Task<PeerStarted> StartupAsync(StartupOptions options, CancellationToken cancellationToken = default)
+    public Task<PeerStarted> StartupAsync(StartupOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        if (_transport is not null)
+        if (_peer is not null)
         {
             throw new PeerCommandException("startup", "Startup failed: RAKNET_ALREADY_STARTED");
         }
 
-        var transport = await PeerTransport.StartAsync(
-            new PeerTransportOptions
+        RakPeer peer;
+        try
+        {
+            peer = RakPeer.Start(new RakPeerOptions
             {
-                LocalEndPoint = new IPEndPoint(IPAddress.Parse(options.Host), options.Port),
                 MaxConnections = options.MaxConnections,
                 MaxIncomingConnections = options.MaxIncoming,
-            },
-            cancellationToken).ConfigureAwait(false);
-        _transport = transport;
-        _pump = Task.Run(() => PumpAsync(transport), CancellationToken.None);
-        return new PeerStarted(transport.BoundEndPoint, transport.Guid);
+                Bindings = [new SocketBinding(new IPEndPoint(IPAddress.Parse(options.Host), options.Port))],
+            });
+        }
+        catch (RakStartupException exception)
+        {
+            throw new PeerCommandException("startup", $"Startup failed: {ToProtocolName(exception.Error)}");
+        }
+        _peer = peer;
+        _pump = Task.Run(() => PumpAsync(peer), CancellationToken.None);
+        return Task.FromResult(new PeerStarted(peer.Sockets[0].LocalAddress.ToIPEndPoint(), peer.RakNetGuid.Value));
     }
 
     public Task<string> ConnectAsync(ConnectOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        var result = Started("connect").Execute((core, nowUs) =>
-            core.Connect(options.Remote, options.Password.Span, options.Attempts, options.AttemptIntervalMs, options.TimeoutMs, nowUs));
+        var result = Started("connect").Connect(options.Remote, new RakDotNet.ConnectOptions
+        {
+            Password = options.Password,
+            AttemptCount = options.Attempts,
+            AttemptInterval = TimeSpan.FromMilliseconds(options.AttemptIntervalMs),
+            Timeout = TimeSpan.FromMilliseconds(options.TimeoutMs),
+        });
         return Task.FromResult(ToProtocolName(result));
     }
 
@@ -67,28 +77,37 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
         {
             throw new PeerCommandException("send", "field 'data' must contain at least the message ID byte");
         }
+
+        var peer = Started("send");
+        var target = new RakNetGuid(options.Target);
         if (options.Broadcast)
         {
-            throw new NotSupportedException("The RakDotNet peer core does not broadcast yet.");
+            return Task.FromResult(peer.Broadcast(options.Data.Span, options.Reliability, options.Priority, options.Channel, except: target).Receipt.Value);
         }
-
-        // RakPeer::Send assigns the receipt (RakPeer.cpp:1308-1352); the core does the same.
-        var receipt = Started("send").Execute((core, nowUs) =>
-            core.Send(options.Target, options.Data.Span, options.Reliability, options.Priority, options.Channel, nowUs));
-        return Task.FromResult(receipt);
+        // RakPeer.cpp:1323-1324: an undefined target returns 0 without using a receipt.
+        if (!target.IsAssigned)
+        {
+            return Task.FromResult(0u);
+        }
+        return Task.FromResult(peer.Send(options.Data.Span, target, options.Reliability, options.Priority, options.Channel).Receipt.Value);
     }
 
     public Task CloseAsync(ulong target, bool notify = true, CancellationToken cancellationToken = default)
     {
-        // CloseConnection's defaults: ordering channel 0 and LOW_PRIORITY (RakPeerInterface.h).
-        Started("close").Execute((core, nowUs) => core.CloseConnection(target, notify, 0, Priority.Low, nowUs));
+        var peer = Started("close");
+        var guid = new RakNetGuid(target);
+        if (guid.IsAssigned)
+        {
+            // CloseConnection's defaults: ordering channel 0 and LOW_PRIORITY (RakPeerInterface.h).
+            peer.Close(guid, notify);
+        }
         return Task.CompletedTask;
     }
 
     public Task<bool> PingAsync(IPEndPoint remote, bool onlyIfAccepting = false, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(remote);
-        return Task.FromResult(Started("ping").Execute((core, nowUs) => core.Ping(remote, onlyIfAccepting, nowUs)));
+        return Task.FromResult(Started("ping").PingUnconnected(remote, onlyIfAccepting));
     }
 
     public Task SetOfflinePingResponseAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
@@ -97,7 +116,7 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
         {
             throw new PeerCommandException("setOfflinePingResponse", "offline ping response must be shorter than 400 bytes");
         }
-        Started("setOfflinePingResponse").Execute((core, _) => core.SetOfflinePingResponse(data.Span));
+        Started("setOfflinePingResponse").OfflinePingResponse = data;
         return Task.CompletedTask;
     }
 
@@ -141,13 +160,13 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
         throw new NotSupportedException("The RakDotNet peer driver does not support RakNet::GetTime yet.");
 
     public Task<string> GetConnectionStateAsync(ulong target, CancellationToken cancellationToken = default) =>
-        Task.FromResult(ToProtocolName(Started("connectionState").Execute((core, _) => core.GetConnectionState(target))));
+        Task.FromResult(ToProtocolName(Started("connectionState").GetConnectionState(new RakNetGuid(target))));
 
     public async Task ShutdownAsync(int blockMs = 100, CancellationToken cancellationToken = default)
     {
-        if (_transport is { } transport)
+        if (_peer is { } peer)
         {
-            await transport.ShutdownAsync(TimeSpan.FromMilliseconds(blockMs), cancellationToken).ConfigureAwait(false);
+            await peer.ShutdownAsync(TimeSpan.FromMilliseconds(blockMs), cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         await _pump.ConfigureAwait(false);
         _packets.Writer.TryComplete();
@@ -164,63 +183,84 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
     }
 
     /// <summary>
-    /// The packet interop-peer would report for <paramref name="peerEvent"/>: its ID (the one after the timestamp for
-    /// ID_TIMESTAMP), C++ name, sender and data (tools/interop-peer/src/PacketEvent.cpp).
+    /// The packet interop-peer would report: its ID (the one after the timestamp for ID_TIMESTAMP), C++ name, sender and
+    /// data (tools/interop-peer/src/PacketEvent.cpp).
     /// </summary>
-    internal static ReceivedPacket ToReceivedPacket(Protocol.Peer.PeerEvent peerEvent, long timeMs)
+    internal static ReceivedPacket ToReceivedPacket(ReadOnlySpan<byte> data, RakNetGuid sender, SystemAddress address, long timeMs)
     {
-        ArgumentNullException.ThrowIfNull(peerEvent);
         const int timeSize = sizeof(ulong);
-        var data = peerEvent.Packet;
-        var span = data.Span;
-        var timestamped = span[0] == (byte)MessageId.Timestamp && span.Length >= 1 + timeSize + 1;
-        var id = timestamped ? span[1 + timeSize] : span[0];
-        ulong? timestamp = timestamped ? BinaryPrimitives.ReadUInt64BigEndian(span[1..]) : null;
-        return new ReceivedPacket(id, MessageNames.Of(id), peerEvent.Guid, peerEvent.Remote, data, timeMs, timestamp);
+        var timestamped = data[0] == (byte)MessageId.Timestamp && data.Length >= 1 + timeSize + 1;
+        var id = timestamped ? data[1 + timeSize] : data[0];
+        ulong? timestamp = timestamped ? BinaryPrimitives.ReadUInt64BigEndian(data[1..]) : null;
+        return new ReceivedPacket(id, MessageNames.Of(id), sender.Value, address.ToIPEndPoint(), data.ToArray(), timeMs, timestamp);
     }
 
     // RakNetTypes.h:58-66, as interop-peer names them.
-    internal static string ToProtocolName(ConnectionAttemptResult result) => result switch
+    internal static string ToProtocolName(ConnectAttemptResult result) => result switch
     {
-        ConnectionAttemptResult.ConnectionAttemptStarted => "CONNECTION_ATTEMPT_STARTED",
-        ConnectionAttemptResult.InvalidParameter => "INVALID_PARAMETER",
-        ConnectionAttemptResult.CannotResolveDomainName => "CANNOT_RESOLVE_DOMAIN_NAME",
-        ConnectionAttemptResult.AlreadyConnectedToEndpoint => "ALREADY_CONNECTED_TO_ENDPOINT",
-        ConnectionAttemptResult.ConnectionAttemptAlreadyInProgress => "CONNECTION_ATTEMPT_ALREADY_IN_PROGRESS",
-        ConnectionAttemptResult.SecurityInitializationFailed => "SECURITY_INITIALIZATION_FAILED",
+        ConnectAttemptResult.Started => "CONNECTION_ATTEMPT_STARTED",
+        ConnectAttemptResult.CannotResolveDomainName => "CANNOT_RESOLVE_DOMAIN_NAME",
+        ConnectAttemptResult.AlreadyConnectedToEndpoint => "ALREADY_CONNECTED_TO_ENDPOINT",
+        ConnectAttemptResult.ConnectionAttemptAlreadyInProgress => "CONNECTION_ATTEMPT_ALREADY_IN_PROGRESS",
+        ConnectAttemptResult.SecurityInitializationFailed => "SECURITY_INITIALIZATION_FAILED",
         _ => throw new ArgumentOutOfRangeException(nameof(result), result, null),
     };
 
     // RakNetTypes.h:69-85, as interop-peer names them.
-    internal static string ToProtocolName(Protocol.Peer.ConnectionState state) => state switch
+    internal static string ToProtocolName(ConnectionState state) => state switch
     {
-        Protocol.Peer.ConnectionState.IsPending => "IS_PENDING",
-        Protocol.Peer.ConnectionState.IsConnecting => "IS_CONNECTING",
-        Protocol.Peer.ConnectionState.IsConnected => "IS_CONNECTED",
-        Protocol.Peer.ConnectionState.IsDisconnecting => "IS_DISCONNECTING",
-        Protocol.Peer.ConnectionState.IsSilentlyDisconnecting => "IS_SILENTLY_DISCONNECTING",
-        Protocol.Peer.ConnectionState.IsDisconnected => "IS_DISCONNECTED",
-        Protocol.Peer.ConnectionState.IsNotConnected => "IS_NOT_CONNECTED",
+        ConnectionState.Pending => "IS_PENDING",
+        ConnectionState.Connecting => "IS_CONNECTING",
+        ConnectionState.Connected => "IS_CONNECTED",
+        ConnectionState.Disconnecting => "IS_DISCONNECTING",
+        ConnectionState.SilentlyDisconnecting => "IS_SILENTLY_DISCONNECTING",
+        ConnectionState.Disconnected => "IS_DISCONNECTED",
+        ConnectionState.NotConnected => "IS_NOT_CONNECTED",
         _ => throw new ArgumentOutOfRangeException(nameof(state), state, null),
     };
 
-    private PeerTransport Started(string command) =>
-        _transport ?? throw new PeerCommandException(command, "the peer has not been started");
+    // RakNetTypes.h:41-55, as interop-peer names them.
+    internal static string ToProtocolName(StartupError error) => error switch
+    {
+        StartupError.SocketFamilyNotSupported => "SOCKET_FAMILY_NOT_SUPPORTED",
+        StartupError.SocketPortAlreadyInUse => "SOCKET_PORT_ALREADY_IN_USE",
+        StartupError.SocketFailedToBind => "SOCKET_FAILED_TO_BIND",
+        StartupError.SocketFailedTestSend => "SOCKET_FAILED_TEST_SEND",
+        StartupError.FailedToCreateNetworkThread => "FAILED_TO_CREATE_NETWORK_THREAD",
+        StartupError.OtherFailure => "STARTUP_OTHER_FAILURE",
+        _ => throw new ArgumentOutOfRangeException(nameof(error), error, null),
+    };
 
-    private async Task PumpAsync(PeerTransport transport)
+    private RakPeer Started(string command) =>
+        _peer ?? throw new PeerCommandException(command, "the peer has not been started");
+
+    // Reads the stream as a Receive() loop does, dropping the entries RakNet never produces (decision 11.4).
+    private async Task PumpAsync(RakPeer peer)
     {
         try
         {
-            await foreach (var peerEvent in transport.Events.ReadAllAsync().ConfigureAwait(false))
+            while (await peer.Events.WaitToReadAsync().ConfigureAwait(false))
             {
-                _packets.Writer.TryWrite(ToReceivedPacket(peerEvent, transport.NowMs));
+                Drain(peer);
             }
+            await peer.Events.Completion.ConfigureAwait(false);
             _packets.Writer.TryComplete();
         }
-        catch (System.Net.Sockets.SocketException exception)
+        catch (RakTransportException exception)
         {
-            // The transport's socket failed; waits on the packet stream end with the reason.
+            // The peer's socket failed; waits on the packet stream end with the reason.
             _packets.Writer.TryComplete(exception);
+        }
+    }
+
+    private void Drain(RakPeer peer)
+    {
+        while (peer.Events.TryRead(out var e))
+        {
+            if (e.IsRakNetPacket)
+            {
+                _packets.Writer.TryWrite(ToReceivedPacket(e.Data, e.RakNetGuid, e.Address, (long)e.ReceivedTime));
+            }
         }
     }
 }

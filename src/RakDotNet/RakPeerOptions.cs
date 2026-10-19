@@ -35,7 +35,7 @@ public sealed record RakPeerOptions
     /// <summary>SetIncomingPassword; at most 255 bytes.</summary>
     public ReadOnlyMemory<byte> IncomingPassword { get; init; }
 
-    /// <summary>SetOfflinePingResponse; at most 400 bytes (RakPeer.cpp:127).</summary>
+    /// <summary>SetOfflinePingResponse; under 400 bytes (RakPeer.cpp:2271).</summary>
     public ReadOnlyMemory<byte> OfflinePingResponse { get; init; }
 
     /// <summary>10 s, the release-build timeout (RakPeer.cpp:249).</summary>

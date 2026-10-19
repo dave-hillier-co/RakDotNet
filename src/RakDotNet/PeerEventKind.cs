@@ -6,7 +6,10 @@ namespace RakDotNet;
 /// </summary>
 public enum PeerEventKind : byte
 {
-    /// <summary>Any packet not listed below: user IDs, plugin IDs, ID_REMOTE_*, ID_TIMESTAMP-prefixed, loopback.</summary>
+    /// <summary>
+    /// Any packet not listed below: user IDs, plugin IDs, ID_REMOTE_*, ID_TIMESTAMP-prefixed, loopback, and the
+    /// one-byte ID_UNCONNECTED_PING or ID_UNCONNECTED_PING_OPEN_CONNECTIONS of a ping this peer answered.
+    /// </summary>
     Message,
 
     /// <summary>ID_CONNECTION_REQUEST_ACCEPTED (outgoing) or ID_NEW_INCOMING_CONNECTION (incoming).</summary>
