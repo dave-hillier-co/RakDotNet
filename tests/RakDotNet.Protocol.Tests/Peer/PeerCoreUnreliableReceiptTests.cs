@@ -5,7 +5,7 @@ using RakDotNet.Protocol.Wire;
 namespace RakDotNet.Protocol.Tests.Peer;
 
 // Sociable: a client and a server PeerCore over an in-memory link. Every send's receipt has to finish, so an unreliable
-// receipt that waits behind a congested window must still end with an acked or lost event at the peer.
+// receipt that waits behind a congested window must still end with an acked, lost or discarded event at the peer.
 public class PeerCoreUnreliableReceiptTests
 {
     private const ulong ClientGuid = 0x1111_2222_3333_4444;
@@ -44,7 +44,9 @@ public class PeerCoreUnreliableReceiptTests
 
         _link.Drop = null;
         _link.RunUntil(
-            () => ClientEvents.OfType<SendReceiptAcked>().Any(e => e.Receipt == receipt) || ClientEvents.OfType<SendReceiptLost>().Any(e => e.Receipt == receipt),
+            () => ClientEvents.OfType<SendReceiptAcked>().Any(e => e.Receipt == receipt)
+                || ClientEvents.OfType<SendReceiptLost>().Any(e => e.Receipt == receipt)
+                || ClientEvents.OfType<SendReceiptDiscarded>().Any(e => e.Receipt == receipt),
             TimeSpan.FromSeconds(5)
         );
     }

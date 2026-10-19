@@ -105,6 +105,9 @@ internal sealed record IncomingConnectionCompleted(IPEndPoint Remote, ulong Guid
 internal sealed record MessageReceived(IPEndPoint Remote, ulong Guid, ReadOnlyMemory<byte> Data) : PeerEvent(Remote, Guid)
 {
     public override ReadOnlyMemory<byte> Packet => Data;
+
+    /// <summary>The length in bits the reliability layer delivered (Packet::bitSize, RakPeer.cpp:6231); whole bytes unless set.</summary>
+    public int BitLength { get; init; } = Data.Length * 8;
 }
 
 /// <summary>
@@ -128,6 +131,16 @@ internal sealed record SendReceiptAcked(IPEndPoint Remote, ulong Guid, uint Rece
 internal sealed record SendReceiptLost(IPEndPoint Remote, ulong Guid, uint Receipt) : PeerEvent(Remote, Guid)
 {
     public override ReadOnlyMemory<byte> Packet => SendReceiptAcked.ReceiptPacket(MessageId.SndReceiptLoss, Receipt);
+}
+
+/// <summary>
+/// An UNRELIABLE_WITH_ACK_RECEIPT message was discarded unsent after waiting longer than the unreliable timeout
+/// (ReliabilityLayer.cpp:1745-1793). RakNet reports nothing for it, so this event has no RakNet packet; it lets the
+/// layer above end the receipt.
+/// </summary>
+internal sealed record SendReceiptDiscarded(IPEndPoint Remote, ulong Guid, uint Receipt) : PeerEvent(Remote, Guid)
+{
+    public override ReadOnlyMemory<byte> Packet => ReadOnlyMemory<byte>.Empty;
 }
 
 /// <summary>
