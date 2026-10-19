@@ -149,6 +149,117 @@ public sealed class NativePeerDriverTests
     }
 
     [Fact]
+    public async Task Send_list_sends_each_part_as_hex_with_the_send_fields()
+    {
+        await using var driver = await LaunchFakeAsync();
+
+        var receipt = await driver.SendListAsync(
+            new SendListOptions(7, [new byte[] { 0x87, 0x41 }, new byte[] { 0x42 }], Reliability.Reliable, Priority.Low, Channel: 2),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1u, receipt);
+        var command = (await HistoryAsync(driver))[0]!;
+        Assert.Equal("sendList", (string?)command["cmd"]);
+        Assert.Equal("7", (string?)command["target"]);
+        Assert.Equal(["8741", "42"], command["parts"]!.AsArray().Select(p => (string?)p));
+        Assert.Equal("RELIABLE", (string?)command["reliability"]);
+        Assert.Equal("LOW_PRIORITY", (string?)command["priority"]);
+        Assert.Equal(2, (int?)command["channel"]);
+        Assert.False((bool?)command["broadcast"]);
+    }
+
+    [Fact]
+    public async Task Peer_settings_are_sent_with_their_protocol_fields()
+    {
+        await using var driver = await LaunchFakeAsync();
+        var token = TestContext.Current.CancellationToken;
+
+        await driver.CancelConnectionAttemptAsync(new IPEndPoint(IPAddress.Loopback, 1234), token);
+        await driver.PingConnectedAsync(9, token);
+        await driver.SetTimeoutAsync(TimeSpan.FromMilliseconds(1500), cancellationToken: token);
+        await driver.SetTimeoutAsync(TimeSpan.FromSeconds(2), 9, token);
+        await driver.SetMaximumIncomingConnectionsAsync(3, token);
+        await driver.SetOccasionalPingAsync(true, token);
+        await driver.SetSplitMessageProgressIntervalAsync(4, token);
+        await driver.SetOutgoingBandwidthLimitAsync(800_000, token);
+        await driver.BanAsync("127.0.0.1", TimeSpan.Zero, token);
+
+        // The history includes the history command itself, last.
+        var history = (await HistoryAsync(driver)).SkipLast(1).Select(c => c!.ToJsonString()).ToList();
+        Assert.Equal(
+            [
+                """{"seq":1,"cmd":"cancelConnect","host":"127.0.0.1","port":1234}""",
+                """{"seq":2,"cmd":"pingConnected","target":"9"}""",
+                """{"seq":3,"cmd":"setTimeout","ms":1500}""",
+                """{"seq":4,"cmd":"setTimeout","ms":2000,"target":"9"}""",
+                """{"seq":5,"cmd":"setMaxIncoming","count":3}""",
+                """{"seq":6,"cmd":"setOccasionalPing","enabled":true}""",
+                """{"seq":7,"cmd":"setSplitMessageProgressInterval","interval":4}""",
+                """{"seq":8,"cmd":"setOutgoingBandwidthLimit","bitsPerSecond":800000}""",
+                """{"seq":9,"cmd":"ban","ip":"127.0.0.1","ms":0}""",
+            ],
+            history);
+    }
+
+    [Fact]
+    public async Task Advertise_sends_the_data_as_hex_and_returns_whether_it_was_sent()
+    {
+        await using var driver = await LaunchFakeAsync();
+
+        var sent = await driver.AdvertiseSystemAsync(new IPEndPoint(IPAddress.Loopback, 4321), "hi"u8.ToArray(), TestContext.Current.CancellationToken);
+
+        Assert.True(sent);
+        var command = (await HistoryAsync(driver))[0]!;
+        Assert.Equal("""{"seq":1,"cmd":"advertise","host":"127.0.0.1","port":4321,"data":"6869"}""", command.ToJsonString());
+    }
+
+    [Fact]
+    public async Task Time_is_parsed_from_a_decimal_string_beyond_double_precision()
+    {
+        await using var driver = await LaunchFakeAsync();
+
+        var time = await driver.GetTimeAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(18446744073709551000UL, time);
+    }
+
+    [Fact]
+    public async Task Info_reports_the_peer_and_each_connection()
+    {
+        await using var driver = await LaunchFakeAsync();
+
+        var info = await driver.GetInfoAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(18446744073709551000UL, info.PeerGuid);
+        Assert.Equal(new IPEndPoint(IPAddress.Loopback, 40000), info.BoundAddress);
+        var connection = Assert.Single(info.Connections);
+        Assert.Equal(new ConnectionInfo(42, new IPEndPoint(IPAddress.Loopback, 1234), 1492, 3, 2, 1, new IPEndPoint(IPAddress.Loopback, 40000)), connection);
+    }
+
+    [Fact]
+    public async Task Statistics_report_every_field_and_metric()
+    {
+        await using var driver = await LaunchFakeAsync();
+
+        var stats = await driver.GetStatisticsAsync(42, TestContext.Current.CancellationToken);
+
+        var command = (await HistoryAsync(driver))[0]!;
+        Assert.Equal("""{"seq":1,"cmd":"stats","target":"42"}""", command.ToJsonString());
+        Assert.Equal(2, stats.MessagesInResendBuffer);
+        Assert.Equal(300UL, stats.BytesInResendBuffer);
+        Assert.Equal(0.25, stats.PacketLossLastSecond);
+        Assert.Equal(0.5, stats.PacketLossTotal);
+        Assert.True(stats.IsLimitedByCongestionControl);
+        Assert.Equal(1000UL, stats.BpsLimitByCongestionControl);
+        Assert.True(stats.IsLimitedByOutgoingBandwidthLimit);
+        Assert.Equal(100_000UL, stats.BpsLimitByOutgoingBandwidthLimit);
+        Assert.Equal(7UL, stats.RunningTotal[PerSecondMetric.UserMessageBytesPushed]);
+        Assert.Equal(13UL, stats.RunningTotal[PerSecondMetric.ActualBytesReceived]);
+        Assert.Equal(8UL, stats.ValueOverLastSecond[PerSecondMetric.UserMessageBytesPushed]);
+        Assert.Equal(Enum.GetValues<PerSecondMetric>().Length, stats.RunningTotal.Count);
+    }
+
+    [Fact]
     public async Task Replies_are_correlated_by_seq_when_they_arrive_out_of_order()
     {
         await using var driver = await LaunchFakeAsync();

@@ -272,8 +272,12 @@ namespace
                 Connect(command, result);
             else if (cmd == "send")
                 Send(command, result);
+            else if (cmd == "sendList")
+                SendList(command, result);
             else if (cmd == "close")
                 Close(command);
+            else if (cmd == "cancelConnect")
+                CancelConnect(command);
             else if (cmd == "ping")
                 Ping(command, result);
             else if (cmd == "pingConnected")
@@ -284,6 +288,12 @@ namespace
                 Advertise(command, result);
             else if (cmd == "setTimeout")
                 SetTimeout(command);
+            else if (cmd == "setOccasionalPing")
+                peer_->SetOccasionalPing(Required<bool>(command, "enabled"));
+            else if (cmd == "setSplitMessageProgressInterval")
+                peer_->SetSplitMessageProgressInterval(InRange<int>(Required<long long>(command, "interval"), "interval"));
+            else if (cmd == "setOutgoingBandwidthLimit")
+                peer_->SetPerConnectionOutgoingBandwidthLimit(InRange<unsigned>(Required<long long>(command, "bitsPerSecond"), "bitsPerSecond"));
             else if (cmd == "setMaxIncoming")
                 peer_->SetMaximumIncomingConnections(InRange<unsigned short>(Required<long long>(command, "count"), "count"));
             else if (cmd == "ban")
@@ -294,6 +304,8 @@ namespace
                 Stats(command, result);
             else if (cmd == "info")
                 Info(result);
+            else if (cmd == "time")
+                result["time"] = std::to_string(RakNet::GetTime());
             else if (cmd == "shutdown")
             {
                 Shutdown(command);
@@ -348,41 +360,93 @@ namespace
             result["result"] = interop::ConnectionAttemptResultName(attempt);
         }
 
+        struct SendParameters
+        {
+            PacketReliability reliability = RELIABLE_ORDERED;
+            PacketPriority priority = HIGH_PRIORITY;
+            char channel = 0;
+            bool broadcast = false;
+            RakNet::RakNetGUID target = RakNet::UNASSIGNED_RAKNET_GUID;
+        };
+
+        // The fields shared by send and sendList.
+        static SendParameters ParseSendParameters(const json& command)
+        {
+            SendParameters parameters;
+            std::string reliabilityName = Optional<std::string>(command, "reliability", "RELIABLE_ORDERED");
+            if (!interop::TryParseReliability(reliabilityName, parameters.reliability))
+                throw CommandError("unknown reliability '" + reliabilityName + "'");
+
+            std::string priorityName = Optional<std::string>(command, "priority", "HIGH_PRIORITY");
+            if (!interop::TryParsePriority(priorityName, parameters.priority))
+                throw CommandError("unknown priority '" + priorityName + "'");
+
+            parameters.channel = static_cast<char>(InRange<unsigned char>(Optional<long long>(command, "channel", 0), "channel"));
+            parameters.broadcast = Optional<bool>(command, "broadcast", false);
+
+            // With broadcast, the target is the system to exclude; it may be omitted.
+            auto it = command.find("target");
+            if (it != command.end() && !it->is_null())
+                parameters.target = ParseGuid(*it, "target");
+            else if (!parameters.broadcast)
+                throw CommandError("missing field 'target'");
+            return parameters;
+        }
+
         void Send(const json& command, ordered_json& result)
         {
             std::vector<unsigned char> data = HexField(command, "data", true);
             if (data.empty())
                 throw CommandError("field 'data' must contain at least the message ID byte");
 
-            PacketReliability reliability = RELIABLE_ORDERED;
-            std::string reliabilityName = Optional<std::string>(command, "reliability", "RELIABLE_ORDERED");
-            if (!interop::TryParseReliability(reliabilityName, reliability))
-                throw CommandError("unknown reliability '" + reliabilityName + "'");
-
-            PacketPriority priority = HIGH_PRIORITY;
-            std::string priorityName = Optional<std::string>(command, "priority", "HIGH_PRIORITY");
-            if (!interop::TryParsePriority(priorityName, priority))
-                throw CommandError("unknown priority '" + priorityName + "'");
-
-            char channel = static_cast<char>(InRange<unsigned char>(Optional<long long>(command, "channel", 0), "channel"));
-            bool broadcast = Optional<bool>(command, "broadcast", false);
-
-            // With broadcast, the target is the system to exclude; it may be omitted.
-            RakNet::RakNetGUID target = RakNet::UNASSIGNED_RAKNET_GUID;
-            auto it = command.find("target");
-            if (it != command.end() && !it->is_null())
-                target = ParseGuid(*it, "target");
-            else if (!broadcast)
-                throw CommandError("missing field 'target'");
-
+            SendParameters parameters = ParseSendParameters(command);
             uint32_t receipt = peer_->Send(
                 reinterpret_cast<const char*>(data.data()),
                 static_cast<int>(data.size()),
-                priority,
-                reliability,
-                channel,
-                RakNet::AddressOrGUID(target),
-                broadcast);
+                parameters.priority,
+                parameters.reliability,
+                parameters.channel,
+                RakNet::AddressOrGUID(parameters.target),
+                parameters.broadcast);
+            result["receipt"] = receipt;
+        }
+
+        // RakPeer::SendList sends the parts concatenated as one message (RakPeer.cpp:1434-1480).
+        void SendList(const json& command, ordered_json& result)
+        {
+            json parts = Required<json>(command, "parts");
+            if (!parts.is_array() || parts.empty())
+                throw CommandError("field 'parts' must be a non-empty array of hex strings");
+
+            std::vector<std::vector<unsigned char>> buffers;
+            for (const json& part : parts)
+            {
+                if (!part.is_string())
+                    throw CommandError("field 'parts' must be a non-empty array of hex strings");
+                std::vector<unsigned char> bytes;
+                if (!interop::TryFromHex(part.get<std::string>(), bytes) || bytes.empty())
+                    throw CommandError("field 'parts' must be a non-empty array of hex strings");
+                buffers.push_back(bytes);
+            }
+
+            std::vector<const char*> data;
+            std::vector<int> lengths;
+            for (const std::vector<unsigned char>& buffer : buffers)
+            {
+                data.push_back(reinterpret_cast<const char*>(buffer.data()));
+                lengths.push_back(static_cast<int>(buffer.size()));
+            }
+
+            SendParameters parameters = ParseSendParameters(command);
+            uint32_t receipt = peer_->SendList(
+                data.data(),
+                lengths.data(),
+                static_cast<int>(data.size()),
+                parameters.priority,
+                parameters.reliability,
+                parameters.channel,
+                RakNet::AddressOrGUID(parameters.target),
+                parameters.broadcast);
             result["receipt"] = receipt;
         }
 
@@ -392,6 +456,17 @@ namespace
             bool notify = Optional<bool>(command, "notify", true);
             unsigned char channel = InRange<unsigned char>(Optional<long long>(command, "channel", 0), "channel");
             peer_->CloseConnection(RakNet::AddressOrGUID(target), notify, channel);
+        }
+
+        // The attempt is dropped silently, without ID_CONNECTION_ATTEMPT_FAILED (RakPeer.cpp:1686-1707).
+        void CancelConnect(const json& command)
+        {
+            std::string host = Required<std::string>(command, "host");
+            unsigned short port = InRange<unsigned short>(Required<long long>(command, "port"), "port");
+            RakNet::SystemAddress target;
+            if (!target.FromStringExplicitPort(host.c_str(), port))
+                throw CommandError("field 'host' is not an address");
+            peer_->CancelConnectionAttempt(target);
         }
 
         void Ping(const json& command, ordered_json& result)
@@ -460,6 +535,8 @@ namespace
             stats["packetlossTotal"] = statistics.packetlossTotal;
             stats["isLimitedByCongestionControl"] = statistics.isLimitedByCongestionControl;
             stats["bpsLimitByCongestionControl"] = statistics.BPSLimitByCongestionControl;
+            stats["isLimitedByOutgoingBandwidthLimit"] = statistics.isLimitedByOutgoingBandwidthLimit;
+            stats["bpsLimitByOutgoingBandwidthLimit"] = statistics.BPSLimitByOutgoingBandwidthLimit;
 
             ordered_json runningTotal = ordered_json::object();
             ordered_json valueOverLastSecond = ordered_json::object();
@@ -490,6 +567,9 @@ namespace
                     connection["address"] = AddressToString(addresses[i]);
                     connection["mtu"] = peer_->GetMTUSize(addresses[i]);
                     connection["averagePing"] = peer_->GetAveragePing(RakNet::AddressOrGUID(addresses[i]));
+                    connection["lastPing"] = peer_->GetLastPing(RakNet::AddressOrGUID(addresses[i]));
+                    connection["lowestPing"] = peer_->GetLowestPing(RakNet::AddressOrGUID(addresses[i]));
+                    connection["externalAddress"] = AddressToString(peer_->GetExternalID(addresses[i]));
                     connections.push_back(connection);
                 }
             }

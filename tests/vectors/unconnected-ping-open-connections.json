@@ -1,0 +1,14 @@
+{
+  "scenario": "unconnected-ping-open-connections",
+  "description": "Native client pings a native server that accepts connections, asking for a pong only if it does.",
+  "source": "interop-peer, RakNet 1a169895a900c9fc4841c556e16514182b75faf8",
+  "captured": "2026-10-19T13:28:21Z",
+  "peers": {
+    "a": { "role": "client", "guid": "1792416501026903" },
+    "b": { "role": "server", "guid": "1792416500981606" }
+  },
+  "datagrams": [
+    { "index": 0, "timeMs": 0, "from": "a", "to": "b", "hex": "02000000000000001600ffff00fefefefefdfdfdfd1234567800065e317cd55057" },
+    { "index": 1, "timeMs": 0, "from": "b", "to": "a", "hex": "1c000000000000001600065e317cd49f6600ffff00fefefefefdfdfdfd12345678" }
+  ]
+}

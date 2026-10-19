@@ -23,6 +23,7 @@ public sealed class UdpProxy : IAsyncDisposable
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentDictionary<IPEndPoint, Upstream> _upstreams = new();
+    private readonly Lock _upstreamLock = new();
     private readonly List<ProxyDatagram> _datagrams = [];
     private readonly Lock _recordLock = new();
     private readonly PriorityQueue<Delayed, (long Due, long Order)> _delayed = new();
@@ -35,6 +36,7 @@ public sealed class UdpProxy : IAsyncDisposable
     private long _delayedOrder;
     private long _timerDue = long.MaxValue;
     private volatile FaultOptions _faults;
+    private volatile Func<ProxyDirection, ReadOnlyMemory<byte>, FaultDecision?>? _rule;
 
     private UdpProxy(IPEndPoint server, FaultOptions faults, TimeProvider time)
     {
@@ -58,6 +60,16 @@ public sealed class UdpProxy : IAsyncDisposable
         set => _faults = value ?? throw new ArgumentNullException(nameof(value));
     }
 
+    /// <summary>
+    /// Decides the fault for particular datagrams, such as one part of a split message, ahead of <see cref="Faults"/>.
+    /// Returns null for datagrams it leaves to the seeded faults. Applies to datagrams received from now on.
+    /// </summary>
+    public Func<ProxyDirection, ReadOnlyMemory<byte>, FaultDecision?>? Rule
+    {
+        get => _rule;
+        set => _rule = value;
+    }
+
     /// <summary>A snapshot of every datagram received so far, in arrival order.</summary>
     public IReadOnlyList<ProxyDatagram> Datagrams
     {
@@ -73,6 +85,17 @@ public sealed class UdpProxy : IAsyncDisposable
     /// <summary>The address the server sees for each client endpoint.</summary>
     public IReadOnlyDictionary<IPEndPoint, IPEndPoint> UpstreamEndPoints =>
         _upstreams.ToDictionary(pair => pair.Key, pair => (IPEndPoint)pair.Value.Socket.LocalEndPoint!);
+
+    /// <summary>
+    /// The address the server sees <paramref name="client"/> at, opening it if the client has not sent anything yet.
+    /// Datagrams the server sends there reach the client from <see cref="ListenEndPoint"/>, so the server can start
+    /// a conversation, as in a cross connection.
+    /// </summary>
+    public IPEndPoint UpstreamEndPointFor(IPEndPoint client)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        return (IPEndPoint)GetUpstream(client).Socket.LocalEndPoint!;
+    }
 
     public static UdpProxy Start(IPEndPoint server, FaultOptions? faults = null, TimeProvider? timeProvider = null)
     {
@@ -123,8 +146,21 @@ public sealed class UdpProxy : IAsyncDisposable
         while (await ReceiveAsync(_listen, buffer, any).ConfigureAwait(false) is { } received)
         {
             var client = (IPEndPoint)received.RemoteEndPoint;
-            var upstream = _upstreams.GetOrAdd(client, CreateUpstream);
+            var upstream = GetUpstream(client);
             Forward(ProxyDirection.AToB, client, buffer.AsSpan(0, received.ReceivedBytes).ToArray(), upstream.Socket, ServerEndPoint);
+        }
+    }
+
+    // The listen loop and UpstreamEndPointFor both open upstreams; the lock makes sure each client gets exactly one.
+    private Upstream GetUpstream(IPEndPoint client)
+    {
+        if (_upstreams.TryGetValue(client, out var existing))
+        {
+            return existing;
+        }
+        lock (_upstreamLock)
+        {
+            return _upstreams.TryGetValue(client, out existing) ? existing : _upstreams[client] = CreateUpstream(client);
         }
     }
 
@@ -175,7 +211,7 @@ public sealed class UdpProxy : IAsyncDisposable
     private void Forward(ProxyDirection direction, IPEndPoint client, byte[] payload, Socket via, IPEndPoint to)
     {
         var index = direction == ProxyDirection.AToB ? Interlocked.Increment(ref _aToBCount) - 1 : Interlocked.Increment(ref _bToACount) - 1;
-        var fault = _faults.Decide(direction, index);
+        var fault = _rule?.Invoke(direction, payload) ?? _faults.Decide(direction, index);
         Record(direction, client, payload, fault);
         if (fault.Drop)
         {

@@ -1,6 +1,7 @@
 ﻿// A stand-in for tools/interop-peer that speaks the JSON Lines protocol in docs/interop-protocol.md
 // without RakNet, so NativePeerDriver can be tested on machines without the native binary.
-// It does no networking. Extra commands exist only to exercise the driver:
+// It does no networking; query commands (info, stats, time) reply with fixed values.
+// Extra commands exist only to exercise the driver:
 //   history          reply carries "commands": every command received so far
 //   delayed  ms      reply after ms milliseconds, without blocking later commands
 //   emit     line    writes the given object as a raw line on stdout (events, malformed lines)
@@ -101,9 +102,63 @@ while (await stdin.ReadLineAsync() is { } line)
                 ["timeMs"] = 2000,
             });
             break;
-        case "close":
+        case "sendList":
+            WriteLine(Ok(("receipt", nextReceipt++)));
+            break;
+        case "close" or "cancelConnect" or "pingConnected" or "setTimeout" or "setMaxIncoming" or "setOccasionalPing"
+            or "setSplitMessageProgressInterval" or "setOutgoingBandwidthLimit" or "ban":
             WriteLine(Ok());
             break;
+        case "advertise":
+            WriteLine(Ok(("sent", true)));
+            break;
+        case "time":
+            WriteLine(Ok(("time", guid)));
+            break;
+        case "info":
+            WriteLine(Ok(
+                ("guid", guid),
+                ("boundAddress", "127.0.0.1:40000"),
+                ("connections", new JsonArray(new JsonObject
+                {
+                    ["guid"] = "42",
+                    ["address"] = "127.0.0.1:1234",
+                    ["mtu"] = 1492,
+                    ["averagePing"] = 3,
+                    ["lastPing"] = 2,
+                    ["lowestPing"] = 1,
+                    ["externalAddress"] = "127.0.0.1:40000",
+                }))));
+            break;
+        case "stats":
+        {
+            string[] metrics =
+            [
+                "USER_MESSAGE_BYTES_PUSHED", "USER_MESSAGE_BYTES_SENT", "USER_MESSAGE_BYTES_RESENT",
+                "USER_MESSAGE_BYTES_RECEIVED_PROCESSED", "USER_MESSAGE_BYTES_RECEIVED_IGNORED", "ACTUAL_BYTES_SENT", "ACTUAL_BYTES_RECEIVED",
+            ];
+            var runningTotal = new JsonObject();
+            var valueOverLastSecond = new JsonObject();
+            for (var i = 0; i < metrics.Length; i++)
+            {
+                runningTotal[metrics[i]] = 7 + i;
+                valueOverLastSecond[metrics[i]] = 8 + i;
+            }
+            WriteLine(Ok(("stats", new JsonObject
+            {
+                ["messagesInResendBuffer"] = 2,
+                ["bytesInResendBuffer"] = 300,
+                ["packetlossLastSecond"] = 0.25,
+                ["packetlossTotal"] = 0.5,
+                ["isLimitedByCongestionControl"] = true,
+                ["bpsLimitByCongestionControl"] = 1000,
+                ["isLimitedByOutgoingBandwidthLimit"] = true,
+                ["bpsLimitByOutgoingBandwidthLimit"] = 100000,
+                ["runningTotal"] = runningTotal,
+                ["valueOverLastSecond"] = valueOverLastSecond,
+            })));
+            break;
+        }
         case "connectionState":
             WriteLine(Ok(("state", "IS_CONNECTED")));
             break;

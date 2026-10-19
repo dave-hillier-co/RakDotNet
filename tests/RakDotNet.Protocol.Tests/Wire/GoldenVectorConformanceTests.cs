@@ -170,6 +170,10 @@ public class GoldenVectorConformanceTests
             MessageId.OpenConnectionReply1 => RoundTrip<OpenConnectionReply1>(bytes),
             MessageId.OpenConnectionRequest2 => RoundTrip<OpenConnectionRequest2>(bytes),
             MessageId.OpenConnectionReply2 => RoundTrip<OpenConnectionReply2>(bytes),
+            MessageId.OutOfBandInternal => RoundTrip<AdvertiseSystem>(bytes),
+            MessageId.NoFreeIncomingConnections => RoundTrip<NoFreeIncomingConnections>(bytes),
+            MessageId.ConnectionBanned => RoundTrip<ConnectionBanned>(bytes),
+            MessageId.AlreadyConnected => RoundTrip<AlreadyConnected>(bytes),
             var id => throw new Xunit.Sdk.XunitException($"No conformance mapping for offline message {id}."),
         };
 

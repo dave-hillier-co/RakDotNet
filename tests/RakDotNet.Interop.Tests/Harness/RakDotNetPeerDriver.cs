@@ -101,6 +101,45 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
         return Task.CompletedTask;
     }
 
+    public Task<uint> SendListAsync(SendListOptions options, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support SendList yet.");
+
+    public Task CancelConnectionAttemptAsync(IPEndPoint remote, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support CancelConnectionAttempt yet.");
+
+    public Task PingConnectedAsync(ulong target, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support connected pings yet.");
+
+    public Task<bool> AdvertiseSystemAsync(IPEndPoint remote, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support AdvertiseSystem yet.");
+
+    public Task SetTimeoutAsync(TimeSpan timeout, ulong? target = null, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support SetTimeoutTime yet.");
+
+    public Task SetMaximumIncomingConnectionsAsync(int count, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support SetMaximumIncomingConnections yet.");
+
+    public Task SetOccasionalPingAsync(bool enabled, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support SetOccasionalPing yet.");
+
+    public Task SetSplitMessageProgressIntervalAsync(int interval, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support SetSplitMessageProgressInterval yet.");
+
+    public Task SetOutgoingBandwidthLimitAsync(uint bitsPerSecond, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support SetPerConnectionOutgoingBandwidthLimit yet.");
+
+    public Task BanAsync(string ip, TimeSpan duration, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support the ban list yet.");
+
+    public Task<PeerStatistics> GetStatisticsAsync(ulong target, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support GetStatistics yet.");
+
+    public Task<PeerInfo> GetInfoAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support connection list queries yet.");
+
+    public Task<ulong> GetTimeAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The RakDotNet peer driver does not support RakNet::GetTime yet.");
+
     public Task<string> GetConnectionStateAsync(ulong target, CancellationToken cancellationToken = default) =>
         Task.FromResult(ToProtocolName(Started("connectionState").Execute((core, _) => core.GetConnectionState(target))));
 

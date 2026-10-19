@@ -3,6 +3,7 @@ using RakDotNet.Interop.Tests.Harness;
 namespace RakDotNet.Interop.Tests.Scenarios;
 
 /// <summary>Each scenario runs over the (client, server) matrix with a <see cref="UdpProxy"/> in between.</summary>
+[Collection(OneScenarioAtATime.Name)]
 public sealed class ProxiedScenarios
 {
     private static CancellationToken Token => TestContext.Current.CancellationToken;

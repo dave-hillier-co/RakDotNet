@@ -57,6 +57,7 @@ Things that are easy to get wrong, from the C++ source:
 - Sequenced messages carry a separate sequencing index in addition to the ordering index and channel.
 - Datagram header flags: valid, ACK, NAK, packet pair, continuous send, needs B and AS. Parse the bits; don't match on byte values.
 - RakNet rewrites `ID_UNCONNECTED_PONG` before handing it to the application: the application sees the ID, a 4-byte big-endian time and the response data, with the GUID and magic removed (`RakPeer.cpp:4682-4700`). Code that presents packets the way RakNet does must apply the same rewrite.
+- RakNet joins a split message's parts in the order they arrived, not by split index (`InsertIntoSplitPacketList` appends, `ReliabilityLayer.cpp:3141`; `BuildPacketFromSplitPacketList` copies in list order, `ReliabilityLayer.cpp:3197-3211`; `PREALLOCATE_LARGE_MESSAGES` is 0). A native receiver therefore corrupts a split message whose parts the network reordered. This is receive-side behaviour, not wire format: RakDotNet joins parts by split index.
 
 ## Hardening requirements
 

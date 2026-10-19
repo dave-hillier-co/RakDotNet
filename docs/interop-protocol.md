@@ -30,20 +30,26 @@ On launch the peer prints one event before reading commands:
 | `startup` | `port` (0), `host` ("127.0.0.1"), `maxConnections` (8), `maxIncoming` (8) | `port` (actually bound), `guid` | `Startup`, `SetMaximumIncomingConnections` |
 | `connect` | `host`, `port`, `password` (hex, ""), `attempts` (12), `attemptIntervalMs` (500), `timeoutMs` (0) | `result` (`ConnectionAttemptResult` name, e.g. `CONNECTION_ATTEMPT_STARTED`) | `Connect` |
 | `send` | `target` (guid), `data` (hex, includes the message ID byte), `reliability` (`RELIABLE_ORDERED`), `priority` (`HIGH_PRIORITY`), `channel` (0), `broadcast` (false) | `receipt` (uint32) | `Send` |
+| `sendList` | `parts` (array of non-empty hex strings, sent joined as one message), then the fields of `send` except `data` | `receipt` (uint32) | `SendList` |
 | `close` | `target`, `notify` (true), `channel` (0) | | `CloseConnection` |
+| `cancelConnect` | `host`, `port` | | `CancelConnectionAttempt` |
 | `ping` | `host`, `port`, `onlyIfAccepting` (false) | `sent` (bool) | `Ping(host, port, ...)` (unconnected) |
 | `pingConnected` | `target` | | `Ping(SystemAddress)` |
 | `setOfflinePingResponse` | `data` (hex) | | `SetOfflinePingResponse` |
 | `advertise` | `host`, `port`, `data` (hex, "") | `sent` (bool) | `AdvertiseSystem` |
 | `setTimeout` | `ms`, `target` (optional; all systems when omitted) | | `SetTimeoutTime` |
 | `setMaxIncoming` | `count` | | `SetMaximumIncomingConnections` |
+| `setOccasionalPing` | `enabled` | | `SetOccasionalPing` |
+| `setSplitMessageProgressInterval` | `interval` (0 = never) | | `SetSplitMessageProgressInterval` |
+| `setOutgoingBandwidthLimit` | `bitsPerSecond` (0 = unlimited) | | `SetPerConnectionOutgoingBandwidthLimit` |
 | `ban` | `ip`, `ms` (0 = forever) | | `AddToBanList` |
 | `connectionState` | `target` | `state` (`ConnectionState` name, e.g. `IS_CONNECTED`) | `GetConnectionState` |
 | `stats` | `target` | `stats` object (see below) | `GetStatistics` |
-| `info` | | `guid`, `boundAddress`, `mtu` per connection (`connections` array of `{guid,address,mtu,averagePing}`) | `GetMyGUID`, `GetMyBoundAddress`, `GetConnectionList`, `GetMTUSize`, `GetAveragePing` |
+| `info` | | `guid`, `boundAddress`, and `connections`, an array of `{guid,address,mtu,averagePing,lastPing,lowestPing,externalAddress}` | `GetMyGUID`, `GetMyBoundAddress`, `GetConnectionList`, `GetGuidFromSystemAddress`, `GetMTUSize`, `GetAveragePing`, `GetLastPing`, `GetLowestPing`, `GetExternalID` |
+| `time` | | `time` (decimal string) | `RakNet::GetTime`, the clock `ID_TIMESTAMP` values are written in |
 | `shutdown` | `blockMs` (100) | | `Shutdown`, then the process exits 0 after the reply |
 
-`stats` object: `messagesInResendBuffer`, `bytesInResendBuffer`, `packetlossLastSecond`, `packetlossTotal`, `isLimitedByCongestionControl`, `bpsLimitByCongestionControl`, and `runningTotal` and `valueOverLastSecond` objects keyed by the `RNSPerSecondMetrics` names (`USER_MESSAGE_BYTES_PUSHED`, `USER_MESSAGE_BYTES_SENT`, `USER_MESSAGE_BYTES_RESENT`, `USER_MESSAGE_BYTES_RECEIVED_PROCESSED`, `USER_MESSAGE_BYTES_RECEIVED_IGNORED`, `ACTUAL_BYTES_SENT`, `ACTUAL_BYTES_RECEIVED`).
+`stats` object: `messagesInResendBuffer`, `bytesInResendBuffer`, `packetlossLastSecond`, `packetlossTotal`, `isLimitedByCongestionControl`, `bpsLimitByCongestionControl`, `isLimitedByOutgoingBandwidthLimit`, `bpsLimitByOutgoingBandwidthLimit`, and `runningTotal` and `valueOverLastSecond` objects keyed by the `RNSPerSecondMetrics` names (`USER_MESSAGE_BYTES_PUSHED`, `USER_MESSAGE_BYTES_SENT`, `USER_MESSAGE_BYTES_RESENT`, `USER_MESSAGE_BYTES_RECEIVED_PROCESSED`, `USER_MESSAGE_BYTES_RECEIVED_IGNORED`, `ACTUAL_BYTES_SENT`, `ACTUAL_BYTES_RECEIVED`).
 
 ## Events
 
