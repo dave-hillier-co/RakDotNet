@@ -168,7 +168,7 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `GetClientPublicKeyFromSystemAddress` | `connection.RemoteIdentityKey` |
 | `SetTimeoutTime(ms, UNASSIGNED)` | `peer.DefaultTimeout` (default and every live connection) |
 | `SetTimeoutTime(ms, target)` / `GetTimeoutTime(target)` | `connection.Timeout` |
-| `GetMTUSize(target)` | `connection.Mtu`; `RakNetConstants.MaximumMtuSize` for `UNASSIGNED` |
+| `GetMTUSize(target)` | `connection.Mtu`; for `UNASSIGNED` RakNet's `defaultMTUSize`, the smallest of `RakNetConstants.MtuSizes` (`RakPeer.cpp:206`, `2580`) |
 | `GetNumberOfAddresses` / `GetLocalIP(i)` | `peer.LocalAddresses.Count` / `peer.LocalAddresses[i]` |
 | `IsLocalIP` | `peer.IsLocalAddress(IPAddress)` |
 | `AllowConnectionResponseIPMigration` | `peer.AllowConnectionResponseIpMigration` |

@@ -47,13 +47,13 @@ public sealed class RakPeerInterface : IDisposable
     /// <summary>Thread priority is not configurable, so RakNet's threadPriority argument is absent.</summary>
     public StartupResult Startup(int maxConnections, ReadOnlySpan<SocketDescriptor> socketDescriptors)
     {
-        // RakPeer.cpp:519-534.
+        // RakPeer.cpp:374-422: already started, then the descriptors, then maxConnections.
         if (IsActive())
             return StartupResult.RakNetAlreadyStarted;
-        if (maxConnections <= 0)
-            return StartupResult.InvalidMaxConnections;
         if (socketDescriptors.IsEmpty)
             return StartupResult.InvalidSocketDescriptors;
+        if (maxConnections <= 0)
+            return StartupResult.InvalidMaxConnections;
 
         var bindings = new List<SocketBinding>(socketDescriptors.Length);
         foreach (var descriptor in socketDescriptors)
@@ -154,7 +154,7 @@ public sealed class RakPeerInterface : IDisposable
     public ushort GetMaximumIncomingConnections() =>
         (ushort)(_peer is { IsActive: true } peer ? peer.MaxIncomingConnections : _pending.MaxIncomingConnections);
 
-    /// <summary>The connected systems (RakPeer.cpp:1018-1036 counts only IS_CONNECTED).</summary>
+    /// <summary>The connected systems: NumberOfConnections (RakPeer.cpp:920-926) counts GetSystemList, which lists only CONNECTED systems (RakPeer.cpp:1832-1850).</summary>
     public ushort NumberOfConnections() => (ushort)ConnectedSystems().Count();
 
     public void SetIncomingPassword(ReadOnlySpan<byte> passwordData)
@@ -234,7 +234,7 @@ public sealed class RakPeerInterface : IDisposable
 
     public uint IncrementNextSendReceipt() => _peer?.ReserveReceipt().Value ?? 1;
 
-    /// <summary>RakPeer::Send (RakPeer.cpp:1300-1349): 0 on bad input or when the peer is not active.</summary>
+    /// <summary>RakPeer::Send (RakPeer.cpp:1308-1349): 0 on bad input or when the peer is not active.</summary>
     public uint Send(ReadOnlySpan<byte> data, Priority priority, Reliability reliability, byte orderingChannel,
                      AddressOrGuid systemIdentifier, bool broadcast, uint forceReceiptNumber = 0) =>
         Send(new OutgoingMessage(data), priority, reliability, orderingChannel, systemIdentifier, broadcast, forceReceiptNumber);
@@ -453,9 +453,12 @@ public sealed class RakPeerInterface : IDisposable
         return (uint)(_peer?.DefaultTimeout ?? _pending.DefaultTimeout).TotalMilliseconds;
     }
 
-    /// <summary>GetMTUSize: the connection's MTU, else MAXIMUM_MTU_SIZE (RakPeer.cpp:2556-2569).</summary>
+    /// <summary>
+    /// GetMTUSize: the connection's MTU, else defaultMTUSize (RakPeer.cpp:2572-2581), which is the smallest MTU tried
+    /// (RakPeer.cpp:206).
+    /// </summary>
     public int GetMTUSize(SystemAddress target) =>
-        _peer is not null && target.IsAssigned && _peer.TryGetConnection(target, out var connection) ? connection.Mtu : RakNetConstants.MaximumMtuSize;
+        _peer is not null && target.IsAssigned && _peer.TryGetConnection(target, out var connection) ? connection.Mtu : RakNetConstants.MtuSizes[^1];
 
     public uint GetNumberOfAddresses() => (uint)(_peer?.LocalAddresses.Count ?? 0);
 
@@ -563,7 +566,7 @@ public sealed class RakPeerInterface : IDisposable
 
     /// <summary>
     /// Null when <paramref name="systemAddress"/> is not connected; for <see cref="SystemAddress.Unassigned"/>, the sum
-    /// over every connection, as RakNet adds them up (RakPeer.cpp:3141-3161).
+    /// over every connection, as RakNet adds them up (RakPeer.cpp:3051-3094).
     /// </summary>
     public RakNetStatistics? GetStatistics(SystemAddress systemAddress)
     {

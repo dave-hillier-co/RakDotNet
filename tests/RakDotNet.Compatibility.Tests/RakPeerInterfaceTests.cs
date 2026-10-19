@@ -20,6 +20,8 @@ public sealed class RakPeerInterfaceTests : IDisposable
         var peer = Instance();
         Assert.Equal(StartupResult.InvalidMaxConnections, peer.Startup(0, [Loopback()]));
         Assert.Equal(StartupResult.InvalidSocketDescriptors, peer.Startup(1, []));
+        // RakPeer.cpp:411-422 checks the descriptors before maxConnections.
+        Assert.Equal(StartupResult.InvalidSocketDescriptors, peer.Startup(0, []));
         Assert.False(peer.IsActive());
 
         Assert.Equal(StartupResult.RakNetStarted, peer.Startup(1, [Loopback()]));
@@ -265,7 +267,8 @@ public sealed class RakPeerInterfaceTests : IDisposable
         Assert.NotEqual(0, bound.Port);
         Assert.Equal(peer.GetMyGUID(), peer.GetGuidFromSystemAddress(SystemAddress.Unassigned));
         Assert.Equal(peer.Peer!.InternalAddresses[0], peer.GetInternalID());
-        Assert.Equal(1492, peer.GetMTUSize(SystemAddress.Unassigned));
+        // RakPeer.cpp:2580 returns defaultMTUSize, which RakPeer.cpp:206 sets to the smallest MTU tried, 576.
+        Assert.Equal(576, peer.GetMTUSize(SystemAddress.Unassigned));
         Assert.Equal(-1, peer.GetIndexFromSystemAddress(new SystemAddress(IPAddress.Loopback, 9)));
         Assert.Equal(SystemAddress.Unassigned, peer.GetSystemAddressFromIndex(3));
         Assert.True(peer.IsLocalIP("127.0.0.1"));
