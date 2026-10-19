@@ -8,10 +8,25 @@ namespace RakDotNet.Protocol.Wire.Messages;
 /// </summary>
 public readonly record struct TimestampHeader(ulong Time) : IWireMessage<TimestampHeader>
 {
-    public void Write(ref BitStreamWriter writer) => throw new NotImplementedException();
+    /// <summary>The ID and the time.</summary>
+    public const int Length = 1 + sizeof(ulong);
 
-    public static bool TryRead(ref BitStreamReader reader, [MaybeNullWhen(false)] out TimestampHeader value) =>
-        throw new NotImplementedException();
+    public void Write(ref BitStreamWriter writer)
+    {
+        writer.WriteByte((byte)MessageId.Timestamp);
+        writer.WriteUInt64(Time);
+    }
+
+    public static bool TryRead(ref BitStreamReader reader, [MaybeNullWhen(false)] out TimestampHeader value)
+    {
+        value = default;
+        var r = reader;
+        if (!MessageIdField.TryRead(ref r, MessageId.Timestamp) || !r.TryReadUInt64(out var time))
+            return false;
+        value = new TimestampHeader(time);
+        reader = r;
+        return true;
+    }
 }
 
 /// <summary>
@@ -20,8 +35,24 @@ public readonly record struct TimestampHeader(ulong Time) : IWireMessage<Timesta
 /// </summary>
 public readonly record struct OutOfBandHeader(RakNetGuid Sender) : IWireMessage<OutOfBandHeader>
 {
-    public void Write(ref BitStreamWriter writer) => throw new NotImplementedException();
+    /// <summary>The ID, the GUID and the magic.</summary>
+    public const int Length = 1 + sizeof(ulong) + OfflineMagic.Length;
 
-    public static bool TryRead(ref BitStreamReader reader, [MaybeNullWhen(false)] out OutOfBandHeader value) =>
-        throw new NotImplementedException();
+    public void Write(ref BitStreamWriter writer)
+    {
+        writer.WriteByte((byte)MessageId.OutOfBandInternal);
+        writer.WriteUInt64(Sender.Value);
+        OfflineMagic.Write(ref writer);
+    }
+
+    public static bool TryRead(ref BitStreamReader reader, [MaybeNullWhen(false)] out OutOfBandHeader value)
+    {
+        value = default;
+        var r = reader;
+        if (!MessageIdField.TryRead(ref r, MessageId.OutOfBandInternal) || !r.TryReadUInt64(out var guid) || !OfflineMagic.TryRead(ref r))
+            return false;
+        value = new OutOfBandHeader(new RakNetGuid(guid));
+        reader = r;
+        return true;
+    }
 }

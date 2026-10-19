@@ -188,7 +188,18 @@ public ref struct BitStreamReader
     /// <remarks>
     /// Not an overload of <see cref="TryReadAddress"/>, because <c>TryReadAddress(out var a)</c> would then be ambiguous.
     /// </remarks>
-    public bool TryReadSystemAddress(out SystemAddress address) => throw new NotImplementedException();
+    public bool TryReadSystemAddress(out SystemAddress address)
+    {
+        address = SystemAddress.Unassigned;
+        var start = _bitPosition;
+        if (!TryReadByte(out var version) || version != 4 || !TryReadUInt32(out var inverted) || !TryReadUInt16(out var port))
+        {
+            _bitPosition = start;
+            return false;
+        }
+        address = new SystemAddress(~inverted, port);
+        return true;
+    }
 
     /// <summary>Reads an IPv4 SystemAddress. See <see cref="BitStreamWriter.WriteAddress(IPEndPoint)"/>.</summary>
     public bool TryReadAddress(out IPEndPoint? endPoint)
