@@ -93,7 +93,6 @@ public sealed class OfflineMessageScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Advertise_system_delivers_its_data_to_an_unconnected_peer(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.AdvertiseSystem);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
 
         await OfflineFlows.AdvertiseSystemAsync(session, Token);

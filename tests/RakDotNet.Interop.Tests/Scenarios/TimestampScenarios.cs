@@ -22,8 +22,6 @@ public sealed class TimestampScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Connected_pings_measure_the_round_trip_through_the_proxy(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone4.ConnectedPings);
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone5.ConnectionQueries);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, _) = await session.ConnectAsync(Token);
 
@@ -50,8 +48,6 @@ public sealed class TimestampScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_timestamped_message_arrives_with_the_senders_time_in_the_receivers_clock(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone5.Time);
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.Timestamps);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         // RakNet::GetTime counts from process start, so a client started this much later than the server has a clock
         // that far behind, and only a rewritten timestamp lands near the receiver's own time.

@@ -22,9 +22,7 @@ public sealed class CrossConnectionScenarios
         await ConnectAtOnceAndSendAsync(session);
     }
 
-    // CrossConnectionTest.cpp's failure was a second, half-open connection; a peer that can list its connections must
-    // list exactly one. Native peers are checked in every combination; the scenario then skips if a RakDotNet peer
-    // could not be checked, so the gap shows in the matrix.
+    // CrossConnectionTest.cpp's failure was a second, half-open connection; each peer must list exactly one.
     [Theory]
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Peers_that_connect_to_each_other_at_the_same_time_end_with_one_connection_each(PeerKind client, PeerKind server)
@@ -34,20 +32,8 @@ public sealed class CrossConnectionScenarios
 
         var serverGuid = session.ServerStarted.PeerGuid;
         var clientGuid = session.ClientStarted.PeerGuid;
-        var clientPending = PeerMatrix.PendingReason(client, PeerMatrix.Milestone5.ConnectionQueries);
-        var serverPending = PeerMatrix.PendingReason(server, PeerMatrix.Milestone5.ConnectionQueries);
-        if (clientPending is null)
-        {
-            await AssertOneConnectionAsync(session.ClientPeer, serverGuid);
-        }
-        if (serverPending is null)
-        {
-            await AssertOneConnectionAsync(session.ServerPeer, clientGuid);
-        }
-        if ((clientPending ?? serverPending) is { } reason)
-        {
-            Assert.Skip(reason);
-        }
+        await AssertOneConnectionAsync(session.ClientPeer, serverGuid);
+        await AssertOneConnectionAsync(session.ServerPeer, clientGuid);
     }
 
     private static async Task ConnectAtOnceAndSendAsync(InteropSession session)

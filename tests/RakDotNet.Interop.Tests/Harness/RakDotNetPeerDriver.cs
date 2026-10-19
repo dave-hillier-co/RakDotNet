@@ -120,44 +120,112 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
         return Task.CompletedTask;
     }
 
-    public Task<uint> SendListAsync(SendListOptions options, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support SendList yet.");
+    public Task<uint> SendListAsync(SendListOptions options, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.Parts.Count == 0 || options.Parts.Any(p => p.IsEmpty))
+        {
+            throw new PeerCommandException("sendList", "field 'parts' must be a non-empty array of hex strings");
+        }
 
-    public Task CancelConnectionAttemptAsync(IPEndPoint remote, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support CancelConnectionAttempt yet.");
+        var peer = Started("sendList");
+        // RakPeer::SendList sends the parts as one message (RakPeer.cpp:1371-1435).
+        var message = new OutgoingMessage(Sequence(options.Parts));
+        var target = new RakNetGuid(options.Target);
+        if (options.Broadcast)
+        {
+            return Task.FromResult(peer.Broadcast(message, options.Reliability, options.Priority, options.Channel, except: target).Receipt.Value);
+        }
+        if (!target.IsAssigned)
+        {
+            return Task.FromResult(0u);
+        }
+        return Task.FromResult(peer.Send(message, target, options.Reliability, options.Priority, options.Channel).Receipt.Value);
+    }
 
-    public Task PingConnectedAsync(ulong target, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support connected pings yet.");
+    public Task CancelConnectionAttemptAsync(IPEndPoint remote, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        Started("cancelConnect").CancelConnectionAttempt(remote);
+        return Task.CompletedTask;
+    }
 
-    public Task<bool> AdvertiseSystemAsync(IPEndPoint remote, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support AdvertiseSystem yet.");
+    public Task PingConnectedAsync(ulong target, CancellationToken cancellationToken = default)
+    {
+        Connection("pingConnected", target).Ping();
+        return Task.CompletedTask;
+    }
 
-    public Task SetTimeoutAsync(TimeSpan timeout, ulong? target = null, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support SetTimeoutTime yet.");
+    public Task<bool> AdvertiseSystemAsync(IPEndPoint remote, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        return Task.FromResult(Started("advertise").AdvertiseSystem(remote, data.Span));
+    }
 
-    public Task SetMaximumIncomingConnectionsAsync(int count, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support SetMaximumIncomingConnections yet.");
+    public Task SetTimeoutAsync(TimeSpan timeout, ulong? target = null, CancellationToken cancellationToken = default)
+    {
+        // UNASSIGNED_SYSTEM_ADDRESS applies to every system and the default (RakPeer.cpp:2526).
+        if (target is { } guid)
+        {
+            Connection("setTimeout", guid).Timeout = timeout;
+        }
+        else
+        {
+            Started("setTimeout").DefaultTimeout = timeout;
+        }
+        return Task.CompletedTask;
+    }
 
-    public Task SetOccasionalPingAsync(bool enabled, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support SetOccasionalPing yet.");
+    public Task SetMaximumIncomingConnectionsAsync(int count, CancellationToken cancellationToken = default)
+    {
+        Started("setMaxIncoming").MaxIncomingConnections = count;
+        return Task.CompletedTask;
+    }
 
-    public Task SetSplitMessageProgressIntervalAsync(int interval, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support SetSplitMessageProgressInterval yet.");
+    public Task SetOccasionalPingAsync(bool enabled, CancellationToken cancellationToken = default)
+    {
+        Started("setOccasionalPing").OccasionalPing = enabled;
+        return Task.CompletedTask;
+    }
 
-    public Task SetOutgoingBandwidthLimitAsync(uint bitsPerSecond, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support SetPerConnectionOutgoingBandwidthLimit yet.");
+    public Task SetSplitMessageProgressIntervalAsync(int interval, CancellationToken cancellationToken = default)
+    {
+        Started("setSplitMessageProgressInterval").SplitMessageProgressInterval = interval;
+        return Task.CompletedTask;
+    }
 
-    public Task BanAsync(string ip, TimeSpan duration, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support the ban list yet.");
+    public Task SetOutgoingBandwidthLimitAsync(uint bitsPerSecond, CancellationToken cancellationToken = default)
+    {
+        Started("setOutgoingBandwidthLimit").PerConnectionOutgoingBandwidthLimit = bitsPerSecond;
+        return Task.CompletedTask;
+    }
+
+    public Task BanAsync(string ip, TimeSpan duration, CancellationToken cancellationToken = default)
+    {
+        Started("ban").BanList.Add(ip, duration);
+        return Task.CompletedTask;
+    }
 
     public Task<PeerStatistics> GetStatisticsAsync(ulong target, CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support GetStatistics yet.");
+        Task.FromResult(ToPeerStatistics(Connection("stats", target).GetStatistics()));
 
-    public Task<PeerInfo> GetInfoAsync(CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support connection list queries yet.");
+    public Task<PeerInfo> GetInfoAsync(CancellationToken cancellationToken = default)
+    {
+        var peer = Started("info");
+        // GetConnectionList, GetMTUSize, GetAveragePing, GetLastPing, GetLowestPing and GetExternalID, as interop-peer
+        // reports them: -1 for no average, 65535 for no ping yet (RakPeer.cpp:2149-2216).
+        var connections = peer.Connections.Select(c => new ConnectionInfo(
+            c.RakNetGuid.Value,
+            c.Address.ToIPEndPoint(),
+            c.Mtu,
+            c.AveragePing is { } average ? (int)average.TotalMilliseconds : -1,
+            c.LastPing is { } last ? (int)last.TotalMilliseconds : ushort.MaxValue,
+            c.LowestPing is { } lowest ? (int)lowest.TotalMilliseconds : ushort.MaxValue,
+            c.ExternalAddress.ToIPEndPoint())).ToList();
+        return Task.FromResult(new PeerInfo(peer.RakNetGuid.Value, peer.Sockets[0].LocalAddress.ToIPEndPoint(), connections));
+    }
 
-    public Task<ulong> GetTimeAsync(CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("The RakDotNet peer driver does not support RakNet::GetTime yet.");
+    public Task<ulong> GetTimeAsync(CancellationToken cancellationToken = default) => Task.FromResult(Started("time").GetTime());
 
     public Task<string> GetConnectionStateAsync(ulong target, CancellationToken cancellationToken = default) =>
         Task.FromResult(ToProtocolName(Started("connectionState").GetConnectionState(new RakNetGuid(target))));
@@ -231,8 +299,64 @@ public sealed class RakDotNetPeerDriver : IPeerDriver
         _ => throw new ArgumentOutOfRangeException(nameof(error), error, null),
     };
 
+    /// <summary>The fields of the interop <c>stats</c> reply (tools/interop-peer/src/main.cpp, Stats).</summary>
+    internal static PeerStatistics ToPeerStatistics(in RakNetStatistics statistics)
+    {
+        var runningTotal = new Dictionary<PerSecondMetric, ulong>();
+        var valueOverLastSecond = new Dictionary<PerSecondMetric, ulong>();
+        foreach (var metric in Enum.GetValues<RnsPerSecondMetric>())
+        {
+            runningTotal[(PerSecondMetric)metric] = statistics.RunningTotal[metric];
+            valueOverLastSecond[(PerSecondMetric)metric] = statistics.ValueOverLastSecond[metric];
+        }
+        return new PeerStatistics(
+            (int)statistics.MessagesInResendBuffer,
+            statistics.BytesInResendBuffer,
+            statistics.PacketLossLastSecond,
+            statistics.PacketLossTotal,
+            statistics.IsLimitedByCongestionControl,
+            statistics.BpsLimitByCongestionControl,
+            statistics.IsLimitedByOutgoingBandwidthLimit,
+            statistics.BpsLimitByOutgoingBandwidthLimit,
+            runningTotal,
+            valueOverLastSecond);
+    }
+
     private RakPeer Started(string command) =>
         _peer ?? throw new PeerCommandException(command, "the peer has not been started");
+
+    // interop-peer's RequireConnectedAddress: the command fails for a GUID with no connection.
+    private RakConnection Connection(string command, ulong target) =>
+        Started(command).TryGetConnection(new RakNetGuid(target), out var connection)
+            ? connection
+            : throw new PeerCommandException(command, $"no connection with guid {target}");
+
+    private static System.Buffers.ReadOnlySequence<byte> Sequence(IReadOnlyList<ReadOnlyMemory<byte>> parts)
+    {
+        var first = new Segment(parts[0], 0);
+        var last = first;
+        foreach (var part in parts.Skip(1))
+        {
+            last = last.Append(part);
+        }
+        return new System.Buffers.ReadOnlySequence<byte>(first, 0, last, last.Memory.Length);
+    }
+
+    private sealed class Segment : System.Buffers.ReadOnlySequenceSegment<byte>
+    {
+        public Segment(ReadOnlyMemory<byte> memory, long runningIndex)
+        {
+            Memory = memory;
+            RunningIndex = runningIndex;
+        }
+
+        public Segment Append(ReadOnlyMemory<byte> memory)
+        {
+            var next = new Segment(memory, RunningIndex + Memory.Length);
+            Next = next;
+            return next;
+        }
+    }
 
     // Reads the stream as a Receive() loop does, dropping the entries RakNet never produces (decision 11.4).
     private async Task PumpAsync(RakPeer peer)

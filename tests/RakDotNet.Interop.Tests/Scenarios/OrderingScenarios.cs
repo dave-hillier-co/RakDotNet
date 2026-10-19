@@ -19,7 +19,6 @@ public sealed class OrderingScenarios
     public async Task Ordered_and_sequenced_messages_keep_their_order_on_all_32_channels_under_loss_and_reordering(PeerKind client, PeerKind server)
     {
         // Only the client sends, so only it resends after NAKs and RTOs; the server's ACKs, NAKs and reordering suffice.
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone4.Loss);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var faults = new FaultOptions(Seed: 20261019, LossProbability: 0.1, DuplicationProbability: 0.05, Jitter: TimeSpan.FromMilliseconds(30));
 

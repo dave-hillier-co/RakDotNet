@@ -411,10 +411,22 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// Removes a queued attempt with no stream event (RakPeer.cpp:1686-1710). Does nothing once the attempt has an entry
     /// in the connection table.
     /// </summary>
+    /// <remarks>
+    /// As in RakNet, where the attempt leaves requestedConnectionQueue under its mutex at once, the address is free for
+    /// a new <see cref="Connect"/> as soon as this returns. An attempt that the I/O cycle finds already has a table entry
+    /// carries on.
+    /// </remarks>
     public void CancelConnectionAttempt(SystemAddress remote)
     {
         ThrowIfStopped();
-        Enqueue(new PeerCommand { Kind = CommandKind.CancelConnect, Target = remote });
+        PendingConnect? attempt;
+        lock (_attemptsGate)
+        {
+            if (!_attempts.TryGetValue(remote, out attempt) || attempt.State != ConnectionState.Pending)
+                return;
+            _attempts.Remove(remote);
+        }
+        Enqueue(new PeerCommand { Kind = CommandKind.CancelConnect, Target = remote, State = attempt });
     }
 
     /// <summary>
@@ -442,9 +454,11 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     /// </summary>
     /// <remarks>
     /// Only the *WithAckReceipt reliabilities produce receipt events: a reliable receipt ends with ReceiptAcked, an
-    /// unreliable one with ReceiptAcked or, once <see cref="UnreliableTimeout"/> passes without an ACK, ReceiptLost
-    /// (ReliabilityLayer.cpp:1860-1876). A receipt whose connection ends, or whose target the I/O cycle cannot find, ends
-    /// with ReceiptAbandoned; at shutdown <see cref="PeerEventReader.Completion"/> ends it. No socket I/O happens on the
+    /// unreliable one with ReceiptAcked or, once its datagram's retransmission timeout passes without an ACK,
+    /// ReceiptLost (ReliabilityLayer.cpp:1860-1876). An unreliable message still unsent when
+    /// <see cref="UnreliableTimeout"/> passes is discarded with no RakNet packet (ReliabilityLayer.cpp:1745-1793), so its
+    /// receipt ends with ReceiptAbandoned, as does a receipt whose connection ends or whose target the I/O cycle cannot
+    /// find; at shutdown <see cref="PeerEventReader.Completion"/> ends it. No socket I/O happens on the
     /// caller's thread: <see cref="Priority.Immediate"/> wakes the loop at once in Background mode and goes out first in
     /// the next <see cref="Update"/> in Manual mode.
     /// </remarks>

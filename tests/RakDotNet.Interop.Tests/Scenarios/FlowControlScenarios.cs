@@ -18,7 +18,6 @@ public sealed class FlowControlScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_burst_of_messages_larger_than_the_mtu_arrives_complete_and_in_order(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.SplitMessages);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
 
         // BurstTest.cpp:98-110: the defaults, 128 messages of 4096 bytes.
@@ -38,8 +37,6 @@ public sealed class FlowControlScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task The_outgoing_bandwidth_limit_caps_the_send_rate(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone4.OutgoingBandwidthLimit);
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone5.Statistics);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, _) = await session.ConnectAsync(Token);
         const uint bitsPerSecond = 400_000;
@@ -61,7 +58,11 @@ public sealed class FlowControlScenarios
             stats = await session.Client.GetStatisticsAsync(serverGuid, Token);
             limited |= stats.IsLimitedByOutgoingBandwidthLimit;
         }
-        while (!limited && stats.MessagesInResendBuffer + (int)(stats.RunningTotal[PerSecondMetric.UserMessageBytesPushed] - stats.RunningTotal[PerSecondMetric.UserMessageBytesSent]) > 0);
+        // Sends reach the reliability layer on the peer's update thread (RakPeer::SendBuffered), so the bytes pushed
+        // grow after the sends return; the loop waits for all of them before trusting pushed minus sent.
+        while (!limited
+            && (stats.RunningTotal[PerSecondMetric.UserMessageBytesPushed] < (ulong)(count * messageSize)
+                || stats.MessagesInResendBuffer + (int)(stats.RunningTotal[PerSecondMetric.UserMessageBytesPushed] - stats.RunningTotal[PerSecondMetric.UserMessageBytesSent]) > 0));
         var received = await session.ServerInbox.WaitForPacketsAsync(
             p => p.MessageId == ScenarioFlows.UserPacket, count, $"{count} messages", TimeSpan.FromSeconds(20), Token);
 
@@ -80,8 +81,6 @@ public sealed class FlowControlScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Statistics_account_for_bytes_pushed_sent_resent_and_received_under_loss(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.Loss);
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone5.Statistics);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, clientGuid) = await session.ConnectAsync(Token);
         var before = await session.Client.GetStatisticsAsync(serverGuid, Token);

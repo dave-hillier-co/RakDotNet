@@ -29,7 +29,6 @@ public sealed class SplitMessageScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task A_message_of_several_megabytes_is_split_and_reassembled_intact_and_its_receipt_acknowledged(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.SplitMessages);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (_, clientGuid) = await session.ConnectAsync(Token);
 
@@ -53,8 +52,6 @@ public sealed class SplitMessageScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Split_message_progress_is_reported_every_interval_parts_with_the_first_part(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(server, PeerMatrix.Milestone4.SplitMessages);
-        PeerMatrix.SkipUntilImplemented(client, PeerMatrix.Milestone4.SplitMessageProgress);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (_, clientGuid) = await session.ConnectAsync(Token);
         const int interval = 10;
@@ -86,7 +83,6 @@ public sealed class SplitMessageScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Messages_just_past_the_largest_unsplit_size_and_at_the_part_boundaries_are_split_and_arrive_intact(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.SplitMessages);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
 
         var part = LargestUnsplitSize;
@@ -98,7 +94,6 @@ public sealed class SplitMessageScenarios
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task Split_parts_that_arrive_out_of_order_are_joined_in_index_order_except_by_native_receivers(PeerKind client, PeerKind server)
     {
-        PeerMatrix.SkipUntilImplemented(client, server, PeerMatrix.Milestone4.SplitMessages);
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, _) = await session.ConnectAsync(Token);
 

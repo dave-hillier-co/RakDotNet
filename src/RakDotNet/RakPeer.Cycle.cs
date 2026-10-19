@@ -218,7 +218,7 @@ public sealed partial class RakPeer
                 ApplyConnect((PendingConnect)command.State!, nowUs);
                 break;
             case CommandKind.CancelConnect:
-                ApplyCancelConnect(command.Target.Address);
+                ApplyCancelConnect((PendingConnect)command.State!);
                 break;
             case CommandKind.AbortConnect:
                 ApplyAbortConnect((PendingConnect)command.State!, nowUs);
@@ -337,17 +337,19 @@ public sealed partial class RakPeer
         attempt.Complete(new ConnectResult(attemptResult, failure: null, connection: null, remoteProtocolVersion: 0));
     }
 
-    // RakPeer::CancelConnectionAttempt (RakPeer.cpp:1686-1710): only a queued attempt is removed.
-    private void ApplyCancelConnect(SystemAddress address)
+    // RakPeer::CancelConnectionAttempt (RakPeer.cpp:1686-1710): only a queued attempt is removed. The caller already took
+    // it out of the registry.
+    private void ApplyCancelConnect(PendingConnect attempt)
     {
-        PendingConnect? attempt;
-        lock (_attemptsGate)
+        if (attempt.Applied && _core.GetConnectionState(attempt.EndPoint) != Protocol.Peer.ConnectionState.IsPending)
         {
-            if (!_attempts.TryGetValue(address, out attempt) || _core.GetConnectionState(attempt.EndPoint) != Protocol.Peer.ConnectionState.IsPending)
-                return;
-            _attempts.Remove(address);
+            // It has a table entry already, so the cancel comes too late and the attempt carries on.
+            lock (_attemptsGate)
+                _attempts.TryAdd(attempt.Address, attempt);
+            return;
         }
-        _core.CancelConnectionAttempt(attempt.EndPoint);
+        if (attempt.Applied)
+            _core.CancelConnectionAttempt(attempt.EndPoint);
         attempt.Cancel(CancellationToken.None);
     }
 
