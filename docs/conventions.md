@@ -27,6 +27,7 @@
 - `src/RakDotNet.Testing/`: test support for applications, such as `InMemoryNetwork`. Public.
 - `src/RakDotNet.Connections/`: layer 4 per-connection demultiplexing. Public.
 - `src/RakDotNet.Compatibility/`: layer 4 `RakPeerInterface`-shaped facade. Public; no plugin depends on it.
+- `src/RakDotNet.Plugins/`: layer 4 ports of RakNet's plugins, one folder per plugin, namespace `RakDotNet.Plugins`. Public; references `RakDotNet` only.
 - `samples/`: console projects showing the public API in use, one per usage pattern, built with the solution. They reference only public assemblies.
 - Test folders mirror source folders.
 

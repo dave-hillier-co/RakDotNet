@@ -51,6 +51,25 @@ On launch the peer prints one event before reading commands:
 
 `stats` object: `messagesInResendBuffer`, `bytesInResendBuffer`, `packetlossLastSecond`, `packetlossTotal`, `isLimitedByCongestionControl`, `bpsLimitByCongestionControl`, `isLimitedByOutgoingBandwidthLimit`, `bpsLimitByOutgoingBandwidthLimit`, and `runningTotal` and `valueOverLastSecond` objects keyed by the `RNSPerSecondMetrics` names (`USER_MESSAGE_BYTES_PUSHED`, `USER_MESSAGE_BYTES_SENT`, `USER_MESSAGE_BYTES_RESENT`, `USER_MESSAGE_BYTES_RECEIVED_PROCESSED`, `USER_MESSAGE_BYTES_RECEIVED_IGNORED`, `ACTUAL_BYTES_SENT`, `ACTUAL_BYTES_RECEIVED`).
 
+### Plugin commands
+
+Plugin commands attach a RakNet plugin to the peer and drive it. They live in `tools/interop-peer/src/PluginCommands.cpp`. Every command of a plugin except its attach command fails with `ok:false` until the plugin is attached.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `messageFilterAttach` | | | `AttachPlugin` of a `MessageFilter`, with `SetAutoAddNewConnectionsToFilter(-1)` because its constructor leaves that unset; again is a no-op |
+| `messageFilterSetAutoAdd` | `filterSetId` (-1 adds none) | | `SetAutoAddNewConnectionsToFilter` |
+| `messageFilterAllow` | `start`, `end` (inclusive, 0-255), `filterSetId`, `allow` (true) | | `SetAllowMessageID` |
+| `messageFilterAllowRpc4` | `uniqueId`, `filterSetId`, `allow` (true) | | `SetAllowRPC4` |
+| `messageFilterSetActions` | `filterSetId`, `kick` (false), `ban` (false), `banMs` (0 = forever) | | `SetActionOnDisallowedMessage` |
+| `messageFilterSetMaxTime` | `filterSetId`, `ms` (0 = no limit), `ban` (false), `banMs` (0) | | `SetFilterMaxTime` |
+| `messageFilterSetSystem` | `target` (guid), `filterSetId` (-1 removes it) | | `SetSystemFilterSet` |
+| `messageFilterGetSystem` | `target` (guid) | `filterSetId` (-1 for none) | `GetSystemFilterSet` |
+| `messageFilterDeleteSet` | `filterSetId` | | `DeleteFilterSet` |
+| `messageFilterInfo` | | `filterSetIds` (ascending), `systemCount`, `disallowed` (array of `{guid,address,filterSetId,messageId}`), `timeouts` (array of `{guid,address,filterSetId}`) | `GetFilterSetCount`, `GetFilterSetIDByIndex`, `GetSystemCount(-1)`, and what the callbacks reported |
+
+Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFilterSetActions`, `messageFilterSetMaxTime` or `messageFilterSetSystem` names gets `SetDisallowedMessageCallback` and `SetTimeoutCallback`, which record what `messageFilterInfo` reports. A recorded `guid` is `"0"` and `address` empty when the filter knew only the other.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
