@@ -1,6 +1,10 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/RakDotNet.Benchmarks/RakDotNet.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/RakDotNet.Samples.Client/RakDotNet.Samples.Client.csproj" />
+    <Project Path="samples/RakDotNet.Samples.Loopback/RakDotNet.Samples.Loopback.csproj" />
     <Project Path="samples/RakDotNet.Samples.ManualUpdate/RakDotNet.Samples.ManualUpdate.csproj" />
     <Project Path="samples/RakDotNet.Samples.Server/RakDotNet.Samples.Server.csproj" />
   </Folder>

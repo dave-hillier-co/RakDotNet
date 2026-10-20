@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Samples.Client;
+using RakDotNet.Samples.Loopback;
 using RakDotNet.Samples.ManualUpdate;
 using RakDotNet.Samples.Server;
 
@@ -55,6 +56,23 @@ public sealed class SamplesTests
         Assert.Contains($"Connected from {serverAddress}", log.Lines);
         await stop.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => serving);
+    }
+
+    [Fact]
+    public async Task The_loopback_sample_echoes_a_message_between_a_client_and_a_server_in_one_process()
+    {
+        using var timeout = new CancellationTokenSource(Patience);
+        using var log = new Log();
+
+        var succeeded = await LoopbackEcho.RunAsync("hello", log.Writer, timeout.Token);
+
+        Assert.True(succeeded);
+        var lines = log.Lines;
+        Assert.Equal(4, lines.Length);
+        Assert.StartsWith("Server listening on 127.0.0.1:", lines[0], StringComparison.Ordinal);
+        Assert.StartsWith("Client connected to 127.0.0.1:", lines[1], StringComparison.Ordinal);
+        Assert.Equal("Server received: hello", lines[2]);
+        Assert.Equal("Client received: hello", lines[3]);
     }
 
     /// <summary>A thread-safe log that a test can wait on.</summary>

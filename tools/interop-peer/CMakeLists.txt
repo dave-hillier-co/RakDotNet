@@ -76,6 +76,11 @@ add_executable(interop-peer src/main.cpp)
 target_link_libraries(interop-peer PRIVATE interop_logic)
 interop_peer_settings(interop-peer)
 
+# RakNet's Samples/LoopbackPerformanceTest as an unattended burst, compared with RakDotNet in docs/performance.md.
+add_executable(loopback-bench src/LoopbackBench.cpp)
+target_link_libraries(loopback-bench PRIVATE interop_logic)
+interop_peer_settings(loopback-bench)
+
 enable_testing()
 add_executable(interop-peer-tests tests/LogicTests.cpp)
 target_link_libraries(interop-peer-tests PRIVATE interop_logic)

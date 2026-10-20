@@ -23,6 +23,7 @@
     <ProjectReference Include="..\..\samples\RakDotNet.Samples.Server\RakDotNet.Samples.Server.csproj" />
     <ProjectReference Include="..\..\samples\RakDotNet.Samples.Client\RakDotNet.Samples.Client.csproj" />
     <ProjectReference Include="..\..\samples\RakDotNet.Samples.ManualUpdate\RakDotNet.Samples.ManualUpdate.csproj" />
+    <ProjectReference Include="..\..\samples\RakDotNet.Samples.Loopback\RakDotNet.Samples.Loopback.csproj" />
   </ItemGroup>
 
 </Project>

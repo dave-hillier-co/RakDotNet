@@ -1,0 +1,168 @@
+# Build, test (with the native interop peer), benchmark and NativeAOT check on Linux and macOS.
+# What each job does and how to run the same commands locally is in docs/performance.md.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # docs/plan.md, "Interop test harness": the RakNet commit every native build uses.
+  RAKNET_COMMIT: 1a169895a900c9fc4841c556e16514182b75faf8
+  RAKNET_REPOSITORY: https://github.com/facebookarchive/RakNet.git
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      RAKNET_SOURCE_DIR: ${{ github.workspace }}/.raknet
+      RAKDOTNET_INTEROP_PEER: ${{ github.workspace }}/tools/interop-peer/build/interop-peer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore RakNet from cache
+        id: raknet-cache
+        uses: actions/cache@v4
+        with:
+          path: .raknet
+          key: raknet-${{ env.RAKNET_COMMIT }}
+
+      - name: Fetch RakNet at the pinned commit
+        if: steps.raknet-cache.outputs.cache-hit != 'true'
+        run: |
+          git init --quiet "$RAKNET_SOURCE_DIR"
+          git -C "$RAKNET_SOURCE_DIR" fetch --quiet --depth 1 "$RAKNET_REPOSITORY" "$RAKNET_COMMIT"
+          git -C "$RAKNET_SOURCE_DIR" checkout --quiet --detach FETCH_HEAD
+
+      # The runner image is part of the key: a cached CMake build is tied to the compiler that configured it.
+      - name: Name the native build cache
+        id: native-key
+        run: echo "key=interop-peer-$ImageOS-$ImageVersion-$RAKNET_COMMIT-${{ hashFiles('tools/interop-peer/**') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the native build from cache
+        uses: actions/cache@v4
+        with:
+          path: tools/interop-peer/build
+          key: ${{ steps.native-key.outputs.key }}
+
+      - name: Build the native interop peer
+        run: tools/interop-peer/build.sh
+
+      - name: Test the native interop peer's logic
+        run: ctest --test-dir tools/interop-peer/build --output-on-failure
+
+      - name: Build
+        run: dotnet build RakDotNet.slnx -c Release
+
+      - name: Test
+        run: dotnet test --solution RakDotNet.slnx -c Release --no-build
+
+  benchmarks:
+    name: Benchmarks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      RAKNET_SOURCE_DIR: ${{ github.workspace }}/.raknet
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore RakNet from cache
+        id: raknet-cache
+        uses: actions/cache@v4
+        with:
+          path: .raknet
+          key: raknet-${{ env.RAKNET_COMMIT }}
+
+      - name: Fetch RakNet at the pinned commit
+        if: steps.raknet-cache.outputs.cache-hit != 'true'
+        run: |
+          git init --quiet "$RAKNET_SOURCE_DIR"
+          git -C "$RAKNET_SOURCE_DIR" fetch --quiet --depth 1 "$RAKNET_REPOSITORY" "$RAKNET_COMMIT"
+          git -C "$RAKNET_SOURCE_DIR" checkout --quiet --detach FETCH_HEAD
+
+      # The runner image is part of the key: a cached CMake build is tied to the compiler that configured it.
+      - name: Name the native build cache
+        id: native-key
+        run: echo "key=interop-peer-$ImageOS-$ImageVersion-$RAKNET_COMMIT-${{ hashFiles('tools/interop-peer/**') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the native build from cache
+        uses: actions/cache@v4
+        with:
+          path: tools/interop-peer/build
+          key: ${{ steps.native-key.outputs.key }}
+
+      - name: Build the native interop peer and loopback-bench
+        run: tools/interop-peer/build.sh
+
+      # Short jobs keep the run to a few minutes. The step fails only when a benchmark errors; times are not checked.
+      - name: Run every benchmark (short job)
+        run: >-
+          dotnet run -c Release --project benchmarks/RakDotNet.Benchmarks --
+          --filter '*' --job short --artifacts "${{ runner.temp }}/BenchmarkDotNet.Artifacts"
+
+      - name: Loopback comparison, native RakNet
+        run: tools/interop-peer/build/loopback-bench --messages 20000 --bytes 400 --rounds 2
+
+      - name: Loopback comparison, RakDotNet
+        run: >-
+          dotnet run -c Release --no-build --project benchmarks/RakDotNet.Benchmarks --
+          loopback --messages 20000 --bytes 400 --rounds 2
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-${{ matrix.os }}
+          path: ${{ runner.temp }}/BenchmarkDotNet.Artifacts
+          if-no-files-found: ignore
+
+  native-aot:
+    name: NativeAOT sample (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Install the NativeAOT prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+
+      # docs/api-design.md principle 9: a sample that connects, sends and receives over loopback, published with NativeAOT.
+      - name: Publish the loopback sample with NativeAOT
+        run: dotnet publish samples/RakDotNet.Samples.Loopback -c Release -p:PublishAot=true -o "${{ runner.temp }}/aot"
+
+      - name: Run the NativeAOT sample
+        run: ${{ runner.temp }}/aot/RakDotNet.Samples.Loopback
