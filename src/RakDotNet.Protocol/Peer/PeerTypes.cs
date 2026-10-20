@@ -133,6 +133,9 @@ internal sealed class RemoteSystem(int index, IPEndPoint address, ulong guid, Re
 
     public long LastReliableSendMs { get; set; } = nowMs;
 
+    /// <summary>Set when an IMMEDIATE_PRIORITY send is queued after this cycle's reliability layer update framed.</summary>
+    public bool ImmediateSendQueued { get; set; }
+
     /// <summary>0: ping as soon as connected (RakPeer.cpp:3749).</summary>
     public long NextPingTimeMs { get; set; }
 

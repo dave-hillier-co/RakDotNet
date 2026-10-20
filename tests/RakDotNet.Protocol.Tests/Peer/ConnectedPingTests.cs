@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Net;
 using RakDotNet.Protocol.Peer;
 using RakDotNet.Protocol.Wire;
+using RakDotNet.Protocol.Wire.Datagrams;
 using static RakDotNet.Protocol.Tests.Peer.PeerWire;
 
 namespace RakDotNet.Protocol.Tests.Peer;
@@ -343,6 +344,40 @@ public class ConnectedPingTests
         _link.RunUntil(() => ClientEvents.OfType<ConnectionLost>().Any(), TimeSpan.FromSeconds(6), stepUs: 10_000);
 
         Assert.InRange(_link.NowMs - silentFromMs, 3_000, 4_600);
+    }
+
+    [Fact]
+    public void Answering_a_ping_asks_for_the_next_cycle_at_once()
+    {
+        Connect();
+        _link.Run(TimeSpan.FromMilliseconds(50));
+        var clientNowUs = ClientNowUs + 1_000;
+        var serverNowUs = _link.NowUsOf(_server) + 1_000;
+        _server.Update(serverNowUs);
+        Assert.False(_server.ImmediateSendsWaiting);
+
+        _client.PingConnected(ServerAddress, clientNowUs);
+        _client.Update(clientNowUs);
+        serverNowUs += 1_000;
+        while (_client.TryDequeueDatagram(out var datagram))
+            _server.Receive(ClientAddress, datagram.Data, serverNowUs);
+        _server.Update(serverNowUs);
+
+        // The pong is queued while the cycle handles the ping, after the reliability layer framed (RakPeer.cpp:6077-6088);
+        // as an IMMEDIATE_PRIORITY send it goes out on a cycle run at once (RakPeer.cpp:4218-4222).
+        Assert.True(_server.ImmediateSendsWaiting);
+        Assert.Empty(Pongs(_server));
+        _server.Update(serverNowUs + 1);
+        Assert.False(_server.ImmediateSendsWaiting);
+        Assert.Single(Pongs(_server));
+    }
+
+    private static List<EncapsulatedMessage> Pongs(PeerCore peer)
+    {
+        var datagrams = new List<byte[]>();
+        while (peer.TryDequeueDatagram(out var datagram))
+            datagrams.Add(datagram.Data);
+        return ConnectedMessages(datagrams).Where(m => m.Payload.Span[0] == (byte)MessageId.ConnectedPong).ToList();
     }
 
     private void Connect(long stepUs = 1_000)

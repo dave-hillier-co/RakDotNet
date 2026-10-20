@@ -89,7 +89,7 @@ Pending operations end rather than hang: connect, ping and host-resolving operat
 
 Layers 1 and 2 (sessions, the connection table, ban list and timers) are owned by the I/O cycle and need no locks. One cycle runs at a time. A cycle drains commands, receives datagrams without blocking until the transport is empty or the event queue is full, feeds the sans-IO layers with the time from the `TimeProvider`, runs every timer, flushes outgoing datagrams and calls `INetworkObserver.OnUpdateCycle`.
 
-`PeerThreading` chooses who runs the cycle (decision 11.6). In Background mode one dedicated loop thread per peer runs it, waiting on one reusable source signalled by the transports when a datagram arrives, by a `TimeProvider` timer at the next deadline, and by commands; so advancing a `FakeTimeProvider` wakes it, and there are no per-socket receive threads or hand-offs on the receive path. In Manual mode the peer creates no threads: `Update` runs one cycle on the caller, and calling it in Background mode throws.
+`PeerThreading` chooses who runs the cycle (decision 11.6). In Background mode one dedicated loop thread per peer runs it, waiting on one reusable source signalled by the transports when a datagram arrives, by a `TimeProvider` timer at the next deadline, by commands, and by a cycle that queued an `Immediate` reply while handling a message, such as `ID_CONNECTED_PONG`, so the reply goes out at once as RakNet's `IMMEDIATE_PRIORITY` sends do (`RakPeer.cpp:4218-4222`); so advancing a `FakeTimeProvider` wakes it, and there are no per-socket receive threads or hand-offs on the receive path. In Manual mode the peer creates no threads: `Update` runs one cycle on the caller, and calling it in Background mode throws.
 
 Everything else falls into three groups:
 

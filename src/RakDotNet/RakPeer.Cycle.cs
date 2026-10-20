@@ -208,6 +208,8 @@ public sealed partial class RakPeer
             FlushDatagrams(nowUs);
             ProcessCoreEvents(nowUs);
             PollConnections(nowUs);
+            if (_core.ImmediateSendsWaiting)
+                Wake();
             _activeSystemCount = _core.ActiveSystemCount;
             foreach (var observer in _lowLevel.Observers.Current)
                 observer.OnUpdateCycle();

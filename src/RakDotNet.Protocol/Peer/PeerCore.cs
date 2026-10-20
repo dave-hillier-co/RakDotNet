@@ -546,6 +546,13 @@ internal sealed class PeerCore
     public int ActiveSystemCount => _active.Count;
 
     /// <summary>
+    /// True after an <see cref="Update"/> in which handling a message queued an IMMEDIATE_PRIORITY send, such as
+    /// ID_CONNECTED_PONG, behind the reliability layer's update. RakNet forces such sends out now rather than at the
+    /// next update interval (RakPeer.cpp:4218-4222), so the caller runs another cycle at once.
+    /// </summary>
+    public bool ImmediateSendsWaiting { get; private set; }
+
+    /// <summary>
     /// The first half of RakPeer::Shutdown (RakPeer.cpp:1050-1058): NotifyAndFlagForShutdown for every active system,
     /// so each closes once its ID_DISCONNECTION_NOTIFICATION is delivered. The caller keeps updating until
     /// <see cref="ActiveSystemCount"/> is 0 or its block time runs out.
@@ -596,9 +603,11 @@ internal sealed class PeerCore
     {
         var nowMs = nowUs / 1000;
         UpdateConnectionAttempts(nowMs);
+        ImmediateSendsWaiting = false;
 
         foreach (var system in _active.ToList())
         {
+            system.ImmediateSendQueued = false;
             // Keepalive, RakPeer.cpp:5857-5869: a reliable ping so a dead connection is noticed.
             if (system.Mode == ConnectMode.Connected
                 && nowMs > system.LastReliableSendMs
@@ -629,6 +638,8 @@ internal sealed class PeerCore
 
             while (system.IsActive && system.Session.TryDequeueEvent(out var sessionEvent))
                 ProcessSessionEvent(system, sessionEvent, nowUs);
+            if (system.IsActive && system.ImmediateSendQueued)
+                ImmediateSendsWaiting = true;
         }
     }
 
@@ -882,6 +893,8 @@ internal sealed class PeerCore
         if (!system.IsActive || system.Mode is ConnectMode.DisconnectAsap or ConnectMode.DisconnectAsapSilently or ConnectMode.DisconnectOnNoAck)
             return;
         system.Session.Send(data, bitLength, reliability, priority, channel, receipt, nowUs);
+        if (priority == Priority.Immediate)
+            system.ImmediateSendQueued = true;
         if (reliability.IsReliable())
             system.LastReliableSendMs = nowUs / 1000;
     }

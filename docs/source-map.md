@@ -109,7 +109,7 @@ This page maps every unit of RakNet 4.081 `Source/` (a `.h`/`.cpp` pair, a lone 
 | `Rand` (`Rand.cpp`, `Rand.h`) | `System.Random`, `System.Security.Cryptography.RandomNumberGenerator`; [`RandomSource.cs`](../src/RakDotNet/RandomSource.cs), [`NetworkSimulator.cs`](../src/RakDotNet/Transport/NetworkSimulator.cs) | M5 | MT19937 is not wire-visible; GUID derivation and the network simulator use .NET randomness. |
 | `RakSleep` (`RakSleep.cpp`, `RakSleep.h`) | `Task.Delay`, `Thread.Sleep` | n/a | Millisecond sleep; peer waits go through `TimeProvider`. |
 | `SimpleMutex` (`SimpleMutex.cpp`, `SimpleMutex.h`) | `System.Threading.Lock` | M3 | Mutex wrapper. |
-| `SignaledEvent` (`SignaledEvent.cpp`, `SignaledEvent.h`) | `System.Threading.ManualResetEventSlim`; [`RakPeer.Cycle.cs`](../src/RakDotNet/RakPeer.Cycle.cs) | n/a | Wake signal; the event is reset on wake to match `WaitOnEvent`. |
+| `SignaledEvent` (`SignaledEvent.cpp`, `SignaledEvent.h`) | `System.Threading.ManualResetEventSlim`; [`RakPeer.Cycle.cs`](../src/RakDotNet/RakPeer.Cycle.cs) | n/a | Wake signal; the event is reset on wake, before the loop checks for shutdown, to match `WaitOnEvent`. |
 | `LocklessTypes` (`LocklessTypes.cpp`, `LocklessTypes.h`) | `System.Threading.Interlocked` | M4 | Atomic increment and decrement on fields. |
 | `RakAlloca` (`RakAlloca.h`) | `stackalloc`, `System.Span<T>` | n/a | Stack allocation. |
 | `RakAssert` (`RakAssert.h`) | `System.Diagnostics.Debug.Assert`, `ArgumentException.ThrowIf*` | n/a | Assert macros. |
