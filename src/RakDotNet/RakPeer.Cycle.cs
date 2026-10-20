@@ -158,10 +158,12 @@ public sealed partial class RakPeer
         while (true)
         {
             wake.Wait();
-            if (_loopStopping)
-                return;
+            // Consume the wake before looking for shutdown: Stop sets _loopStopping and then the event, so a Set that
+            // this Reset discards was preceded by the flag, which the full fence of the exchange makes visible here.
             wake.Reset();
             Interlocked.Exchange(ref _wakePending, 0);
+            if (_loopStopping)
+                return;
             try
             {
                 RunCycle();
