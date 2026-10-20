@@ -4,6 +4,7 @@
 #include "Hex.h"
 #include "Names.h"
 #include "PacketEvent.h"
+#include "PluginCommands.h"
 
 #include "GetTime.h"
 #include "MessageIdentifiers.h"
@@ -151,7 +152,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_) {}
 
         ~InteropPeer()
         {
@@ -210,6 +211,11 @@ namespace
                     reply[it.key()] = it.value();
             }
             catch (const CommandError& e)
+            {
+                reply["ok"] = false;
+                reply["error"] = e.what();
+            }
+            catch (const interop::PluginCommandError& e)
             {
                 reply["ok"] = false;
                 reply["error"] = e.what();
@@ -306,6 +312,9 @@ namespace
                 Info(result);
             else if (cmd == "time")
                 result["time"] = std::to_string(RakNet::GetTime());
+            else if (plugins_.Dispatch(cmd, command, result))
+            {
+            }
             else if (cmd == "shutdown")
             {
                 Shutdown(command);
@@ -587,6 +596,7 @@ namespace
         std::mutex peerMutex_;
         std::thread receiver_;
         std::atomic<bool> stop_{false};
+        interop::PluginCommands plugins_;
     };
 }
 

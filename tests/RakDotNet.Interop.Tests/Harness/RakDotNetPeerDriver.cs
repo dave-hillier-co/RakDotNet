@@ -10,7 +10,7 @@ namespace RakDotNet.Interop.Tests.Harness;
 /// results and errors, and every event reported as the packet RakPeer::Receive would return for it
 /// (docs/api-design.md section 10.2).
 /// </summary>
-public sealed class RakDotNetPeerDriver : IPeerDriver
+public sealed partial class RakDotNetPeerDriver : IPeerDriver
 {
     // interop-peer rejects offline ping responses of 400 bytes or more (main.cpp, kMaxOfflinePingResponse).
     private const int MaxOfflinePingResponse = 399;

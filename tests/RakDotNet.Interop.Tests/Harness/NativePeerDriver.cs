@@ -14,7 +14,7 @@ namespace RakDotNet.Interop.Tests.Harness;
 /// Drives tools/interop-peer (or anything else speaking docs/interop-protocol.md) as a child process.
 /// Commands are JSON lines on stdin; replies are matched by <c>seq</c>; packet events go to <see cref="Packets"/>.
 /// </summary>
-public sealed class NativePeerDriver : IPeerDriver
+public sealed partial class NativePeerDriver : IPeerDriver
 {
     public const string BinaryEnvironmentVariable = "RAKDOTNET_INTEROP_PEER";
 
