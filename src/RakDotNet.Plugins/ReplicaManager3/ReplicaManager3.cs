@@ -29,6 +29,14 @@ namespace RakDotNet.Plugins;
 /// 255 worlds reads past its end. Malformed messages are ignored from the first field that cannot be read.
 /// </para>
 /// <para>
+/// So that a remote system cannot grow memory or traffic without limit, three things differ from RakNet. An end offset
+/// in a construction or destruction that points before the header holding it, or past the message, ends the message
+/// there, where RakNet seeks to it and reads the same entry again for every entry the message counts. A construction, in
+/// <see cref="ReplicaConstructionMode.QueryConnectionForReplicaList"/>, of a replica the connection has already does not
+/// list it for serialization a second time. A grouped download holds at most <see cref="MaxDownloadGroupMessages"/>
+/// messages and <see cref="MaxDownloadGroupBytes"/> bytes.
+/// </para>
+/// <para>
 /// Not thread-safe, as in RakNet: call it, and change replicas, on the thread that reads the peer's events, where its
 /// hooks run.
 /// </para>
@@ -107,6 +115,36 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
             _autoSerializeInterval = (ulong)value.TotalMilliseconds;
         }
     }
+
+    /// <summary>
+    /// The most messages a grouped download (<see cref="ReplicaConnection.QueryGroupDownloadMessages"/>) holds for one
+    /// connection; 16384 by default. One more returns them all at once, in order, and the rest of that download is not
+    /// grouped. RakNet holds without limit, so a remote system that starts a download and never completes it would grow
+    /// memory for as long as it sends.
+    /// </summary>
+    public int MaxDownloadGroupMessages
+    {
+        get;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
+            field = value;
+        }
+    } = 16_384;
+
+    /// <summary>
+    /// The most bytes of messages a grouped download holds for one connection; 16 MiB by default. Passing it releases
+    /// them as <see cref="MaxDownloadGroupMessages"/> does.
+    /// </summary>
+    public long MaxDownloadGroupBytes
+    {
+        get;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
+            field = value;
+        }
+    } = 16L * 1024 * 1024;
 
     /// <summary>GetWorldCount</summary>
     public int WorldCount => _worldsList.Count;
@@ -732,10 +770,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
         if (connection is null)
             return PluginResult.Continue;
         if (connection.GroupConstructionAndSerialize)
-        {
-            connection.DownloadGroup.Add(e.Detach());
-            return PluginResult.Consume;
-        }
+            return HoldDownloadMessage(connection, e);
         var networkIdManager = world.NetworkIdManager ?? throw new InvalidOperationException($"World {worldId} has no NetworkIdManager; call SetNetworkIdManager first.");
 
         var bsIn = new BitStreamReader(data);
@@ -754,19 +789,23 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
                 return PluginResult.Continue;
             actuallyCreateObjectList.Add(actuallyCreateObject);
             bsIn.AlignToByte();
+            // The entry ends after its header and within the message, or it is malformed (see the remarks).
+            var entryHeaderEnd = bsIn.BitPosition;
+            if (!CanSeek(ref bsIn, streamEnd, entryHeaderEnd))
+                return PluginResult.Continue;
 
             if (actuallyCreateObject)
             {
                 if (!bsIn.TryReadRakNetGuid(out var creatingSystemGuid) || !bsIn.TryReadUInt32(out var writeAllocationIdEnd))
                     return PluginResult.Continue;
+                var allocationIdStart = bsIn.BitPosition;
                 if (existingReplica is not null)
                 {
                     // The NetworkID is in use: this system has the replica already.
                     existingReplica.ReplicaManager = this;
                     connection.OnDownloadExisting(existingReplica, this);
                     constructionTickStack.Add(null);
-                    if (!TrySeek(ref bsIn, streamEnd))
-                        return PluginResult.Continue;
+                    bsIn.BitPosition = (int)streamEnd;
                     continue;
                 }
 
@@ -775,13 +814,12 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
                 if (replica is null)
                 {
                     constructionTickStack.Add(null);
-                    if (!TrySeek(ref bsIn, streamEnd))
-                        return PluginResult.Continue;
+                    bsIn.BitPosition = (int)streamEnd;
                     continue;
                 }
 
                 // Past the allocation ID, however much of it AllocReplica read.
-                if (!TrySeek(ref bsIn, writeAllocationIdEnd))
+                if (!TrySeek(ref bsIn, writeAllocationIdEnd, allocationIdStart))
                     return PluginResult.Continue;
                 replica.Manager = networkIdManager;
                 replica.NetworkId = networkId;
@@ -792,8 +830,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
                 {
                     DeallocReplicaNoBroadcastDestruction(connection, replica);
                     constructionTickStack.Add(null);
-                    if (!TrySeek(ref bsIn, streamEnd))
-                        return PluginResult.Continue;
+                    bsIn.BitPosition = (int)streamEnd;
                     continue;
                 }
 
@@ -810,8 +847,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
                 constructionTickStack.Add(null);
             }
 
-            if (!TrySeek(ref bsIn, streamEnd))
-                return PluginResult.Continue;
+            bsIn.BitPosition = (int)streamEnd;
             bsIn.AlignToByte();
         }
 
@@ -825,6 +861,9 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
                 bsIn.AlignToByte();
                 if (!bsIn.TryReadUInt32(out var streamEnd) || !bsIn.TryReadUInt64(out _))
                     return PluginResult.Continue;
+                var postHeaderEnd = bsIn.BitPosition;
+                if (!CanSeek(ref bsIn, streamEnd, postHeaderEnd))
+                    return PluginResult.Continue;
                 if (replica is not null)
                 {
                     bsIn.AlignToByte();
@@ -833,8 +872,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
                     else
                         replica.PostDeserializeConstructionExisting(ref bsIn, connection);
                 }
-                if (!TrySeek(ref bsIn, streamEnd))
-                    return PluginResult.Continue;
+                bsIn.BitPosition = (int)streamEnd;
             }
             else if (replica is not null)
             {
@@ -871,7 +909,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
             var replica = networkIdManager.GetObject<Replica3>(networkId);
             if (replica is null)
             {
-                if (!TrySeek(ref bsIn, streamEnd))
+                if (!TrySeek(ref bsIn, streamEnd, bsIn.BitPosition))
                     return PluginResult.Continue;
                 continue;
             }
@@ -907,10 +945,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
         if (connection is null)
             return PluginResult.Continue;
         if (connection.GroupConstructionAndSerialize)
-        {
-            connection.DownloadGroup.Add(e.Detach());
-            return PluginResult.Consume;
-        }
+            return HoldDownloadMessage(connection, e);
         var world = _worldsArray[worldId]!;
         var networkIdManager = world.NetworkIdManager ?? throw new InvalidOperationException($"World {worldId} has no NetworkIdManager; call SetNetworkIdManager first.");
         var bsIn = new BitStreamReader(data);
@@ -951,8 +986,7 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
         if (connection.QueryGroupDownloadMessages() && !connection.GroupConstructionAndSerialize)
         {
             connection.GroupConstructionAndSerialize = true;
-            connection.DownloadGroup.Add(e.Detach());
-            return PluginResult.Consume;
+            return HoldDownloadMessage(connection, e, isStart: true);
         }
         connection.GroupConstructionAndSerialize = false;
         var bsIn = new BitStreamReader(data);
@@ -967,12 +1001,11 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
         var connection = GetConnectionByGuid(e.RakNetGuid, worldId);
         if (connection is null)
             return PluginResult.Continue;
-        if (connection.GroupConstructionAndSerialize && connection.DownloadGroup.Count > 0)
+        if (connection.GroupConstructionAndSerialize && connection.DownloadGroupCount > 0)
         {
             var host = RequireHost();
-            foreach (var held in connection.DownloadGroup)
+            foreach (var held in connection.TakeDownloadGroup())
                 host.Inject(held);
-            connection.DownloadGroup.Clear();
             host.Inject(e.Detach());
             return PluginResult.Consume;
         }
@@ -983,14 +1016,41 @@ public abstract class ReplicaManager3 : IRakPlugin, IDisposable
         return PluginResult.Continue;
     }
 
-    // BitStream::SetReadOffset to an offset the message gives; false when it lies past the end.
-    private static bool TrySeek(ref BitStreamReader reader, uint bitOffset)
+    // downloadGroup.Push, limited: past either limit the held messages go back to the head of the event stream in order,
+    // with the group still open, so the replayed ID_REPLICA_MANAGER_DOWNLOAD_STARTED closes it, as after a completion.
+    // Without a start among them they were queued behind a completion's replay, which RakNet holds until a later grouped
+    // download completes; returned, they would only be held again, so they are dropped.
+    private PluginResult HoldDownloadMessage(ReplicaConnection connection, PeerEvent e, bool isStart = false)
     {
-        if (bitOffset > (uint)(reader.BitPosition + reader.BitsRemaining))
+        var length = e.Data.Length;
+        connection.HoldDownloadMessage(e.Detach(), length, isStart);
+        if (connection.DownloadGroupCount <= MaxDownloadGroupMessages && connection.DownloadGroupBytes <= MaxDownloadGroupBytes)
+            return PluginResult.Consume;
+        if (!connection.DownloadGroupHoldsStart)
+        {
+            connection.ClearDownloadGroup();
+            return PluginResult.Consume;
+        }
+        var host = RequireHost();
+        var held = connection.TakeDownloadGroup();
+        for (var index = held.Length - 1; index >= 0; index--)
+            host.Inject(held[index], atHead: true);
+        return PluginResult.Consume;
+    }
+
+    // BitStream::SetReadOffset to an offset the message gives; false, without moving, when it lies past the end or before
+    // minimum, the end of the header that holds it. RakNet seeks anywhere, so an offset pointing back at its own entry is
+    // read again for every entry the message counts.
+    private static bool TrySeek(ref BitStreamReader reader, uint bitOffset, int minimum)
+    {
+        if (!CanSeek(ref reader, bitOffset, minimum))
             return false;
         reader.BitPosition = (int)bitOffset;
         return true;
     }
+
+    private static bool CanSeek(ref BitStreamReader reader, uint bitOffset, int minimum) =>
+        bitOffset >= (uint)minimum && bitOffset <= (uint)(reader.BitPosition + reader.BitsRemaining);
 
     private World RequireWorld(byte worldId) =>
         (worldId < WorldSlots ? _worldsArray[worldId] : null) ?? throw new InvalidOperationException($"World {worldId} is not in use.");

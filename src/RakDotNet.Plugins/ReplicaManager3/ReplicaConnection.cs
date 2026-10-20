@@ -52,7 +52,13 @@ public abstract class ReplicaConnection : IDisposable
 
     internal List<LastSerializationResult> QueryToSerializeReplicaList => _queryToSerialize;
 
-    internal List<OwnedPeerEvent> DownloadGroup => _downloadGroup;
+    internal int DownloadGroupCount => _downloadGroup.Count;
+
+    // The bytes of the messages held.
+    internal long DownloadGroupBytes { get; private set; }
+
+    // An ID_REPLICA_MANAGER_DOWNLOAD_STARTED that opened the group is held, so returning the group closes it.
+    internal bool DownloadGroupHoldsStart { get; private set; }
 
     /// <summary>
     /// AllocReplica: creates the replica whose type <paramref name="allocationIdBitstream"/> identifies, as written by
@@ -101,6 +107,11 @@ public abstract class ReplicaConnection : IDisposable
     /// QueryGroupDownloadMessages: true holds this system's download messages, from ID_REPLICA_MANAGER_DOWNLOAD_STARTED to
     /// ID_REPLICA_MANAGER_DOWNLOAD_COMPLETE, and then returns them all together.
     /// </summary>
+    /// <remarks>
+    /// The remote system decides how much is held. Once more than <see cref="ReplicaManager3.MaxDownloadGroupMessages"/>
+    /// messages or <see cref="ReplicaManager3.MaxDownloadGroupBytes"/> bytes are held, they are returned at once, in order,
+    /// and the rest of that download is not grouped.
+    /// </remarks>
     public virtual bool QueryGroupDownloadMessages() => false;
 
     /// <summary>QueryConstructionMode: how to find the replicas this system should have; return the same value every time.</summary>
@@ -108,7 +119,8 @@ public abstract class ReplicaConnection : IDisposable
 
     /// <summary>
     /// QueryReplicaList: for <see cref="ReplicaConstructionMode.QueryConnectionForReplicaList"/>, adds the replicas to
-    /// construct to and destroy on this system.
+    /// construct to and destroy on this system. A replica this system has already is serialized to it once, however
+    /// often it is named.
     /// </summary>
     public virtual void QueryReplicaList(List<Replica3> newReplicasToCreate, List<Replica3> existingReplicasToDestroy)
     {
@@ -144,6 +156,25 @@ public abstract class ReplicaConnection : IDisposable
         foreach (var owned in _downloadGroup)
             owned.Dispose();
         _downloadGroup.Clear();
+        DownloadGroupBytes = 0;
+        DownloadGroupHoldsStart = false;
+    }
+
+    internal void HoldDownloadMessage(OwnedPeerEvent owned, int length, bool isStart)
+    {
+        _downloadGroup.Add(owned);
+        DownloadGroupBytes += length;
+        DownloadGroupHoldsStart |= isStart;
+    }
+
+    // The held messages, oldest first, leaving the group empty.
+    internal OwnedPeerEvent[] TakeDownloadGroup()
+    {
+        var held = _downloadGroup.ToArray();
+        _downloadGroup.Clear();
+        DownloadGroupBytes = 0;
+        DownloadGroupHoldsStart = false;
+        return held;
     }
 
     internal void MarkDownloadComplete() => DownloadWasCompleted = true;
@@ -645,11 +676,17 @@ public abstract class ReplicaConnection : IDisposable
         _queryToSerialize.Add(lsr);
     }
 
-    // OnConstructToThisConnection by replica, for QUERY_CONNECTION_FOR_REPLICA_LIST (ReplicaManager3.cpp:1948-1958).
+    // OnConstructToThisConnection by replica, for QUERY_CONNECTION_FOR_REPLICA_LIST (ReplicaManager3.cpp:1948-1958). RakNet
+    // lists the replica for serialization even when the constructed list refuses it as a duplicate, so each construction
+    // of a replica the connection has adds another serialization per tick; here a duplicate is dropped.
     private void OnConstructToThisConnection(Replica3 replica, ReplicaManager3 replicaManager)
     {
         var lsr = new LastSerializationResult(replica, replicaManager.RequireHost().GetTime());
-        InsertConstructed(lsr);
+        if (!InsertConstructed(lsr))
+        {
+            lsr.Dispose();
+            return;
+        }
         _queryToSerialize.Add(lsr);
     }
 

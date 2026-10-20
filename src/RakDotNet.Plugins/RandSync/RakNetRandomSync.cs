@@ -19,6 +19,10 @@ namespace RakDotNet.Plugins;
 /// replayed (RandSync.cpp:132-140), and <see cref="NextSingle"/> divides by 2^32 - 1, so it can return 1. An update too
 /// short to hold a call count is ignored, where RakNet would use an uninitialised value. Not thread-safe.
 /// </para>
+/// <para>
+/// Catching up draws every skipped number on the caller's thread, and the call count comes from the other system, so a
+/// skip beyond <see cref="MaxSkip"/> is refused, changing nothing, where RakNet would draw up to 2^32 - 1 numbers.
+/// </para>
 /// </remarks>
 public sealed class RakNetRandomSync
 {
@@ -41,6 +45,14 @@ public sealed class RakNetRandomSync
         get => _callCount;
         set => _callCount = value;
     }
+
+    /// <summary>
+    /// The most numbers <see cref="Deserialize(ref BitStreamReader)"/> or
+    /// <see cref="DeserializeConstruction(ref BitStreamReader)"/> skips to catch up; 2^20 by default, a few milliseconds.
+    /// A sender further ahead is refused. Raise it for sequences that draw more than that between updates, or that a late
+    /// joiner constructs after.
+    /// </summary>
+    public uint MaxSkip { get; set; } = 1u << 20;
 
     /// <summary>SeedMT: restarts from <paramref name="seed"/>, then draws and discards <paramref name="skipValues"/> numbers.</summary>
     public void Seed(uint seed, uint skipValues = 0)
@@ -90,12 +102,12 @@ public sealed class RakNetRandomSync
 
     /// <summary>
     /// DeserializeConstruction: seeds with the sender's seed and skips its call count. False, changing nothing, when the
-    /// call count cannot be read (RandSync.cpp:108-117).
+    /// call count cannot be read (RandSync.cpp:108-117) or is more than <see cref="MaxSkip"/>.
     /// </summary>
     public bool DeserializeConstruction(ref BitStreamReader reader)
     {
         reader.TryReadUInt32(out var seed);
-        if (!reader.TryReadUInt32(out var skipValues))
+        if (!reader.TryReadUInt32(out var skipValues) || skipValues > MaxSkip)
             return false;
         Seed(seed, skipValues);
         return true;
@@ -111,11 +123,14 @@ public sealed class RakNetRandomSync
         stream.WriteUInt32(_callCount);
     }
 
-    /// <summary>Deserialize: catches up with the sender's call count (RandSync.cpp:122-141).</summary>
-    public void Deserialize(ref BitStreamReader reader)
+    /// <summary>
+    /// Deserialize: catches up with the sender's call count (RandSync.cpp:122-141). False, changing nothing, when the call
+    /// count cannot be read or is more than <see cref="MaxSkip"/> ahead of this one.
+    /// </summary>
+    public bool Deserialize(ref BitStreamReader reader)
     {
         if (!reader.TryReadUInt32(out var remoteCallCount))
-            return;
+            return false;
         if (remoteCallCount < _callCount)
         {
             // This system drew more than the sender, so its next numbers replay the ones the sender has yet to draw.
@@ -124,10 +139,13 @@ public sealed class RakNetRandomSync
         else if (remoteCallCount > _callCount)
         {
             var difference = remoteCallCount - _callCount;
+            if (difference > MaxSkip)
+                return false;
             if (difference <= _usedValueBufferCount)
                 _usedValueBufferCount -= difference;
             Skip(difference);
         }
+        return true;
     }
 
     // Skip (RandSync.cpp:142-147): the skipped numbers are counted but not kept for replay.

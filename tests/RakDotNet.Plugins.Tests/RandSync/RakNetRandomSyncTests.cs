@@ -117,6 +117,54 @@ public sealed class RakNetRandomSyncTests
     }
 
     [Fact]
+    public void An_update_further_ahead_than_the_skip_limit_is_refused_and_changes_nothing()
+    {
+        // RakNet draws every skipped number on the caller's thread: 2^32 of them take seconds.
+        var sync = new RakNetRandomSync();
+        sync.Seed(0);
+        Draw(sync, 2);
+        using var stream = new BitStream();
+        stream.WriteUInt32(uint.MaxValue);
+        var reader = stream.CreateReader();
+
+        Assert.False(sync.Deserialize(ref reader));
+
+        Assert.Equal(2u, sync.CallCount);
+        Assert.Equal(SeedZero[2..4], Draw(sync, 2));
+    }
+
+    [Fact]
+    public void A_construction_further_ahead_than_the_skip_limit_is_refused_and_changes_nothing()
+    {
+        var sync = new RakNetRandomSync();
+        sync.Seed(7);
+        var reader = new BitStreamReader(Convert.FromHexString("00000000ffffffff"));
+
+        Assert.False(sync.DeserializeConstruction(ref reader));
+
+        Assert.Equal((7u, 0u), (sync.CurrentSeed, sync.CallCount));
+    }
+
+    [Fact]
+    public void The_skip_limit_allows_skips_up_to_it()
+    {
+        var sync = new RakNetRandomSync { MaxSkip = 10 };
+        sync.Seed(0);
+        Draw(sync, 1);
+        using var stream = new BitStream();
+        stream.WriteUInt32(11);
+        stream.WriteUInt32(12);
+        var reader = stream.CreateReader();
+
+        Assert.True(sync.Deserialize(ref reader));
+        Assert.Equal(11u, sync.CallCount);
+        Assert.True(sync.Deserialize(ref reader));
+        Assert.Equal(12u, sync.CallCount);
+        var construction = new BitStreamReader(Convert.FromHexString("000000000000000b"));
+        Assert.False(new RakNetRandomSync { MaxSkip = 10 }.DeserializeConstruction(ref construction));
+    }
+
+    [Fact]
     public void Serialize_writes_the_call_count()
     {
         var sync = new RakNetRandomSync();

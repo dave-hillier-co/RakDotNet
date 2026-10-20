@@ -282,6 +282,87 @@ public sealed class Rpc4Tests : IDisposable
         Assert.False(_serverRpc.UnregisterSlot("S"));
     }
 
+    [Fact]
+    public void A_one_byte_rpc_message_is_consumed_and_runs_nothing()
+    {
+        _mesh.Connect(_client, _server);
+        _serverRpc.RegisterFunction("CFunc1", Record("CFunc1"));
+
+        // RakNet reads its sub-ID past the end of the message (RPC4Plugin.cpp:520-526).
+        FromClient([(byte)MessageId.RpcPlugin]);
+        _mesh.Settle();
+
+        Assert.Empty(_calls);
+        Assert.DoesNotContain(_mesh.Seen(_server), e => e.Id == (byte)MessageId.RpcPlugin);
+        Assert.DoesNotContain(_mesh.Seen(_client), e => e.Id == (byte)MessageId.RpcRemoteError);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("80")]
+    [InlineData("ffffffffffffffff")]
+    public void A_call_whose_name_cannot_be_read_is_answered_as_an_unregistered_empty_name(string nameBytes)
+    {
+        _mesh.Connect(_client, _server);
+        _serverRpc.RegisterFunction("CFunc1", Record("CFunc1"));
+
+        FromClient([(byte)MessageId.RpcPlugin, 0, .. Convert.FromHexString(nameBytes)]);
+        _mesh.Settle();
+
+        // The name RakString::DeserializeCompressed leaves when it fails is empty, and no function has it.
+        Assert.Empty(_calls);
+        var error = _mesh.Seen(_client).Single(e => e.Id == (byte)MessageId.RpcRemoteError);
+        Assert.Equal([(byte)MessageId.RpcRemoteError, 0, 0], error.Data);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(255)]
+    public void A_return_or_unknown_sub_id_with_no_blocking_call_waiting_is_consumed_and_does_nothing(byte subId)
+    {
+        _mesh.Connect(_client, _server);
+
+        FromServer([(byte)MessageId.RpcPlugin, subId, 1, 2, 3]);
+        _mesh.Settle();
+
+        Assert.DoesNotContain(_mesh.Seen(_client), e => e.Id is (byte)MessageId.RpcPlugin or (byte)MessageId.RpcRemoteError);
+        Assert.DoesNotContain(_mesh.Seen(_server), e => e.Id is (byte)MessageId.RpcPlugin or (byte)MessageId.RpcRemoteError);
+    }
+
+    [Fact]
+    public async Task An_unknown_sub_id_while_a_blocking_call_waits_is_taken_as_its_return()
+    {
+        // The server has no RPC4, so the call is never answered but by the injected message (RPC4Plugin.cpp:589-595).
+        using var mesh = new PluginMesh();
+        var caller = new Plugins.Rpc4();
+        var client = mesh.Add(maxIncoming: 4, caller);
+        var server = mesh.Add(maxIncoming: 4);
+        var connection = mesh.Connect(client, server);
+        using var returnData = new BitStream();
+        var call = caller.CallBlockingAsync("F", null, Priority.High, Reliability.ReliableOrdered, 0, server.RakNetGuid, returnData, TestContext.Current.CancellationToken);
+        mesh.Settle();
+        Assert.False(call.IsCompleted);
+
+        client.Inject([(byte)MessageId.RpcPlugin, 7, 0xAB], connection.Address, connection.RakNetGuid);
+        mesh.RunUntil(() => call.IsCompleted, "the blocking call returned");
+
+        Assert.True(await call);
+        Assert.Equal([0xAB], returnData.Written.ToArray());
+    }
+
+    private void FromClient(byte[] message)
+    {
+        var client = _server.Connections.Single();
+        _server.Inject(message, client.Address, client.RakNetGuid);
+    }
+
+    private void FromServer(byte[] message)
+    {
+        var server = _client.Connections.Single();
+        _client.Inject(message, server.Address, server.RakNetGuid);
+    }
+
     private Rpc4Function Record(string name) => (parameters, sender) => _calls.Add((name, ReadCompressedString(ref parameters), sender));
 
     private static BitStream CompressedString(string value)
