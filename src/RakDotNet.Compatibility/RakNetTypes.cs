@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Compatibility;
@@ -38,17 +39,21 @@ public readonly record struct SocketDescriptor(ushort Port, string? HostAddress 
 }
 
 /// <summary>
-/// RakNet's Packet, as <see cref="RakPeerInterface.Receive"/> returns it: a detached event. Disposing it is
-/// <see cref="RakPeerInterface.DeallocatePacket"/>, which is idempotent and optional because an undisposed packet is
-/// collected; use after deallocation throws <see cref="ObjectDisposedException"/>.
+/// RakNet's Packet, as <see cref="RakPeerInterface.Receive"/> returns it (a detached event) or
+/// <see cref="RakPeerInterface.AllocatePacket"/> creates it. As in RakNet, the data, address and GUID may be changed
+/// before <see cref="RakPeerInterface.PushBackPacket"/>. Disposing it is <see cref="RakPeerInterface.DeallocatePacket"/>,
+/// which is idempotent and optional because an undisposed packet is collected; use after deallocation throws
+/// <see cref="ObjectDisposedException"/>.
 /// </summary>
 public sealed class Packet : IDisposable
 {
-    private readonly SystemAddress _systemAddress;
-    private readonly RakNetGuid _rakNetGuid;
-    private readonly int _length;
+    private readonly Memory<byte> _data;
     private readonly int _bitSize;
     private readonly bool _wasGeneratedLocally;
+    private readonly SystemAddress _receivedAddress;
+    private readonly RakNetGuid _receivedGuid;
+    private SystemAddress _systemAddress;
+    private RakNetGuid _rakNetGuid;
     private OwnedPeerEvent _owned;
     private int _released;
 
@@ -56,27 +61,45 @@ public sealed class Packet : IDisposable
     {
         _owned = owned;
         var e = owned.Event;
-        _systemAddress = e.Address;
-        _rakNetGuid = e.RakNetGuid;
-        _length = e.Data.Length;
+        // The event is detached, so this packet owns its bytes and may write them, as RakNet's packet->data allows.
+        _data = MemoryMarshal.AsMemory(owned.Data);
+        _systemAddress = _receivedAddress = e.Address;
+        _rakNetGuid = _receivedGuid = e.RakNetGuid;
         _bitSize = e.BitLength;
         _wasGeneratedLocally = e.IsLocal;
     }
 
+    /// <summary>AllocPacket (RakPeer.cpp:159-169): zeroed data, bitSize from the length, unassigned GUID.</summary>
+    internal Packet(int length)
+    {
+        _data = new byte[length];
+        _bitSize = length * 8;
+        _systemAddress = SystemAddress.Unassigned;
+        _rakNetGuid = RakNetGuid.Unassigned;
+    }
+
     /// <summary>Packet::systemAddress</summary>
-    public SystemAddress SystemAddress => Live(_systemAddress);
+    public SystemAddress SystemAddress
+    {
+        get => Live(_systemAddress);
+        set => _systemAddress = Live(value);
+    }
 
     /// <summary>Packet::guid</summary>
-    public RakNetGuid RakNetGuid => Live(_rakNetGuid);
+    public RakNetGuid RakNetGuid
+    {
+        get => Live(_rakNetGuid);
+        set => _rakNetGuid = Live(value);
+    }
 
     /// <summary>Packet::length</summary>
-    public int Length => Live(_length);
+    public int Length => Live(_data.Length);
 
     /// <summary>Packet::bitSize</summary>
     public int BitSize => Live(_bitSize);
 
-    /// <summary>Packet::data</summary>
-    public ReadOnlyMemory<byte> Data => Live(_owned.Data);
+    /// <summary>Packet::data, writable as in RakNet.</summary>
+    public Memory<byte> Data => Live(_data);
 
     /// <summary>Packet::wasGeneratedLocally</summary>
     public bool WasGeneratedLocally => Live(_wasGeneratedLocally);
@@ -87,13 +110,22 @@ public sealed class Packet : IDisposable
             _owned.Dispose();
     }
 
-    /// <summary>Hands the owned event over (PushBackPacket); the packet is deallocated without releasing it.</summary>
-    internal OwnedPeerEvent Take()
+    /// <summary>
+    /// Hands the owned event of a received packet over (PushBackPacket), with <paramref name="edited"/> set when its
+    /// address or GUID changed. Otherwise returns false and the caller copies <see cref="Data"/> and then disposes the packet.
+    /// </summary>
+    internal bool TryTake(out OwnedPeerEvent owned, out bool edited)
     {
-        ObjectDisposedException.ThrowIf(Interlocked.Exchange(ref _released, 1) != 0, this);
-        var owned = _owned;
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _released) != 0, this);
+        edited = _systemAddress != _receivedAddress || _rakNetGuid != _receivedGuid;
+        if (!_owned.IsValid || Interlocked.Exchange(ref _released, 1) != 0)
+        {
+            owned = default;
+            return false;
+        }
+        owned = _owned;
         _owned = default;
-        return owned;
+        return true;
     }
 
     private T Live<T>(T value)

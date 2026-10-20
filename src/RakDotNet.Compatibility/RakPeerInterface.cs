@@ -28,10 +28,15 @@ public sealed class RakPeerInterface : IDisposable
     private readonly List<IRakPlugin> _pendingPlugins = [];
     private readonly List<string> _pendingSecurityExceptions = [];
     private RakPeerOptions _pending = new() { MaxConnections = 1 };
+    private readonly UserUpdateThread _userUpdateThread;
     private IncomingDatagramFilter? _pendingFilter;
     private RakPeer? _peer;
 
-    private RakPeerInterface() { }
+    // remoteSystemList as far as RakNet's queries need it once a system has gone: the last connection reported on each
+    // slot, kept after it ends until a later connection takes the slot (AssignSystemAddressToRemoteSystemList).
+    private RakConnection?[] _slots = [];
+
+    private RakPeerInterface() => _userUpdateThread = new UserUpdateThread(this);
 
     /// <summary>The peer behind the facade; null until <see cref="Startup"/>.</summary>
     public RakPeer? Peer => _peer;
@@ -92,6 +97,8 @@ public sealed class RakPeerInterface : IDisposable
             };
         }
         _peer.LowLevel.IncomingDatagramFilter = _pendingFilter;
+        _peer.LowLevel.Observers.Attach(_userUpdateThread);
+        _slots = new RakConnection?[maxConnections];
         _pendingPlugins.Clear();
         return StartupResult.RakNetStarted;
     }
@@ -202,6 +209,22 @@ public sealed class RakPeerInterface : IDisposable
         };
     }
 
+    /// <summary>
+    /// RakPeer::ConnectWithSocket (RakPeer.cpp:1022-1034): Connect through <paramref name="socket"/>, one of this peer's
+    /// sockets from <see cref="GetSockets"/> or <see cref="GetSocket"/>. INVALID_PARAMETER when the peer is not started,
+    /// the host or socket is null, or the socket belongs to another peer, which is not borrowed (api-design.md 11.14).
+    /// </summary>
+    public ConnectionAttemptResult ConnectWithSocket(string host, ushort remotePort, ReadOnlySpan<byte> passwordData, RakSocket socket,
+                                                     ConnectSecurity? publicKey = null, uint sendConnectionAttemptCount = 12,
+                                                     uint timeBetweenSendConnectionAttemptsMS = 500, uint timeoutTime = 0)
+    {
+        if (_peer is not { IsActive: true } peer || socket is null || socket.Index >= peer.Sockets.Count
+            || !ReferenceEquals(peer.Sockets[socket.Index], socket))
+            return ConnectionAttemptResult.InvalidParameter;
+        return Connect(host, remotePort, passwordData, publicKey, (uint)socket.Index, sendConnectionAttemptCount,
+                       timeBetweenSendConnectionAttemptsMS, timeoutTime);
+    }
+
     /// <summary>RakPeer::Shutdown; blocks for at most <paramref name="blockDuration"/> milliseconds.</summary>
     public void Shutdown(uint blockDuration, byte orderingChannel = 0, Priority disconnectionNotificationPriority = Priority.Low) =>
         _peer?.ShutdownAsync(TimeSpan.FromMilliseconds(blockDuration), orderingChannel, disconnectionNotificationPriority)
@@ -270,6 +293,8 @@ public sealed class RakPeerInterface : IDisposable
             peer.Update();
             while (peer.Events.TryRead(out var e))
             {
+                if (e.Kind == PeerEventKind.Connected && e.Connection is { } connection)
+                    RecordSlot(connection);
                 if (e.IsRakNetPacket)
                     return new Packet(e.Detach());
             }
@@ -357,14 +382,22 @@ public sealed class RakPeerInterface : IDisposable
         return Resolve(host, remotePort) is { } remote && peer.PingUnconnected(remote, onlyReplyOnAcceptingConnections, (int)connectionSocketIndex);
     }
 
-    /// <summary>-1 when there is no sample yet.</summary>
-    public int GetAveragePing(AddressOrGuid systemIdentifier) => Milliseconds(ConnectionOf(systemIdentifier)?.AveragePing);
+    /// <summary>
+    /// GetAveragePing (RakPeer.cpp:2149-2170): -1 for an unknown system or one with no sample yet. As in RakNet, a
+    /// system that has gone answers by address from its slot until another connection takes it.
+    /// </summary>
+    public int GetAveragePing(AddressOrGuid systemIdentifier) =>
+        SlotOf(systemIdentifier, out _)?.AveragePing is { } ping ? (int)ping.TotalMilliseconds : -1;
 
-    /// <inheritdoc cref="GetAveragePing"/>
-    public int GetLastPing(AddressOrGuid systemIdentifier) => Milliseconds(ConnectionOf(systemIdentifier)?.LastPing);
+    /// <summary>
+    /// GetLastPing (RakPeer.cpp:2178-2190): -1 for an unknown system, 65535 for a known one with no pong yet, which
+    /// includes a system still connecting. A system that has gone answers by address from its slot until another connection
+    /// takes it, and by GUID not at all, as closing a slot clears its guid (RakPeer.cpp:4159-4161).
+    /// </summary>
+    public int GetLastPing(AddressOrGuid systemIdentifier) => SlotPing(systemIdentifier, c => c.LastPing);
 
-    /// <inheritdoc cref="GetAveragePing"/>
-    public int GetLowestPing(AddressOrGuid systemIdentifier) => Milliseconds(ConnectionOf(systemIdentifier)?.LowestPing);
+    /// <summary>GetLowestPing (RakPeer.cpp:2199-2208), answered as <see cref="GetLastPing"/>.</summary>
+    public int GetLowestPing(AddressOrGuid systemIdentifier) => SlotPing(systemIdentifier, c => c.LowestPing);
 
     public void SetOccasionalPing(bool doPing)
     {
@@ -400,14 +433,29 @@ public sealed class RakPeerInterface : IDisposable
 
     public void SetInternalID(SystemAddress systemAddress, int index = 0) => RequirePeer().SetInternalAddress(systemAddress, index);
 
-    /// <summary>GetExternalID: for <see cref="SystemAddress.Unassigned"/>, the first address a remote reported for this peer.</summary>
+    /// <summary>
+    /// GetExternalID (RakPeer.cpp:2351-2376): for <see cref="SystemAddress.Unassigned"/>, the first address a remote
+    /// reported for this peer; else the connected system's view of this peer, falling back to that of a slot whose
+    /// system has gone.
+    /// </summary>
     public SystemAddress GetExternalID(SystemAddress target)
     {
         if (_peer is null)
             return SystemAddress.Unassigned;
         if (!target.IsAssigned)
             return _peer.ExternalAddress;
-        return _peer.TryGetConnection(target, out var connection) ? connection.ExternalAddress : SystemAddress.Unassigned;
+        if (!_peer.IsActive)
+            return SystemAddress.Unassigned;
+        if (_peer.TryGetConnection(target, out var connection))
+            return connection.ExternalAddress;
+        // The last inactive slot with the address and an assigned external address wins, as RakNet's loop leaves it.
+        var inactive = SystemAddress.Unassigned;
+        for (var index = 0; index < _slots.Length; index++)
+        {
+            if (DeadSlot(index) is { } gone && gone.Address == target && gone.ExternalAddress.IsAssigned)
+                inactive = gone.ExternalAddress;
+        }
+        return inactive;
     }
 
     public RakNetGuid GetMyGUID() => _peer?.RakNetGuid ?? RakNetGuid.Unassigned;
@@ -445,13 +493,13 @@ public sealed class RakPeerInterface : IDisposable
         _pending = _pending with { DefaultTimeout = timeout };
     }
 
-    /// <summary>The connection's timeout, or the default for <see cref="SystemAddress.Unassigned"/> or an unknown system.</summary>
-    public uint GetTimeoutTime(SystemAddress target)
-    {
-        if (_peer is not null && target.IsAssigned && _peer.TryGetConnection(target, out var connection))
-            return (uint)connection.Timeout.TotalMilliseconds;
-        return (uint)(_peer?.DefaultTimeout ?? _pending.DefaultTimeout).TotalMilliseconds;
-    }
+    /// <summary>
+    /// Always the default timeout: RakPeer::GetTimeoutTime reads a connection's timeout and discards it
+    /// (RakPeer.cpp:2551-2564). <see cref="RakConnection.Timeout"/> holds the connection's own.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "RakNet's signature; RakNet reads the target's timeout and discards it.")]
+    public uint GetTimeoutTime(SystemAddress target) =>
+        (uint)(_peer is { IsActive: true } peer ? peer.DefaultTimeout : _pending.DefaultTimeout).TotalMilliseconds;
 
     /// <summary>
     /// GetMTUSize: the connection's MTU, else defaultMTUSize (RakPeer.cpp:2572-2581), which is the smallest MTU tried
@@ -466,7 +514,23 @@ public sealed class RakPeerInterface : IDisposable
     public string GetLocalIP(uint index) =>
         _peer is not null && index < (uint)_peer.LocalAddresses.Count ? _peer.LocalAddresses[(int)index].ToString() : string.Empty;
 
-    public bool IsLocalIP(string ip) => _peer is not null && IPAddress.TryParse(ip, out var address) && _peer.IsLocalAddress(address);
+    /// <summary>
+    /// IsLocalIP (RakPeer.cpp:2636-2657): a string comparison with "127.0.0.1", "localhost" and each
+    /// <see cref="GetLocalIP"/>, so other spellings of an address are not local.
+    /// </summary>
+    public bool IsLocalIP(string? ip)
+    {
+        if (string.IsNullOrEmpty(ip))
+            return false;
+        if (ip is "127.0.0.1" or "localhost")
+            return true;
+        for (var index = 0u; index < GetNumberOfAddresses(); index++)
+        {
+            if (string.Equals(ip, GetLocalIP(index), StringComparison.Ordinal))
+                return true;
+        }
+        return false;
+    }
 
     public void AllowConnectionResponseIPMigration(bool allow)
     {
@@ -524,11 +588,104 @@ public sealed class RakPeerInterface : IDisposable
             _pendingPlugins.Remove(plugin);
     }
 
-    /// <summary>Consumes <paramref name="packet"/>; it must not be used or deallocated afterwards.</summary>
+    /// <summary>
+    /// Consumes <paramref name="packet"/>; it must not be used or deallocated afterwards. A received packet travels
+    /// without a copy, keeping its bitSize and wasGeneratedLocally as RakNet's queued pointer does (RakPeer.cpp:2826-2843);
+    /// an allocated one is copied with its address and GUID.
+    /// </summary>
     public void PushBackPacket(Packet packet, bool pushAtHead)
     {
         ArgumentNullException.ThrowIfNull(packet);
-        RequirePeer().Inject(packet.Take(), pushAtHead);
+        var peer = RequirePeer();
+        var (address, guid) = (packet.SystemAddress, packet.RakNetGuid);
+        if (packet.TryTake(out var owned, out var edited))
+        {
+            if (edited)
+                peer.Inject(owned, address, guid, pushAtHead);
+            else
+                peer.Inject(owned, pushAtHead);
+            return;
+        }
+        peer.Inject(packet.Data.Span, address, guid, pushAtHead);
+        packet.Dispose();
+    }
+
+    /// <summary>
+    /// AllocatePacket (RakPeer.cpp:2858-2861): a zeroed packet of <paramref name="dataSize"/> bytes with an unassigned
+    /// address and GUID, to fill in and hand to <see cref="PushBackPacket"/>.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "RakPeerInterface::AllocatePacket is an instance member, kept so ported calls read the same.")]
+    public Packet AllocatePacket(uint dataSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(dataSize, (uint)Array.MaxLength);
+        return new Packet((int)dataSize);
+    }
+
+    /// <summary>
+    /// GetSocket (RakPeer.cpp:2863-2896, 5656-5680): the socket of a connected system, the first socket for
+    /// <see cref="SystemAddress.Unassigned"/>, and null for an unknown system or a peer that is not started.
+    /// </summary>
+    public RakSocket? GetSocket(SystemAddress target)
+    {
+        if (_peer is not { IsActive: true } peer)
+            return null;
+        if (!target.IsAssigned)
+            return peer.Sockets[0];
+        return peer.TryGetConnection(target, out var connection) ? connection.Socket : null;
+    }
+
+    /// <summary>GetSockets (RakPeer.cpp:2898-2930): clears <paramref name="sockets"/>, then adds every socket of a started peer.</summary>
+    public void GetSockets(ICollection<RakSocket> sockets)
+    {
+        ArgumentNullException.ThrowIfNull(sockets);
+        sockets.Clear();
+        if (_peer is not { IsActive: true } peer)
+            return;
+        foreach (var socket in peer.Sockets)
+            sockets.Add(socket);
+    }
+
+    /// <summary>ReleaseSockets (RakPeer.cpp:2932-2935): clears the list; sockets are not reference counted.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "RakPeerInterface::ReleaseSockets is an instance member, kept so ported calls read the same.")]
+    public void ReleaseSockets(ICollection<RakSocket> sockets)
+    {
+        ArgumentNullException.ThrowIfNull(sockets);
+        sockets.Clear();
+    }
+
+    /// <summary>
+    /// SetUserUpdateThread (RakPeer.cpp:2986-2990): <paramref name="callback"/> runs with this facade and
+    /// <paramref name="data"/> once per update cycle, on the thread running it (<see cref="Receive"/> or
+    /// <see cref="RunUpdateCycle()"/>). Null stops it. Kept across <see cref="Startup"/>.
+    /// </summary>
+    public void SetUserUpdateThread(Action<RakPeerInterface, object?>? callback, object? data) =>
+        _userUpdateThread.Set(callback, data);
+
+    /// <summary>
+    /// RunUpdateCycle (RakPeer.cpp:5567-6253): runs one update cycle on the caller without reading a packet; true, as
+    /// RakNet returns, or false when the peer is not started.
+    /// </summary>
+    public bool RunUpdateCycle()
+    {
+        if (_peer is not { IsActive: true } peer)
+            return false;
+        try
+        {
+            peer.Update();
+            return true;
+        }
+        catch (ObjectDisposedException) when (!peer.IsActive)
+        {
+            // Shut down by another thread.
+            return false;
+        }
+    }
+
+    /// <summary>RunUpdateCycle with RakNet's scratch stream, which the cycle does not need.</summary>
+    public bool RunUpdateCycle(BitStream updateBitStream)
+    {
+        ArgumentNullException.ThrowIfNull(updateBitStream);
+        return RunUpdateCycle();
     }
 
     public void ChangeSystemAddress(RakNetGuid rakNetGuid, SystemAddress systemAddress) =>
@@ -639,9 +796,56 @@ public sealed class RakPeerInterface : IDisposable
     private IEnumerable<RakConnection> ConnectedSystems() =>
         _peer is null ? [] : _peer.Connections.Where(c => c.State == ConnectionState.Connected);
 
+    private void RecordSlot(RakConnection connection)
+    {
+        if (connection.SystemIndex >= 0 && connection.SystemIndex < _slots.Length)
+            _slots[connection.SystemIndex] = connection;
+    }
+
+    /// <summary>The connection that last held slot <paramref name="index"/>, if it has gone and no later connection holds the slot.</summary>
+    private RakConnection? DeadSlot(int index)
+    {
+        if (_slots[index] is not { State: ConnectionState.Disconnected } gone)
+            return null;
+        if (_peer is not null && _peer.TryGetConnectionByIndex(index, out var live) && !ReferenceEquals(live, gone))
+            return null;
+        return gone;
+    }
+
+    /// <summary>
+    /// GetRemoteSystem with onlyActive false (RakPeer.cpp:3381-3443): the live connection, else a slot whose system has
+    /// gone. <paramref name="connecting"/> is set when the system has a slot but is not yet reported, which the attempt
+    /// registry shows as IS_CONNECTING.
+    /// </summary>
+    private RakConnection? SlotOf(AddressOrGuid target, out bool connecting)
+    {
+        connecting = false;
+        if (ConnectionOf(target) is { } live)
+            return live;
+        // A closed slot's guid is cleared (RakPeer.cpp:4159-4161), so a GUID query never matches one (RakPeer.cpp:3428-3440).
+        if (_peer is not { IsActive: true } || target.IsUndefined || target.RakNetGuid.IsAssigned)
+            return null;
+        for (var index = 0; index < _slots.Length; index++)
+        {
+            if (DeadSlot(index) is { } gone && gone.Address == target.Address)
+                return gone;
+        }
+        connecting = _peer.GetConnectionState(target) == ConnectionState.Connecting;
+        return null;
+    }
+
+    // A slot's pings start at 65535 and RakNet returns them raw (RakPeer.cpp:3740-3748); RakConnection shows 65535 as null.
+    private int SlotPing(AddressOrGuid target, Func<RakConnection, TimeSpan?> ping)
+    {
+        if (SlotOf(target, out var connecting) is { } connection)
+            return ping(connection) is { } value ? (int)value.TotalMilliseconds : ushort.MaxValue;
+        return connecting ? ushort.MaxValue : -1;
+    }
+
+    // After Shutdown maximumNumberOfPeers is 0 (RakPeer.cpp:1150-1167), so no lookup finds a system.
     private RakConnection? ConnectionOf(AddressOrGuid target)
     {
-        if (_peer is null || target.IsUndefined)
+        if (_peer is not { IsActive: true } || target.IsUndefined)
             return null;
         if (target.RakNetGuid.IsAssigned)
             return _peer.TryGetConnection(target.RakNetGuid, out var byGuid) ? byGuid : null;
@@ -651,7 +855,22 @@ public sealed class RakPeerInterface : IDisposable
     private RakPeer RequirePeer() =>
         _peer ?? throw new InvalidOperationException("Startup has not been called.");
 
-    private static int Milliseconds(TimeSpan? ping) => ping is { } value ? (int)value.TotalMilliseconds : -1;
+    /// <summary>The SetUserUpdateThread callback, run by <see cref="INetworkObserver.OnUpdateCycle"/>.</summary>
+    private sealed class UserUpdateThread(RakPeerInterface owner) : INetworkObserver
+    {
+        private volatile Registration? _registration;
+
+        public void Set(Action<RakPeerInterface, object?>? callback, object? data) =>
+            _registration = callback is null ? null : new Registration(callback, data);
+
+        public void OnUpdateCycle()
+        {
+            if (_registration is { } registration)
+                registration.Callback(owner, registration.Data);
+        }
+
+        private sealed record Registration(Action<RakPeerInterface, object?> Callback, object? Data);
+    }
 
     // RakNet resolves on the caller (SystemAddress::FromStringExplicitPort); IPv4 only, as RAKNET_SUPPORT_IPV6 is 0.
     private static SystemAddress? Resolve(string host, ushort port)

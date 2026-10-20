@@ -163,12 +163,12 @@ public sealed partial class RakPeer
         while (true)
         {
             wake.Wait();
-            // Reset before the stop check: Stop sets the flag and then the event, so a Set that a Reset here clears was
-            // preceded by the flag, and one landing after the Reset leaves the event set for the next Wait.
+            // Consume the wake before looking for shutdown: Stop sets _loopStopping and then the event, so a Set that
+            // this Reset discards was preceded by the flag, which the full fence of the exchange makes visible here.
             wake.Reset();
+            Interlocked.Exchange(ref _wakePending, 0);
             if (_loopStopping)
                 return;
-            Interlocked.Exchange(ref _wakePending, 0);
             try
             {
                 RunCycle();
@@ -218,7 +218,7 @@ public sealed partial class RakPeer
                 observer.OnUpdateCycle();
             foreach (var observer in _plugins.Observers)
                 observer.OnUpdateCycle();
-            if (_core.TakeUpdateRequest())
+            if (_core.UpdateRequested)
                 Wake();
         }
     }

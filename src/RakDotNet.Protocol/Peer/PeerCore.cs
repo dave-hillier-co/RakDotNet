@@ -62,7 +62,6 @@ internal sealed class PeerCore
     private readonly List<ConnectionAttempt> _attempts = [];
     private readonly Queue<OutgoingDatagram> _datagrams = new();
     private readonly Queue<PeerEvent> _events = new();
-    private bool _updateRequested;
     private readonly BanTable _bans = new();
     private byte[] _offlinePingResponse = [];
     private long _defaultTimeoutMs;
@@ -285,17 +284,6 @@ internal sealed class PeerCore
     }
 
     public bool TryDequeueDatagram(out OutgoingDatagram datagram) => _datagrams.TryDequeue(out datagram);
-
-    /// <summary>
-    /// Whether an update asked for another straight after it, as RakNet sets quitAndDataEvents once it has queued an
-    /// ID_CONNECTED_PONG (RakPeer.cpp:6090-6091); reading it clears it.
-    /// </summary>
-    public bool TakeUpdateRequest()
-    {
-        var requested = _updateRequested;
-        _updateRequested = false;
-        return requested;
-    }
 
     /// <summary>
     /// The next event, in the order RakPeer adds packets to packetReturnQueue. An ID_TIMESTAMP message is not shifted
@@ -595,6 +583,14 @@ internal sealed class PeerCore
     public int ActiveSystemCount => _active.Count;
 
     /// <summary>
+    /// True after an <see cref="Update"/> that queued a ping or pong behind the reliability layer's update, so the
+    /// caller runs another cycle at once and it goes out right away. RakNet sets quitAndDataEvents at exactly these
+    /// points: the occasional ping (RakPeer.cpp:5926-5930), the ping on ID_NEW_INCOMING_CONNECTION (6010-6013) and
+    /// ID_CONNECTED_PONG (6088-6091).
+    /// </summary>
+    public bool UpdateRequested { get; private set; }
+
+    /// <summary>
     /// The first half of RakPeer::Shutdown (RakPeer.cpp:1050-1058): NotifyAndFlagForShutdown for every active system,
     /// so each closes once its ID_DISCONNECTION_NOTIFICATION is delivered. The caller keeps updating until
     /// <see cref="ActiveSystemCount"/> is 0 or its block time runs out.
@@ -645,6 +641,7 @@ internal sealed class PeerCore
     {
         var nowMs = nowUs / 1000;
         UpdateConnectionAttempts(nowMs);
+        UpdateRequested = false;
 
         // RakPeer.cpp:5832: by index over activeSystemList. A system closed during its own turn has the last entry moved
         // into its place, and the loop moves on, so that entry waits for the next update.
@@ -677,6 +674,8 @@ internal sealed class PeerCore
             {
                 system.NextPingTimeMs = nowMs + PingIntervalMs;
                 PingInternal(system, Reliability.Unreliable, nowUs);
+                // RakPeer.cpp:5929-5930: update again straight after this one so the ping goes out right away.
+                UpdateRequested = true;
             }
 
             while (system.IsActive && system.Session.TryDequeueEvent(out var sessionEvent))
@@ -811,6 +810,8 @@ internal sealed class PeerCore
                 {
                     system.Mode = ConnectMode.Connected;
                     PingInternal(system, Reliability.Unreliable, nowUs);
+                    // RakPeer.cpp:6012-6013: update again straight after this one so the ping goes out right away.
+                    UpdateRequested = true;
                     system.TheirInternalAddresses = incoming.InternalAddresses;
                     OnConnectedPong(system, incoming.SendPingTime, incoming.SendPongTime, nowMs);
                     system.MyExternalAddress = incoming.ServerAddress;
@@ -830,7 +831,7 @@ internal sealed class PeerCore
                     var reply = Encode(new ConnectedPong(ping.SendPingTime, (ulong)nowMs));
                     SendImmediate(system, reply, Reliability.Unreliable, Priority.Immediate, 0, 0, nowUs);
                     // RakPeer.cpp:6090-6091: update again straight after this one so the pong goes out right away.
-                    _updateRequested = true;
+                    UpdateRequested = true;
                 }
                 break;
 

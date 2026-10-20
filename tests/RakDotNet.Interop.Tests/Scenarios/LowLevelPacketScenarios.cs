@@ -119,9 +119,11 @@ public sealed class LowLevelPacketScenarios
     {
         await using var session = await InteropSession.StartAsync(client, server, cancellationToken: Token);
         var (serverGuid, _) = await session.ConnectAsync(Token);
-        // Hold every acknowledgement back well past the sender's RTO, about 30 ms on loopback.
+        // Hold every acknowledgement back past the longest RTO the sender can have, so the ack is late whatever round
+        // trip and deviation the handshake measured: GetRTOForRetransmission caps it at 2 s
+        // (CCRakNetSlidingWindow.cpp:291-317), and a loaded machine's jitter can lift it well above loopback's 30 ms.
         session.Proxy.Rule = (direction, payload) =>
-            direction == ProxyDirection.BToA && IsAck(payload) ? new FaultDecision(false, false, TimeSpan.FromMilliseconds(500)) : null;
+            direction == ProxyDirection.BToA && IsAck(payload) ? new FaultDecision(false, false, LongerThanAnyRto) : null;
 
         var receipt = await session.Client.SendAsync(
             new SendOptions(serverGuid, new byte[] { ScenarioFlows.UserPacket, 0x11 }, Reliability.UnreliableWithAckReceipt), Token);
@@ -136,6 +138,8 @@ public sealed class LowLevelPacketScenarios
         await ScenarioFlows.WaitForReceiptAsync(session.ClientInbox, MessageId.SndReceiptAcked, reliable, Token);
         Assert.DoesNotContain(session.ClientInbox.Unconsumed, p => p.MessageId is (byte)MessageId.SndReceiptAcked or (byte)MessageId.SndReceiptLoss && ReceiptOf(p) == receipt);
     }
+
+    private static readonly TimeSpan LongerThanAnyRto = TimeSpan.FromMilliseconds(2_500);
 
     private static bool IsAck(ReadOnlyMemory<byte> datagram)
     {
