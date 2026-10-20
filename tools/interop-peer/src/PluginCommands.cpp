@@ -1,7 +1,10 @@
 #include "PluginCommands.h"
 
 #include "MessageFilter.h"
+#include "RakMemoryOverride.h"
 #include "RakPeerInterface.h"
+#include "ReadyEvent.h"
+#include "TwoWayAuthentication.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -68,6 +71,33 @@ namespace interop
             return RakNet::RakNetGUID(static_cast<std::uint64_t>(g));
         }
 
+        // An optional GUID; omitted means UNASSIGNED_RAKNET_GUID.
+        RakNet::RakNetGUID OptionalGuidField(const json& command, const char* field)
+        {
+            auto it = command.find(field);
+            if (it == command.end() || it->is_null())
+                return RakNet::UNASSIGNED_RAKNET_GUID;
+            return GuidField(command, field);
+        }
+
+        int EventIdField(const json& command)
+        {
+            return IntField(command, "eventId", std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), nullptr);
+        }
+
+        const char* ReadyStatusName(RakNet::ReadyEventSystemStatus status)
+        {
+            switch (status)
+            {
+            case RakNet::RES_NOT_WAITING: return "RES_NOT_WAITING";
+            case RakNet::RES_WAITING: return "RES_WAITING";
+            case RakNet::RES_READY: return "RES_READY";
+            case RakNet::RES_ALL_READY: return "RES_ALL_READY";
+            case RakNet::RES_UNKNOWN_EVENT: return "RES_UNKNOWN_EVENT";
+            }
+            return "RES_UNKNOWN_EVENT";
+        }
+
         std::string AddressText(const RakNet::SystemAddress& address)
         {
             if (address == RakNet::UNASSIGNED_SYSTEM_ADDRESS)
@@ -118,9 +148,13 @@ namespace interop
 
     PluginCommands::~PluginCommands()
     {
-        // The peer is destroyed first; it never frees plugins, so the filter is freed here.
+        // The peer is destroyed first; it never frees plugins, so they are freed here.
         if (messageFilter_ != nullptr)
             RakNet::MessageFilter::DestroyInstance(messageFilter_);
+        if (readyEvent_ != nullptr)
+            RakNet::ReadyEvent::DestroyInstance(readyEvent_);
+        if (twoWayAuthentication_ != nullptr)
+            RakNet::OP_DELETE(twoWayAuthentication_, _FILE_AND_LINE_);
     }
 
     bool PluginCommands::Dispatch(const std::string& cmd, const json& command, ordered_json& result)
@@ -189,9 +223,122 @@ namespace interop
         }
         else
         {
+            return DispatchReadyEvent(cmd, command, result) || DispatchTwoWayAuthentication(cmd, command, result);
+        }
+        return true;
+    }
+
+    bool PluginCommands::DispatchReadyEvent(const std::string& cmd, const json& command, ordered_json& result)
+    {
+        if (cmd == "readyEventAttach")
+        {
+            if (readyEvent_ == nullptr)
+            {
+                readyEvent_ = RakNet::ReadyEvent::GetInstance();
+                readyEvent_->SetSendChannel(static_cast<unsigned char>(Optional<int>(command, "channel", 0)));
+                peer_->AttachPlugin(readyEvent_);
+            }
+        }
+        else if (cmd == "readyEventSet")
+        {
+            result["result"] = RequireReadyEvent().SetEvent(EventIdField(command), Optional<bool>(command, "isReady", true));
+        }
+        else if (cmd == "readyEventForceCompletion")
+        {
+            RequireReadyEvent().ForceCompletion(EventIdField(command));
+        }
+        else if (cmd == "readyEventDelete")
+        {
+            result["result"] = RequireReadyEvent().DeleteEvent(EventIdField(command));
+        }
+        else if (cmd == "readyEventAddToWaitList")
+        {
+            result["result"] = RequireReadyEvent().AddToWaitList(EventIdField(command), OptionalGuidField(command, "target"));
+        }
+        else if (cmd == "readyEventRemoveFromWaitList")
+        {
+            result["result"] = RequireReadyEvent().RemoveFromWaitList(EventIdField(command), OptionalGuidField(command, "target"));
+        }
+        else if (cmd == "readyEventInfo")
+        {
+            ReadyEventInfo(command, result);
+        }
+        else
+        {
             return false;
         }
         return true;
+    }
+
+    RakNet::ReadyEvent& PluginCommands::RequireReadyEvent()
+    {
+        if (readyEvent_ == nullptr)
+            throw PluginCommandError("no ReadyEvent is attached; send readyEventAttach first");
+        return *readyEvent_;
+    }
+
+    void PluginCommands::ReadyEventInfo(const json& command, ordered_json& result)
+    {
+        RakNet::ReadyEvent& readyEvent = RequireReadyEvent();
+        int eventId = EventIdField(command);
+        ordered_json eventIds = ordered_json::array();
+        for (unsigned i = 0; i < readyEvent.GetEventListSize(); ++i)
+            eventIds.push_back(readyEvent.GetEventAtIndex(i));
+        result["eventIds"] = eventIds;
+        result["hasEvent"] = readyEvent.HasEvent(eventId);
+        result["isSet"] = readyEvent.IsEventSet(eventId);
+        result["isCompleted"] = readyEvent.IsEventCompleted(eventId);
+        result["isCompletionProcessing"] = readyEvent.IsEventCompletionProcessing(eventId);
+        ordered_json waitList = ordered_json::array();
+        for (unsigned i = 0; i < readyEvent.GetRemoteWaitListSize(eventId); ++i)
+        {
+            RakNet::RakNetGUID guid = readyEvent.GetFromWaitListAtIndex(eventId, i);
+            ordered_json item;
+            item["guid"] = std::to_string(guid.g);
+            item["status"] = ReadyStatusName(readyEvent.GetReadyStatus(eventId, guid));
+            waitList.push_back(item);
+        }
+        result["waitList"] = waitList;
+    }
+
+    bool PluginCommands::DispatchTwoWayAuthentication(const std::string& cmd, const json& command, ordered_json& result)
+    {
+        if (cmd == "twoWayAuthAttach")
+        {
+            if (twoWayAuthentication_ == nullptr)
+            {
+                // TwoWayAuthentication.cpp has no STATIC_FACTORY_DEFINITIONS, so GetInstance is never defined.
+                twoWayAuthentication_ = RakNet::OP_NEW<RakNet::TwoWayAuthentication>(_FILE_AND_LINE_);
+                peer_->AttachPlugin(twoWayAuthentication_);
+            }
+        }
+        else if (cmd == "twoWayAuthAddPassword")
+        {
+            std::string identifier = Required<std::string>(command, "identifier");
+            std::string password = Required<std::string>(command, "password");
+            result["result"] = RequireTwoWayAuthentication().AddPassword(identifier.c_str(), password.c_str());
+        }
+        else if (cmd == "twoWayAuthChallenge")
+        {
+            std::string identifier = Required<std::string>(command, "identifier");
+            result["result"] = RequireTwoWayAuthentication().Challenge(identifier.c_str(), RakNet::AddressOrGUID(GuidField(command, "target")));
+        }
+        else if (cmd == "twoWayAuthClear")
+        {
+            RequireTwoWayAuthentication().Clear();
+        }
+        else
+        {
+            return false;
+        }
+        return true;
+    }
+
+    RakNet::TwoWayAuthentication& PluginCommands::RequireTwoWayAuthentication()
+    {
+        if (twoWayAuthentication_ == nullptr)
+            throw PluginCommandError("no TwoWayAuthentication is attached; send twoWayAuthAttach first");
+        return *twoWayAuthentication_;
     }
 
     RakNet::MessageFilter& PluginCommands::RequireMessageFilter()

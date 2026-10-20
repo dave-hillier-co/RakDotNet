@@ -11,6 +11,8 @@ namespace RakNet
 {
     class MessageFilter;
     class RakPeerInterface;
+    class ReadyEvent;
+    class TwoWayAuthentication;
 }
 
 namespace interop
@@ -48,9 +50,16 @@ namespace interop
         RakNet::MessageFilter& RequireMessageFilter();
         void TrackFilterSet(int filterSetId);
         void MessageFilterInfo(nlohmann::ordered_json& result);
+        bool DispatchReadyEvent(const std::string& cmd, const nlohmann::json& command, nlohmann::ordered_json& result);
+        RakNet::ReadyEvent& RequireReadyEvent();
+        void ReadyEventInfo(const nlohmann::json& command, nlohmann::ordered_json& result);
+        bool DispatchTwoWayAuthentication(const std::string& cmd, const nlohmann::json& command, nlohmann::ordered_json& result);
+        RakNet::TwoWayAuthentication& RequireTwoWayAuthentication();
 
         RakNet::RakPeerInterface* peer_;
         RakNet::MessageFilter* messageFilter_ = nullptr;
+        RakNet::ReadyEvent* readyEvent_ = nullptr;
+        RakNet::TwoWayAuthentication* twoWayAuthentication_ = nullptr;
         std::vector<FilterEvent> disallowed_;
         std::vector<FilterEvent> timeouts_;
     };
