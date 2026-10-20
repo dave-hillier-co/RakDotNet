@@ -38,6 +38,26 @@ public static class PeerMatrix
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
     };
 
+    /// <summary>Why a driver of this kind with secure connections (LIBCAT_SECURITY) cannot run here, or null when it can.</summary>
+    public static string? UnavailableSecureReason(PeerKind kind) => kind switch
+    {
+        PeerKind.Native when NativePeerDriver.FindSecureBinary() is null =>
+            $"Secure native interop peer not found at {NativePeerDriver.ResolveSecureBinaryPath()}. Build tools/interop-peer with LIBCAT_SECURITY on or set {NativePeerDriver.SecureBinaryEnvironmentVariable}.",
+        _ => UnavailableReason(kind),
+    };
+
+    /// <summary>Skips the current test unless every kind is available with secure connections.</summary>
+    public static void SkipUnlessSecureAvailable(params PeerKind[] kinds)
+    {
+        foreach (var kind in kinds.Distinct())
+        {
+            if (UnavailableSecureReason(kind) is { } reason)
+            {
+                Assert.Skip(reason);
+            }
+        }
+    }
+
     /// <summary>Skips the current test unless every kind is available.</summary>
     public static void SkipUnlessAvailable(params PeerKind[] kinds)
     {
@@ -85,11 +105,23 @@ public static class PeerMatrix
         }
     }
 
-    public static async Task<IPeerDriver> LaunchAsync(PeerKind kind, CancellationToken cancellationToken = default)
+    public static Task<IPeerDriver> LaunchAsync(PeerKind kind, CancellationToken cancellationToken = default) =>
+        LaunchAsync(kind, secure: false, cancellationToken);
+
+    /// <summary>Launches a driver; with <paramref name="secure"/> a native peer is interop-peer-secure.</summary>
+    public static async Task<IPeerDriver> LaunchAsync(PeerKind kind, bool secure, CancellationToken cancellationToken = default)
     {
-        SkipUnlessAvailable(kind);
+        if (secure)
+        {
+            SkipUnlessSecureAvailable(kind);
+        }
+        else
+        {
+            SkipUnlessAvailable(kind);
+        }
         return kind switch
         {
+            PeerKind.Native when secure => await NativePeerDriver.LaunchSecureAsync(cancellationToken).ConfigureAwait(false),
             PeerKind.Native => await NativePeerDriver.LaunchAsync(cancellationToken).ConfigureAwait(false),
             PeerKind.RakDotNet => RakDotNetPeerDriver.Launch(),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),

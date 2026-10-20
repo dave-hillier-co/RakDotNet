@@ -21,6 +21,7 @@
 - `src/RakDotNet.Protocol/Wire/`: layer 0. Public.
 - `src/RakDotNet.Protocol/Session/`: layer 1. Internal, visible to tests and `RakDotNet`.
 - `src/RakDotNet.Protocol/Peer/`: layer 2. Internal, visible to tests and `RakDotNet`.
+- `src/RakDotNet.Protocol/Security/`: the port of the `DependentExtensions/cat` code RakNet's secure connections use, beneath layers 1 and 2. Internal, visible to tests and `RakDotNet`.
 - `src/RakDotNet/`: layer 3, public API, namespace `RakDotNet`.
 - `src/RakDotNet/Security/`: layer 3 key and connect-security types, namespace `RakDotNet.Security`.
 - `src/RakDotNet/Transport/`: the socket and update loops that run a `PeerCore`. Internal, visible to tests.
@@ -39,7 +40,7 @@ Each concept has one definition. RakNet enums and wire types (`Reliability`, `Pr
 
 - xUnit v3. Test names are sentences with underscores.
 - Classic TDD: real collaborators, no mocking frameworks. Fakes are hand-written and only stand in for I/O or time.
-- Expected bytes come from a golden vector, from known answers printed by native RakNet code (`tools/bitstream-vectors` for the BitStream encodings), or are derived from the C++ source, with a comment saying which.
+- Expected bytes come from a golden vector, from known answers printed by native RakNet code (`tools/bitstream-vectors` for the BitStream encodings, `tools/cat-vectors` for the cat primitives and handshake), or are derived from the C++ source, with a comment saying which.
 - Round-trip tests only prove nothing is lost. Every codec also needs tests asserting decoded field values against known inputs: exact bytes derived from the C++, or the peers' values recorded in a golden vector.
 - Time is injected (`TimeProvider`, or an explicit `long nowUs` parameter in sans-IO code), never read from the system clock in layers 0 to 2. Sans-IO time is in microseconds because RakNet's congestion control works in microseconds (`CCTimeType`); `RakNet::Time` values written on the wire are that time in milliseconds.
 

@@ -40,6 +40,8 @@ public sealed class RakConnection
     private volatile IReadOnlyList<SystemAddress> _remoteInternalAddresses = [];
     private IReadOnlyList<System.Net.IPEndPoint>? _internalAddressesSource;
     private volatile SystemAddressBox _address;
+    private volatile bool _isSecure;
+    private volatile RakPublicKey? _remoteIdentityKey;
 
     internal RakConnection(RakPeer peer, RakNetGuid rakNetGuid, SystemAddress address, bool isIncoming, RakSocket socket,
                            SystemAddress externalAddress, long nowUs, ConnectionState state)
@@ -74,7 +76,10 @@ public sealed class RakConnection
 
     public bool IsConnected => State == ConnectionState.Connected;
 
-    /// <summary>GetMTUSize(target); accounts for authenticated-encryption overhead on a secure link.</summary>
+    /// <summary>
+    /// GetMTUSize(target): the MTU agreed in the offline handshake, as RakNet reports it. On a secure link the
+    /// reliability layer takes the authenticated-encryption overhead off it internally.
+    /// </summary>
     public int Mtu => _mtu;
 
     /// <summary>SetTimeoutTime / GetTimeoutTime(target)</summary>
@@ -107,11 +112,14 @@ public sealed class RakConnection
     /// <summary>GetInternalID(target, i)</summary>
     public IReadOnlyList<SystemAddress> RemoteInternalAddresses => _remoteInternalAddresses;
 
-    /// <summary>Whether the link is encrypted.</summary>
-    public bool IsSecure { get; }
+    /// <summary>Whether every datagram of the link is encrypted and authenticated.</summary>
+    public bool IsSecure => _isSecure;
 
-    /// <summary>GetClientPublicKeyFromSystemAddress: the client's identity key in two-way authentication.</summary>
-    public RakPublicKey? RemoteIdentityKey { get; }
+    /// <summary>
+    /// GetClientPublicKeyFromSystemAddress: the identity key a client proved under two-way authentication, on a server
+    /// that requires client keys; null otherwise.
+    /// </summary>
+    public RakPublicKey? RemoteIdentityKey => _remoteIdentityKey;
 
     /// <summary>Application state; never read by the library.</summary>
     public object? UserState { get; set; }
@@ -185,6 +193,13 @@ public sealed class RakConnection
             _remoteInternalAddresses = system.TheirInternalAddresses.Select(a => (SystemAddress)a).ToArray();
         }
         Counters.Publish(system.Session);
+        _isSecure = system.Session.UsesSecurity;
+        if (_remoteIdentityKey is null && system.ClientPublicKey.AsSpan().ContainsAnyExcept((byte)0))
+        {
+            // RakPeer.cpp:2502-2510: a key with any non-zero byte was received.
+            RakPublicKey.TryCreate(system.ClientPublicKey, out var key);
+            _remoteIdentityKey = key;
+        }
     }
 
     /// <summary>The completing packet arrived: ID_CONNECTION_REQUEST_ACCEPTED or ID_NEW_INCOMING_CONNECTION. Called by the I/O cycle.</summary>

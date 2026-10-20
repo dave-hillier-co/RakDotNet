@@ -662,6 +662,33 @@ public sealed class RakPeerInterfaceTests : IDisposable
         Assert.Null(peer.Receive());
     }
 
+    [Fact]
+    public void The_Encryption_sample_connects_with_two_way_authentication_and_reads_the_clients_key()
+    {
+        // Samples/Encryption/Encryption.cpp option 4: GenerateServerKey for both sides, InitializeSecurity before Startup,
+        // Connect with PKM_USE_TWO_WAY_AUTHENTICATION, and GetClientPublicKeyFromSystemAddress on the server.
+        using var serverKeys = RakDotNet.Security.RakKeyPair.Generate();
+        using var clientKeys = RakDotNet.Security.RakKeyPair.Generate();
+        var serverPrivate = new byte[RakDotNet.Security.RakKeyPair.PrivateKeyLength];
+        serverKeys.ExportPrivateKey(serverPrivate);
+        var server = Instance();
+        Assert.True(server.InitializeSecurity(serverKeys.PublicKey.Bytes, serverPrivate, requireClientKey: true));
+        Assert.Equal(StartupResult.RakNetStarted, server.Startup(8, [Loopback()]));
+        server.SetMaximumIncomingConnections(8);
+        Assert.False(server.InitializeSecurity(serverKeys.PublicKey.Bytes, serverPrivate));
+        var client = Started(1);
+
+        var publicKey = RakDotNet.Security.ConnectSecurity.TwoWayAuthentication(serverKeys.PublicKey, clientKeys);
+        Assert.Equal(ConnectionAttemptResult.ConnectionAttemptStarted, client.Connect("127.0.0.1", ServerPort(server), publicKey: publicKey));
+        ReceiveUntil(client, MessageId.ConnectionRequestAccepted, server).Dispose();
+        using var incoming = ReceiveUntil(server, MessageId.NewIncomingConnection, client);
+
+        var key = new byte[RakDotNet.Security.RakPublicKey.Length];
+        Assert.True(server.GetClientPublicKeyFromSystemAddress(incoming.SystemAddress, key));
+        Assert.Equal(clientKeys.PublicKey.Bytes.ToArray(), key);
+        Assert.False(client.GetClientPublicKeyFromSystemAddress(client.GetSystemAddressFromGuid(server.GetMyGUID()), key));
+    }
+
     public void Dispose()
     {
         foreach (var instance in _instances)

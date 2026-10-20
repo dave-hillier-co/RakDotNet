@@ -1,0 +1,145 @@
+{
+  "primitive": "skein",
+  "description": "cat::Skein with 256-bit state: operation scripts on numbered hash objects and the output of every Generate.",
+  "source": "tools/cat-vectors, RakNet 1a169895a900c9fc4841c556e16514182b75faf8 DependentExtensions/cat",
+  "cases": [
+    { "name": "empty message", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "fd2e0541dbc2f7cd5b491d36dea798e77058318a34e2f20761aacb8992e5b443" }
+      ] },
+    { "name": "one crunch of 1 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "e6" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "6c4bad89750780be6352d302a9aad400f12159f15881f79fb4897ac90bc4bb29" }
+      ] },
+    { "name": "one crunch of 31 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "66aa63515f4e2fbf0a2648cbc6ea11509b8d9237d3452e5114337971405131" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "ea8864134fe6aa23cb7909ae4d0b0d7b34f512082c3cba0e1b12605039638565" }
+      ] },
+    { "name": "one crunch of 32 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "3ec3f7dae70ad88b58e08ecf73547001935ee4b7c9040710fd25ee6e3b6b68e6" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "56500fdb964c50dbb7232b4eb76e5d1e6ae44973642b67e6911a2e562ffff70e" }
+      ] },
+    { "name": "one crunch of 33 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "a600d887b32954bc75c30b2b4bffcf1df2c8d6119bc5f097e4b972615d5798c903" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "628834f3ce666948f0c87a48def7d0f706710617cd46e61c736e5244c64d833f" }
+      ] },
+    { "name": "one crunch of 63 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "8ce3df26c0f45fe734b19209544a9273bd23c0e7c2a13616bb198a5b112973cc446e492afdeb137f2381e930a1bb01c974618978f7fdb80443f6bec39d9251" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "ab511a0a65404aa260ab636bd5a0ef664262af94dfa198259b361f987374c6e1" }
+      ] },
+    { "name": "one crunch of 64 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "7e7372760b8844aead66e3de15f4ddaa0d4fc02ed006bbc554413ad731d61eae38c534598be999c152a4b867d9aef9f432b706237d17c4cd59c5da4c2763be84" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "d641e00436b9bbdf0120228ec80222d34caed7cbdbaf02d74ee4436ffb5b58a4" }
+      ] },
+    { "name": "one crunch of 65 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "695f8537146e6bdcbddaaf95361efc409db080db06cbcd6c81332a1b300578bcc78cc5cc28ce42dd6bcdc31a26255d37a437055dc3cefcc1aa5aadd12156576e67" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "84d94b08ef65d84714a7f2ef98b56fae716d7e7cb555af347a03f5330ec7c29a" }
+      ] },
+    { "name": "one crunch of 95 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "958a1ff4fbaf81605168755a9d3fd7aa8a333394c4b5b70c05ff6dc61dda9a8faa0b7168b5e7622eda8647c5c24f015d0f085c4a059f4aa5ac47d2f65aafa03f196aee4182fe7bbdb08b286f213f1f16705e6ed8b25376eb25877ada07289f" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "8e841e9a6f93d9e598775d6a427fb076f78e8f99b161a4de09d0571272e4e587" }
+      ] },
+    { "name": "one crunch of 96 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "62bb81a35328972a93273cc1182e5cfe86e487df1081526f2ccf2d2b2d204aea26ec7e8ca5abdf2338da6c29d8df54630bf02d23325dd05f963dd80be15f56144fa65bd1bdfe0d4593b558fa806785ee86093dad9b20f0fc0114269902b3b935" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "1ebe1c4a2e95098adbf450d6b529264692f30c7046d83712fcc6b75646ef71f7" }
+      ] },
+    { "name": "one crunch of 97 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "a899952e6f553096599cb69c69882f7a60893a1abd7a8e11f1be07aaa4ab894f78762550e04246c015e446d08ec9bf277ff5b1e30a4e5dea9b41c91fe6b7977160880d63d10a55c8dcc181a3441be7a7059b7ff93ea8acbf42dbcf1108c5159f91" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "b5eb54babd8ac2f252f3c86292a34b7928afd4d0ceea8115974b1fc48261b58a" }
+      ] },
+    { "name": "one crunch of 100 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "b644195acbdb2f6c80eaa2fb1025503275c1df2df50aeb54532759a953c55d69950161a99aec673b36be4483b4a79b21f2a1afa44ff8392e391744201e259fa941af64638255a70df591b8d9249edce45c4c4806739b266995fbc52b387ee0bda6f341e3" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "b048ba887be1e85da60b36174110b86898888eb8fd217f9fbcc2806544d341cb" }
+      ] },
+    { "name": "one crunch of 128 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "f395f4dd08047c57b314549f89b9c048e6be5cab57e7d26058a386c3a516dff169009c1cf3abac9882430e5f301232d0e56cabdad72a01f711690eb31f7c01b52f869d50547d17a433642228c6c1e853b3e7e627b305a684c51b53e4dc24de89a7c34ef1dd942d11555a7c87f9a7dc72dbc7f989dc43d1e1eedc773197b2dc51" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "cf6173930a975512b053c31742abe05c5b3152e97779d9683f70739f08e1ae85" }
+      ] },
+    { "name": "one crunch of 200 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "e4b56224fe5d446f0c1c5eb4627747518a6325a3837567b82aeac6897dda71d54fe3803dafe578a2f6babfc6a021d01fc3e5eb16ff5b99f0b77ed427569cd4dc2e4fc128b9438a622c3908c4c06c49f0ef5cc5dfb3179e0674e84c3b90144a010a42689d6b2d6f9370858aeb1885b895af0fbfef93b8a4fff98dc6f8c3a9f65d1c5cbbf65aae4106bdb97d45ee2220a42a4b6d34cd2fea641af4028165e48c65001ed62e087c345d017099fbb150a910e9dfea54e2d34c2d60748c5a467a85d846bd6d3c56bf34b2" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "63b0a4636f87c21e93666162a9bfeeb0ba8dff5ee6d6f12a1fd30292878ca59e" }
+      ] },
+    { "name": "one crunch of 1000 bytes", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "7432d113ea86fc2679fc081c63b0ee3faa883c67e65b94f2d50793fc674ed5913c31684c14efb2f619e92e9a2ad0058ef3f4e6e9b8c3316709c59af1d5aebae0fbe31fc43981f8fcc07bb83922d2b4186c411864f4c18e5ed7de29f8659356b4beb6e7629bd75e6fc736db48e99a7fc5c6b8959bdaaa0be2102391f72bf5146697fd99d43f8d9fbf32bd50a92520993100fab1f0f27331dbb9b7982c81f06018b029d4f3cb4301416ce5dfa989630b9946de655372aebbe14d059225de51d10d3afc7e917b9a363633418a9c317d4de298ee2e2e61f9ea3d26afee8c7193d4fd4bfa52f30549d054aa179ac6610f49fe0b5efe2a190a4b2ebdee0538576f3e7b7c0f9ad4ed2d254266d3708934ac348d027ec3c8e6a7678935c30268f09bdcdcee76e6af78ba9c9521020828509d8d7ba9e98aafd1a15fcb9378d3720b03a195577bb253ed3e840bfc04e4026d9260a0987e55c274c99340ca07e607211314bf47455ce159fb516dd633429a1bfbbc5cea1dca434b9e046e61f7f669d3365e8b3c16116066201228e9d2285c21d2f4bbef8d6ca29e8312b5588fcd32936d14819715d953af97f124fdfe169e0e3c2a30c60cd1e1e858baffb023de874e2ade0592794bb2a127185ce82a50a16e93f7f3d302c4a58cdb37c63a2dc471d8cd92cac51273ec838c093db690835a9f25e4624a20de384d8c58e185f176970bd459fee5b9df6aecb16ee73ec039a575257f148357b39300a969eae807cebe63b4cf484e8c6ec1c7dfaccbc565cce8166f7d09ee1bb0eb7878137c11e1e82bda7e775142ed6163be3d9a35224839808984f9bf75d84928eb015aacb20e88b1e1bdbbd4d2303ce8890ae76438b45508cada2b567fa7fa846f3699d1787da4ccadba4d1f89694055ae6e851bbf824bd0afc5cb3b70ad09e537f4111ce8e8bf327f5c39e095345743fcf7ec50fb3734872a0d9efa57d09fb93404a09c5e04e15c9565f884a15cdd5b9b8f9db310ef4efb71f24c3fccb1763b04806ddec0e3225a9de87ffbdf7959f1a97e251e72bce6d41f4d4600c5dd48203d89480bb3e6d4c28db0747c988f3eef81b291bfc860a4c0de31740c19716611be40ad6192d94b4f0d680bfe4cb1b36210b4f0b79e898c4b543376d7ff95a0eea719c513f07e316c8bd9939993e60954490b7bdcc3b66dc090887852bda79a2a28e8391882950edcac70a472ca0d901abc8e48940e3d017c4be5b92369b4f3f495ea5cb8a04c45d4f98d25bf4adf5812e854d08b82c2324b71e034ea122a19c839e050d1b97e080ebbf46f68023001e7affc8de26011314ed8ecaa0e9b45e98f93a462f74f28de12bb3014438ce2da216364a33a86c4b2e66318280b0fe8e74e5adf8a2faa12285f09bb2e22de5fb15fd783f423" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "baf51e861e50378089ec1a7a70956fb7076af94bd10b5350d04950fc3b1571fb" }
+      ] },
+    { "name": "chunked crunches and continued output", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "537d732dde8222c67bc1" },
+        { "op": "crunch", "hash": 0, "data": "211d2b42e7d1a7333ab5eb808f903e9f31683791e89b" },
+        { "op": "crunch", "hash": 0, "data": "949237e6f489af131c38a074a9bf9a6e804da299f5ca4fd5d58fc9712ab4170b93a55aebceaddd00" },
+        { "op": "crunch", "hash": 0, "data": "a2" },
+        { "op": "crunch", "hash": 0, "data": "4c7e0c9adb10bae16d759c38acfb574a3efd44a27d3ca3cdd4a1398e6fd47931fa9ab0bf908171053f2a03635762f231903371e826dffba05ce867d0e505a2c5" },
+        { "op": "crunch", "hash": 0, "data": "6c15e4289705462bcd9a73dbc08adb65485b04aba35b39c27bd5176aeea733595c" },
+        { "op": "crunch", "hash": 0, "data": "" },
+        { "op": "crunch", "hash": 0, "data": "dcd8162b7ed6eb6eeaff2c6c4bb0b04d183d1b62dcdf2c3a1fa1010f07f22d" },
+        { "op": "crunch", "hash": 0, "data": "340c8d68efd34db590e9632858bf3413e075585b4ece9debbe2dc8e64a52858f" },
+        { "op": "crunch", "hash": 0, "data": "bcbf7a7ac122bfbdd5f49b17d3a4e58bed7aed15f7aeeeafa074d72249ea2aba4848af7c659ba40987c30060446064c46471b21d84237a0096fb46b8d8c50e312094c095da9dcfe2c36e4d709900d8193758d7c55bafa9362ebebcf2080ce9a2cb" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 100, "output": "9c3dfd66c16bce6f173c67ba52ec6a1de71ee9763c528d761d752387cad732bc1587bcded755a6db648dab9fcc655c4c226734e590b903a67aced4ba74ac4e5c4f50b50827e2d68d8dbc29beb8e4299e11b41756f8c052b54c14541c63af2f7f5ff857f8" },
+        { "op": "generate", "hash": 0, "bytes": 13, "output": "71a8d91db463d186260b23ce34" },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "c4143d2abab581469f13f8254ebf4dd532a187597da32c721dbbeb0002655b5a" },
+        { "op": "generate", "hash": 0, "bytes": 7, "output": "65a54537a1a53d" }
+      ] },
+    { "name": "key, KDF and MAC chain", "ops": [
+        { "op": "beginKey", "hash": 0, "bits": 256 },
+        { "op": "crunch", "hash": 0, "data": "71d4088f9b0177fd63a00ea57e740e4dcbc8a6583ace5235ee7c3202ef045354d2b5b55d5eb475cbe2a46967d2bcd6f1eb7924a4fa56b0b57113c4d5c7224d45" },
+        { "op": "crunch", "hash": 0, "data": "792a88d2ffe3997e66b6f585d79bff1e390abd9691ae1c31cc54c8357e178b5232a9aa2b5ae085a984817424a8d5983ed27c28a4e523929b7c8723ba64debb89" },
+        { "op": "crunch", "hash": 0, "data": "6d373e436877111f54ac96c0823be452b08aabd94cd917523b0ba33b90c530f783bdc5e5dd23a8737ad5dea611087053b851adcec90e16c2840782cc936f962aa687b832692f6ffde2a65199a350aaec54a5fc7ceb4107688f2223dc0c6fb12f" },
+        { "op": "end", "hash": 0 },
+        { "op": "generate", "hash": 0, "bytes": 32, "output": "affe0da95a7ed58fdeaa795184d12ade3c70a651ef82e833d4e6b645df6ff569" },
+        { "op": "beginKdf", "hash": 0 },
+        { "op": "crunch", "hash": 0, "data": "f53be5e983cc4376e56d497484d0671454e6e64c0212b2dcf7ddb5b885eb34b5" },
+        { "op": "end", "hash": 0 },
+        { "op": "setKey", "hash": 1, "parent": 0 },
+        { "op": "beginMac", "hash": 1 },
+        { "op": "crunch", "hash": 1, "data": "7368666f6c6465722e646c6c00" },
+        { "op": "end", "hash": 1 },
+        { "op": "generate", "hash": 1, "bytes": 32, "output": "19a63391256fc8e5fa65c6b4e1887f846f78f3c65f4bf38946eda0cd5856d560" },
+        { "op": "setKey", "hash": 2, "parent": 0 },
+        { "op": "beginKdf", "hash": 2 },
+        { "op": "crunch", "hash": 2, "data": "4e74517565727953797374656d496e666f726d6174696f6e00" },
+        { "op": "end", "hash": 2 },
+        { "op": "setKey", "hash": 3, "parent": 2 },
+        { "op": "beginKdf", "hash": 3 },
+        { "op": "crunch", "hash": 3, "data": "41647661706933322e646c6c00" },
+        { "op": "end", "hash": 3 },
+        { "op": "generate", "hash": 3, "bytes": 32, "output": "24088e8980d377645686622235676fe1002bae20b9104af26086963741a214e4" },
+        { "op": "setKey", "hash": 3, "parent": 2 },
+        { "op": "beginKdf", "hash": 3 },
+        { "op": "crunch", "hash": 3, "data": "52696368456432302e446c6c00" },
+        { "op": "end", "hash": 3 },
+        { "op": "generate", "hash": 3, "bytes": 8, "output": "bdef98ea3d3285e2" }
+      ] }
+  ]
+}

@@ -96,15 +96,18 @@ public class PingAndTimestampTests
         }
         Assert.NotNull(connection);
         Thread.Sleep(100);
-        var handshake = connection.LowestPing!.Value;
-        Assert.True(handshake >= TimeSpan.FromMilliseconds(40), $"The handshake took {handshake.TotalMilliseconds} ms.");
+        // The handshake is the only sample so far. A pong adds a second one, which moves the average of the two
+        // (RakPeer.cpp:2149-2170) unless both took the same millisecond count; without the wake no tick would ever send
+        // it. The handshake's length is not checked: each tick's cycle starts late by however long the loop thread waits
+        // to be scheduled, so under load two ticks 50 ms apart can run cycles less than 40 ms apart.
+        var handshake = connection.AveragePing!.Value;
 
         connection.Ping();
         var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (connection.LowestPing == handshake && DateTime.UtcNow < deadline)
+        while (connection.AveragePing == handshake && DateTime.UtcNow < deadline)
             Thread.Sleep(5);
 
-        Assert.True(connection.LowestPing < handshake, "No pong arrived.");
+        Assert.True(connection.AveragePing != handshake, "No pong arrived.");
     }
 
     // The system clock, with periodic timers that fire only when Tick is called; one-shot timers never fire.

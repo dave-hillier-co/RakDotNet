@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using RakDotNet.Protocol.Security;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Datagrams;
 
@@ -68,6 +69,8 @@ internal sealed class ReliabilityLayer
     private static readonly UInt24 UnassignedMessageNumber = UInt24.MaxValue;
 
     private readonly int _mtu;
+    private readonly bool _useSecurity;
+    private AuthenticatedEncryption? _encryption;
     private readonly SessionLimits _limits;
     private readonly long _connectionStartTimeUs;
     private readonly SlidingWindow _window;
@@ -122,19 +125,25 @@ internal sealed class ReliabilityLayer
     private readonly Queue<byte[]> _datagrams = new();
     private readonly Queue<SessionEvent> _events = new();
 
-    /// <summary>ReliabilityLayer::Reset(true, MTUSize, false) (ReliabilityLayer.cpp:345-363).</summary>
+    /// <summary>ReliabilityLayer::Reset(true, MTUSize, useSecurity) (ReliabilityLayer.cpp:345-363).</summary>
     /// <param name="mtu">The negotiated MTU including the 28-byte IP and UDP header.</param>
     /// <param name="nowUs">The current time.</param>
     /// <param name="limits">The receive limits; <see cref="SessionLimits.Default"/> when null.</param>
-    public ReliabilityLayer(int mtu, long nowUs, SessionLimits? limits = null)
+    /// <param name="useSecurity">
+    /// Protect every datagram with <see cref="Encryption"/>, which the secure handshake keys. The congestion manager's
+    /// MTU loses <see cref="AuthenticatedEncryption.OverheadBytes"/> (ReliabilityLayer.cpp:353-358), and the datagram
+    /// budget loses it a second time (ReliabilityLayer.cpp:3913-3920).
+    /// </param>
+    public ReliabilityLayer(int mtu, long nowUs, SessionLimits? limits = null, bool useSecurity = false)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(mtu, DatagramLimits.MinimumMtuSize);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(mtu, DatagramLimits.MaximumMtuSize);
         _mtu = mtu;
+        _useSecurity = useSecurity;
         _limits = (limits ?? SessionLimits.Default).Validated();
         _orderingChannels = new OrderingChannels(_limits.MaxOrderingBufferMessagesPerChannel);
         _splitMessages = new SplitMessageAssembler(_limits);
-        _window = new SlidingWindow(mtu - DatagramLimits.UdpHeaderBytes);
+        _window = new SlidingWindow(mtu - SecurityOverhead - DatagramLimits.UdpHeaderBytes);
         _connectionStartTimeUs = nowUs;
         _lastUpdateUs = nowUs;
         _timeLastDatagramArrivedMs = nowUs / 1000;
@@ -196,6 +205,23 @@ internal sealed class ReliabilityLayer
 
     public int Mtu => _mtu;
 
+    /// <summary>useSecurity: every datagram is encrypted and authenticated.</summary>
+    public bool UsesSecurity => _useSecurity;
+
+    /// <summary>
+    /// auth_enc (ReliabilityLayer.h:589), which every layer has, as in the C++, and the secure handshake keys through
+    /// GetAuthenticatedEncryption. It protects datagrams only when <see cref="UsesSecurity"/> is set.
+    /// </summary>
+    public AuthenticatedEncryption Encryption => _encryption ??= new AuthenticatedEncryption();
+
+    /// <summary>
+    /// Zeroes the keys <see cref="Encryption"/> holds, as deleting the RemoteSystem runs ~Skein, ~HMAC_MD5 and
+    /// ~ChaChaKey (Skein.cpp:33-37, HMAC_MD5.cpp:178-182, ChaCha.cpp:37-40).
+    /// </summary>
+    public void ClearKeys() => _encryption?.Clear();
+
+    private int SecurityOverhead => _useSecurity ? AuthenticatedEncryption.OverheadBytes : 0;
+
     /// <summary>IsDeadConnection.</summary>
     public bool IsDead { get; private set; }
 
@@ -211,7 +237,8 @@ internal sealed class ReliabilityLayer
     /// <summary>The most recent round-trip sample in microseconds, or 0 before the first.</summary>
     public double LastRttUs => _window.LastRttUs;
 
-    private int MaxPayloadBits => DatagramLimits.MaxPayloadBits(_mtu);
+    // With security the overhead comes off the congestion manager's MTU and again here (ReliabilityLayer.cpp:3913-3920).
+    private int MaxPayloadBits => DatagramLimits.MaxPayloadBits(_mtu - 2 * SecurityOverhead);
 
     // The largest message sent whole, and the size of every split part but the last: the datagram budget less the
     // largest message header (ReliabilityLayer.cpp:1604, 2939).
@@ -352,11 +379,15 @@ internal sealed class ReliabilityLayer
 
         // Copy once, so delivered payloads and buffered ordered messages can slice it after the caller reuses its buffer.
         var bytes = datagram.ToArray();
-        var reader = new BitStreamReader(bytes);
+        var length = bytes.Length;
+        // ReliabilityLayer.cpp:668-677: decrypted in place; a datagram that fails is dropped.
+        if (_useSecurity && !Encryption.Decrypt(bytes, out length))
+            return false;
+        var reader = new BitStreamReader(bytes.AsSpan(0, length));
         if (!DatagramHeader.TryRead(ref reader, out var header))
         {
             // Not a reliability-layer datagram (ReliabilityLayer.cpp:689-695).
-            Notify("dhf.isValid==false", bytes.Length, isError: true);
+            Notify("dhf.isValid==false", length, isError: true);
             return true;
         }
 
@@ -365,22 +396,22 @@ internal sealed class ReliabilityLayer
             case DatagramKind.Ack:
                 if (!AckRangeList.TryRead(ref reader, out var acks))
                 {
-                    Notify("incomingAcks.Deserialize failed", bytes.Length, isError: true);
+                    Notify("incomingAcks.Deserialize failed", length, isError: true);
                     return false; // ReliabilityLayer.cpp:729-735.
                 }
-                if (!ReceiveAcks(acks, nowUs, bytes.Length))
+                if (!ReceiveAcks(acks, nowUs, length))
                     return false;
                 break;
             case DatagramKind.Nak:
                 if (!AckRangeList.TryRead(ref reader, out var naks))
                 {
-                    Notify("incomingNAKs.Deserialize failed", bytes.Length, isError: true);
+                    Notify("incomingNAKs.Deserialize failed", length, isError: true);
                     return false; // ReliabilityLayer.cpp:811-817.
                 }
                 ReceiveNaks(naks, nowUs);
                 break;
             default:
-                if (!ReceiveData(header, bytes.AsMemory(reader.BitPosition >> 3), nowUs, bytes.Length))
+                if (!ReceiveData(header, bytes.AsMemory((reader.BitPosition >> 3)..length), nowUs, length))
                     return true;
                 break;
         }
@@ -806,7 +837,7 @@ internal sealed class ReliabilityLayer
             // Sliding window never sends B and AS (CCRakNetSlidingWindow.cpp:264-271).
             DatagramHeader.ForAck().Write(ref writer);
             _acknowledgements.Write(ref writer, MaxPayloadBits);
-            SendDatagram(writer.Written.ToArray(), nowUs);
+            SendDatagram(writer.Written, nowUs);
             _window.OnSendAck();
         }
     }
@@ -817,7 +848,7 @@ internal sealed class ReliabilityLayer
         var writer = new BitStreamWriter(new byte[_mtu]);
         DatagramHeader.ForNak().Write(ref writer);
         _naks.Write(ref writer, MaxPayloadBits);
-        SendDatagram(writer.Written.ToArray(), nowUs);
+        SendDatagram(writer.Written, nowUs);
     }
 
     // ReliabilityLayer.cpp:1860-1881.
@@ -1032,12 +1063,17 @@ internal sealed class ReliabilityLayer
         }
 
         _datagramHistory.Add(nowUs, messageNumbers);
-        SendDatagram(writer.Written.ToArray(), nowUs);
+        SendDatagram(writer.Written, nowUs);
     }
 
     // SendBitStream, ReliabilityLayer.cpp:2247-2340.
-    private void SendDatagram(byte[] datagram, long nowUs)
+    private void SendDatagram(ReadOnlySpan<byte> written, long nowUs)
     {
+        // ReliabilityLayer.cpp:2304-2315: Encrypt appends the overhead, in the one array the datagram is copied to.
+        var datagram = new byte[written.Length + SecurityOverhead];
+        written.CopyTo(datagram);
+        if (_useSecurity)
+            Encryption.Encrypt(datagram, written.Length, out _);
         _metrics[(int)SessionMetric.ActualBytesSent].Push(nowUs, (ulong)datagram.Length);
         _datagrams.Enqueue(datagram);
     }

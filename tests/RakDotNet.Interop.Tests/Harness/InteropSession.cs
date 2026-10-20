@@ -14,8 +14,9 @@ public sealed class InteropSession : IAsyncDisposable
 
     private readonly List<InteropPeer> _extraClients = [];
 
-    private InteropSession(InteropPeer server, InteropPeer client, UdpProxy proxy)
+    private InteropSession(InteropPeer server, InteropPeer client, UdpProxy proxy, bool secure)
     {
+        IsSecure = secure;
         ServerPeer = server;
         ClientPeer = client;
         Proxy = proxy;
@@ -37,6 +38,12 @@ public sealed class InteropSession : IAsyncDisposable
 
     public UdpProxy Proxy { get; }
 
+    /// <summary>Native peers of this session are interop-peer-secure, whose RakNet has secure connections.</summary>
+    public bool IsSecure { get; }
+
+    /// <summary>The PublicKey argument <see cref="ConnectAsync(InteropPeer, CancellationToken)"/> connects with; null for an insecure connection.</summary>
+    public ClientSecurityOptions? ConnectSecurity { get; set; }
+
     public PacketInbox ServerInbox => ServerPeer.Inbox;
 
     public PacketInbox ClientInbox => ClientPeer.Inbox;
@@ -49,24 +56,52 @@ public sealed class InteropSession : IAsyncDisposable
     /// <param name="faults">The proxy's faults from the start; scenarios usually switch them on after connecting.</param>
     /// <param name="serverOptions">The server's startup options, or the defaults.</param>
     /// <param name="cancellationToken">Cancels startup.</param>
-    public static async Task<InteropSession> StartAsync(
+    public static Task<InteropSession> StartAsync(
         PeerKind client,
         PeerKind server,
         FaultOptions? faults = null,
         StartupOptions? serverOptions = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        StartAsync(client, server, faults, serverOptions, secure: false, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="StartAsync(PeerKind, PeerKind, FaultOptions?, StartupOptions?, CancellationToken)"/>, with native peers
+    /// that are interop-peer-secure (LIBCAT_SECURITY=1), as every security scenario needs.
+    /// </summary>
+    public static Task<InteropSession> StartSecureAsync(
+        PeerKind client,
+        PeerKind server,
+        FaultOptions? faults = null,
+        StartupOptions? serverOptions = null,
+        CancellationToken cancellationToken = default) =>
+        StartAsync(client, server, faults, serverOptions, secure: true, cancellationToken);
+
+    private static async Task<InteropSession> StartAsync(
+        PeerKind client,
+        PeerKind server,
+        FaultOptions? faults,
+        StartupOptions? serverOptions,
+        bool secure,
+        CancellationToken cancellationToken)
     {
-        PeerMatrix.SkipUnlessAvailable(client, server);
+        if (secure)
+        {
+            PeerMatrix.SkipUnlessSecureAvailable(client, server);
+        }
+        else
+        {
+            PeerMatrix.SkipUnlessAvailable(client, server);
+        }
 
         InteropPeer? serverPeer = null;
         InteropPeer? clientPeer = null;
         UdpProxy? proxy = null;
         try
         {
-            serverPeer = await InteropPeer.StartAsync(server, "server", serverOptions ?? new StartupOptions(), cancellationToken).ConfigureAwait(false);
+            serverPeer = await InteropPeer.StartAsync(server, "server", serverOptions ?? new StartupOptions(), secure, cancellationToken).ConfigureAwait(false);
             proxy = UdpProxy.Start(serverPeer.Started.BoundAddress, faults);
-            clientPeer = await InteropPeer.StartAsync(client, "client", new StartupOptions(), cancellationToken).ConfigureAwait(false);
-            return new InteropSession(serverPeer, clientPeer, proxy);
+            clientPeer = await InteropPeer.StartAsync(client, "client", new StartupOptions(), secure, cancellationToken).ConfigureAwait(false);
+            return new InteropSession(serverPeer, clientPeer, proxy, secure);
         }
         catch
         {
@@ -90,7 +125,7 @@ public sealed class InteropSession : IAsyncDisposable
     public async Task<InteropPeer> AddClientAsync(PeerKind kind, CancellationToken cancellationToken = default)
     {
         PeerMatrix.SkipUnlessAvailable(kind);
-        var peer = await InteropPeer.StartAsync(kind, $"client {_extraClients.Count + 2}", new StartupOptions(), cancellationToken).ConfigureAwait(false);
+        var peer = await InteropPeer.StartAsync(kind, $"client {_extraClients.Count + 2}", new StartupOptions(), IsSecure, cancellationToken).ConfigureAwait(false);
         _extraClients.Add(peer);
         return peer;
     }
@@ -114,7 +149,7 @@ public sealed class InteropSession : IAsyncDisposable
     public async Task<(ulong ServerGuid, ulong ClientGuid)> ConnectAsync(InteropPeer client, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(client);
-        var result = await client.Driver.ConnectAsync(new ConnectOptions(ProxyEndPoint), cancellationToken).ConfigureAwait(false);
+        var result = await client.Driver.ConnectAsync(new ConnectOptions(ProxyEndPoint, Security: ConnectSecurity), cancellationToken).ConfigureAwait(false);
         Assert.Equal("CONNECTION_ATTEMPT_STARTED", result);
 
         var accepted = await client.Inbox.WaitForPacketAsync(
@@ -194,9 +229,13 @@ public sealed class InteropPeer : IAsyncDisposable
 
     public PacketInbox Inbox { get; }
 
-    public static async Task<InteropPeer> StartAsync(PeerKind kind, string label, StartupOptions options, CancellationToken cancellationToken = default)
+    public static Task<InteropPeer> StartAsync(PeerKind kind, string label, StartupOptions options, CancellationToken cancellationToken = default) =>
+        StartAsync(kind, label, options, secure: false, cancellationToken);
+
+    /// <summary>Starts a peer; with <paramref name="secure"/> a native one is interop-peer-secure.</summary>
+    public static async Task<InteropPeer> StartAsync(PeerKind kind, string label, StartupOptions options, bool secure, CancellationToken cancellationToken = default)
     {
-        var driver = await PeerMatrix.LaunchAsync(kind, cancellationToken).ConfigureAwait(false);
+        var driver = await PeerMatrix.LaunchAsync(kind, secure, cancellationToken).ConfigureAwait(false);
         try
         {
             var started = await driver.StartupAsync(options, cancellationToken).ConfigureAwait(false);

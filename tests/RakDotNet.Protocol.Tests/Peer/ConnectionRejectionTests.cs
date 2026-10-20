@@ -16,7 +16,6 @@ public class ConnectionRejectionTests
     private static readonly IPEndPoint ClientAddress = new(IPAddress.Parse("10.0.0.1"), 50_001);
     private static readonly IPEndPoint SecondClientAddress = new(IPAddress.Parse("10.0.0.1"), 50_002);
     private static readonly IPEndPoint ServerAddress = new(IPAddress.Parse("10.0.0.2"), 19_132);
-    private static readonly byte[] ServerKey = Enumerable.Range(0, SecureOpenConnectionReply1.PublicKeyLength).Select(i => (byte)i).ToArray();
 
     private readonly InMemoryLink _link = new();
     private readonly PeerCore _client;
@@ -287,13 +286,13 @@ public class ConnectionRejectionTests
         Assert.Equal(ConnectionState.IsNotConnected, _client.GetConnectionState(otherServerAddress));
     }
 
-    // Security, which the offline handshake reports before any cryptography runs.
+    // Security the offline handshake reports; SecureConnectionTests covers the rest.
 
     [Fact]
     public void A_client_expecting_security_from_a_server_without_it_reports_our_system_requires_security()
     {
         // RakPeer.cpp:4824-4838: the request stays queued, so each reply reports it again until the attempts run out.
-        _client.Connect(ServerAddress, default, 3, 100, 0, _link.NowUs, new ClientSecurity { ServerPublicKey = ServerKey });
+        _client.Connect(ServerAddress, default, 3, 100, 0, _link.NowUs, TestKeyPair.Generate().Known());
 
         _link.RunUntil(() => ClientEvents.Any(e => e.Id == MessageId.ConnectionAttemptFailed), TimeSpan.FromSeconds(2));
 
@@ -308,7 +307,7 @@ public class ConnectionRejectionTests
     [Fact]
     public void A_client_accepting_any_key_also_requires_security()
     {
-        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, ClientSecurity.AcceptAnyPublicKey);
+        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, TestKeyPair.AcceptAny());
         _client.Receive(ServerAddress, Encode(new OpenConnectionReply1(ServerGuid, 1492)), _link.NowUs);
 
         Assert.Equal(MessageId.OurSystemRequiresSecurity, Assert.IsType<ConnectionAttemptFailed>(Assert.Single(Events(_client))).Reason);
@@ -319,10 +318,10 @@ public class ConnectionRejectionTests
     public void A_client_expecting_another_server_key_reports_a_public_key_mismatch()
     {
         // RakPeer.cpp:4788-4801.
-        var otherKey = ServerKey.Select(b => (byte)~b).ToArray();
-        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, new ClientSecurity { ServerPublicKey = otherKey });
+        var serverKey = TestKeyPair.Generate().Public;
+        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, TestKeyPair.Generate().Known());
 
-        _client.Receive(ServerAddress, Encode(new SecureOpenConnectionReply1(ServerGuid, 42, ServerKey, 1492)), _link.NowUs);
+        _client.Receive(ServerAddress, Encode(new SecureOpenConnectionReply1(ServerGuid, 42, serverKey, 1492)), _link.NowUs);
 
         var failed = Assert.IsType<ConnectionAttemptFailed>(Assert.Single(Events(_client)));
         Assert.Equal(MessageId.PublicKeyMismatch, failed.Reason);
@@ -339,19 +338,23 @@ public class ConnectionRejectionTests
         // so the server's key never matches it.
         _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs);
 
-        _client.Receive(ServerAddress, Encode(new SecureOpenConnectionReply1(ServerGuid, 42, ServerKey, 1492)), _link.NowUs);
+        _client.Receive(ServerAddress, Encode(new SecureOpenConnectionReply1(ServerGuid, 42, TestKeyPair.Generate().Public, 1492)), _link.NowUs);
 
         Assert.Equal(MessageId.PublicKeyMismatch, Assert.IsType<ConnectionAttemptFailed>(Assert.Single(Events(_client))).Reason);
     }
 
     [Fact]
-    public void A_secure_reply_carrying_the_expected_key_is_not_a_rejection()
+    public void A_secure_reply_carrying_the_expected_key_is_answered_with_the_cookie_and_challenge()
     {
-        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, new ClientSecurity { ServerPublicKey = ServerKey });
+        var keys = TestKeyPair.Generate();
+        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, keys.Known());
 
-        _client.Receive(ServerAddress, Encode(new SecureOpenConnectionReply1(ServerGuid, 42, ServerKey, 1492)), _link.NowUs);
+        _client.Receive(ServerAddress, Encode(new SecureOpenConnectionReply1(ServerGuid, 42, keys.Public, 1492)), _link.NowUs);
 
         Assert.Empty(Events(_client));
+        var request = Decode<SecureOpenConnectionRequest2>(Assert.Single(Datagrams(_client)).Data);
+        Assert.Equal(42u, request.Cookie);
+        Assert.Equal(64, request.Challenge.Length);
         Assert.Equal(ConnectionState.IsPending, _client.GetConnectionState(ServerAddress));
     }
 
@@ -373,12 +376,12 @@ public class ConnectionRejectionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void A_secure_client_ignores_an_insecure_open_connection_reply_2(bool acceptAnyKey)
+    public void A_secure_client_sends_no_request_on_an_insecure_open_connection_reply_2(bool acceptAnyKey)
     {
         // RakPeer.cpp:4966-4992: a request with a client handshake always checks the server's answer, which an insecure
         // reply lacks, so it returns before ID_CONNECTION_REQUEST and the request stays queued until it runs out.
         _link.Drop = (from, _, _) => from.Equals(ClientAddress);
-        var security = acceptAnyKey ? ClientSecurity.AcceptAnyPublicKey : new ClientSecurity { ServerPublicKey = ServerKey };
+        var security = acceptAnyKey ? TestKeyPair.AcceptAny() : TestKeyPair.Generate().Known();
         _client.Connect(ServerAddress, default, 3, 100, 0, _link.NowUs, security);
         _link.Step();
         Assert.Equal((byte)MessageId.OpenConnectionRequest1, Assert.Single(Datagrams(_client)).Data[0]);
@@ -393,12 +396,6 @@ public class ConnectionRejectionTests
         var failed = Assert.IsType<ConnectionAttemptFailed>(Assert.Single(ClientEvents));
         Assert.Equal(MessageId.ConnectionAttemptFailed, failed.Reason);
         Assert.All(_link.Sent.Skip(sentBefore), d => Assert.Equal((byte)MessageId.OpenConnectionRequest1, d.Data[0]));
-    }
-
-    [Fact]
-    public void A_public_key_of_the_wrong_length_is_a_programming_error()
-    {
-        Assert.Throws<ArgumentException>(() => _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, new ClientSecurity { ServerPublicKey = new byte[10] }));
     }
 
     // The rejections that already had tests in PeerCoreTests carry the server GUID and the ID alone too.

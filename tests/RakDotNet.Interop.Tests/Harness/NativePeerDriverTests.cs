@@ -417,4 +417,20 @@ public sealed class NativePeerDriverTests
         Assert.True(File.Exists(Path.Combine(root, "RakDotNet.slnx")));
         Assert.Equal(Path.Combine(root, "tools", "interop-peer", "build", OperatingSystem.IsWindows() ? "interop-peer.exe" : "interop-peer"), path);
     }
+
+    [Fact]
+    public void The_secure_binary_location_prefers_its_own_environment_variable()
+    {
+        var path = NativePeerDriver.ResolveSecureBinaryPath(name => name == NativePeerDriver.SecureBinaryEnvironmentVariable ? "/opt/peer-secure" : "/opt/peer");
+
+        Assert.Equal("/opt/peer-secure", path);
+    }
+
+    [Fact]
+    public void The_secure_binary_location_defaults_to_interop_peer_secure_in_the_cmake_build_folder()
+    {
+        var path = NativePeerDriver.ResolveSecureBinaryPath(_ => null);
+
+        Assert.Equal(Path.Combine(RepoPaths.FindRepoRoot(), "tools", "interop-peer", "build", OperatingSystem.IsWindows() ? "interop-peer-secure.exe" : "interop-peer-secure"), path);
+    }
 }

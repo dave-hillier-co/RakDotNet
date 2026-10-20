@@ -68,9 +68,56 @@ public interface IPeerDriver : IAsyncDisposable
     Task<ulong> GetTimeAsync(CancellationToken cancellationToken = default);
 
     Task ShutdownAsync(int blockMs = 100, CancellationToken cancellationToken = default);
+
+    /// <summary>cat::EasyHandshake::GenerateServerKey: a server key pair, or a client identity for two-way authentication.</summary>
+    Task<SecurityKeys> GenerateKeysAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::AddToSecurityExceptionList.</summary>
+    Task AddSecurityExceptionAsync(string ip, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::RemoveFromSecurityExceptionList; a null ip clears the list.</summary>
+    Task RemoveSecurityExceptionAsync(string? ip, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::IsInSecurityExceptionList.</summary>
+    Task<bool> IsInSecurityExceptionListAsync(string ip, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::GetClientPublicKeyFromSystemAddress for the connection with <paramref name="target"/>; null when it has none.</summary>
+    Task<byte[]?> GetClientPublicKeyAsync(ulong target, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::SetIncomingPassword.</summary>
+    Task SetIncomingPasswordAsync(ReadOnlyMemory<byte> password, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::GetIncomingPassword.</summary>
+    Task<byte[]> GetIncomingPasswordAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::RemoveFromBanList.</summary>
+    Task UnbanAsync(string ip, CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::ClearBanList.</summary>
+    Task ClearBansAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>RakPeer::IsBanned.</summary>
+    Task<bool> IsBannedAsync(string ip, CancellationToken cancellationToken = default);
 }
 
-public sealed record StartupOptions(int Port = 0, string Host = "127.0.0.1", int MaxConnections = 8, int MaxIncoming = 8);
+/// <param name="Security">RakPeer::InitializeSecurity before Startup; null leaves security off.</param>
+public sealed record StartupOptions(int Port = 0, string Host = "127.0.0.1", int MaxConnections = 8, int MaxIncoming = 8, ServerSecurityOptions? Security = null);
+
+/// <summary>A cat key pair, as EasyHandshake::GenerateServerKey makes it.</summary>
+public sealed record SecurityKeys(byte[] PublicKey, byte[] PrivateKey);
+
+/// <summary>The arguments of RakPeer::InitializeSecurity.</summary>
+public sealed record ServerSecurityOptions(SecurityKeys Keys, bool RequireClientKey = false);
+
+/// <summary>RakNet's PublicKey argument to Connect, with its PublicKeyMode named without the PKM_ prefix.</summary>
+public sealed record ClientSecurityOptions(string PublicKeyMode, byte[]? ServerPublicKey = null, SecurityKeys? ClientKeys = null)
+{
+    public static ClientSecurityOptions AcceptAnyPublicKey { get; } = new("ACCEPT_ANY_PUBLIC_KEY");
+
+    public static ClientSecurityOptions KnownKey(byte[] serverPublicKey) => new("USE_KNOWN_PUBLIC_KEY", serverPublicKey);
+
+    public static ClientSecurityOptions TwoWay(byte[] serverPublicKey, SecurityKeys clientKeys) => new("USE_TWO_WAY_AUTHENTICATION", serverPublicKey, clientKeys);
+}
 
 public sealed record PeerStarted(IPEndPoint BoundAddress, ulong PeerGuid);
 
@@ -79,7 +126,8 @@ public sealed record ConnectOptions(
     ReadOnlyMemory<byte> Password = default,
     int Attempts = 12,
     int AttemptIntervalMs = 500,
-    int TimeoutMs = 0
+    int TimeoutMs = 0,
+    ClientSecurityOptions? Security = null
 );
 
 public sealed record SendOptions(

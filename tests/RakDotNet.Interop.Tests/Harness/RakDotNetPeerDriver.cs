@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Threading.Channels;
 using RakDotNet.Protocol.Wire;
+using RakDotNet.Security;
 
 namespace RakDotNet.Interop.Tests.Harness;
 
@@ -16,6 +17,7 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
     private const int MaxOfflinePingResponse = 399;
 
     private readonly Channel<ReceivedPacket> _packets = Channel.CreateUnbounded<ReceivedPacket>(new UnboundedChannelOptions { SingleWriter = true });
+    private readonly List<string> _pendingSecurityExceptions = [];
     private RakPeer? _peer;
     private Task _pump = Task.CompletedTask;
     private int _disposed;
@@ -38,11 +40,24 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
             throw new PeerCommandException("startup", "Startup failed: RAKNET_ALREADY_STARTED");
         }
 
+        ServerSecurity? security = null;
+        if (options.Security is { } serverSecurity)
+        {
+            // InitializeSecurity refuses a key pair ServerEasyHandshake::Initialize refuses.
+            if (!RakKeyPair.TryImport(serverSecurity.Keys.PublicKey, serverSecurity.Keys.PrivateKey, out var keys))
+            {
+                throw new PeerCommandException("initSecurity", "InitializeSecurity returned false");
+            }
+            security = new ServerSecurity(keys) { RequireClientKey = serverSecurity.RequireClientKey };
+        }
+
         RakPeer peer;
         try
         {
             peer = RakPeer.Start(new RakPeerOptions
             {
+                Security = security,
+                SecurityExceptions = [.. _pendingSecurityExceptions],
                 MaxConnections = options.MaxConnections,
                 MaxIncomingConnections = options.MaxIncoming,
                 Bindings = [new SocketBinding(new IPEndPoint(IPAddress.Parse(options.Host), options.Port))],
@@ -63,14 +78,129 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
     public Task<string> ConnectAsync(ConnectOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        var result = Started("connect").Connect(options.Remote, new RakDotNet.ConnectOptions
+        var peer = Started("connect");
+        if (!TryGetConnectSecurity(options.Security, out var security))
+        {
+            // GenerateConnectionRequestChallenge refuses keys cat refuses (RakPeer.cpp:3214-3256).
+            return Task.FromResult(ToProtocolName(ConnectAttemptResult.SecurityInitializationFailed));
+        }
+        var result = peer.Connect(options.Remote, new RakDotNet.ConnectOptions
         {
             Password = options.Password,
             AttemptCount = options.Attempts,
             AttemptInterval = TimeSpan.FromMilliseconds(options.AttemptIntervalMs),
             Timeout = TimeSpan.FromMilliseconds(options.TimeoutMs),
+            Security = security,
         });
         return Task.FromResult(ToProtocolName(result));
+    }
+
+    public Task<SecurityKeys> GenerateKeysAsync(CancellationToken cancellationToken = default)
+    {
+        using var keys = RakKeyPair.Generate();
+        var privateKey = new byte[RakKeyPair.PrivateKeyLength];
+        keys.ExportPrivateKey(privateKey);
+        return Task.FromResult(new SecurityKeys(keys.PublicKey.Bytes.ToArray(), privateKey));
+    }
+
+    public Task AddSecurityExceptionAsync(string ip, CancellationToken cancellationToken = default)
+    {
+        if (_peer is { } peer)
+        {
+            peer.SecurityExceptions.Add(ip);
+        }
+        else
+        {
+            _pendingSecurityExceptions.Add(ip);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task RemoveSecurityExceptionAsync(string? ip, CancellationToken cancellationToken = default)
+    {
+        var list = Started("removeSecurityException").SecurityExceptions;
+        if (ip is null)
+        {
+            list.Clear();
+        }
+        else
+        {
+            list.Remove(ip);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsInSecurityExceptionListAsync(string ip, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Started("securityException").SecurityExceptions.Contains(ip));
+
+    public Task<byte[]?> GetClientPublicKeyAsync(ulong target, CancellationToken cancellationToken = default)
+    {
+        var key = Started("clientPublicKey").TryGetConnection(new RakNetGuid(target), out var connection) ? connection.RemoteIdentityKey : null;
+        return Task.FromResult(key?.Bytes.ToArray());
+    }
+
+    public Task SetIncomingPasswordAsync(ReadOnlyMemory<byte> password, CancellationToken cancellationToken = default)
+    {
+        if (password.Length > 255)
+        {
+            throw new PeerCommandException("setIncomingPassword", "the incoming password is at most 255 bytes");
+        }
+        Started("setIncomingPassword").IncomingPassword = password;
+        return Task.CompletedTask;
+    }
+
+    public Task<byte[]> GetIncomingPasswordAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(Started("incomingPassword").IncomingPassword.ToArray());
+
+    public Task UnbanAsync(string ip, CancellationToken cancellationToken = default)
+    {
+        Started("unban").BanList.Remove(ip);
+        return Task.CompletedTask;
+    }
+
+    public Task ClearBansAsync(CancellationToken cancellationToken = default)
+    {
+        Started("clearBans").BanList.Clear();
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsBannedAsync(string ip, CancellationToken cancellationToken = default) =>
+        Task.FromResult(Started("isBanned").BanList.IsBanned(ip));
+
+    // Connect's PublicKey argument; false where RakPeer::Connect returns SECURITY_INITIALIZATION_FAILED.
+    private static bool TryGetConnectSecurity(ClientSecurityOptions? options, out ConnectSecurity security)
+    {
+        security = ConnectSecurity.Insecure;
+        if (options is null)
+        {
+            return true;
+        }
+        switch (options.PublicKeyMode)
+        {
+            case "INSECURE_CONNECTION":
+                return true;
+            case "ACCEPT_ANY_PUBLIC_KEY":
+                security = ConnectSecurity.AcceptAnyPublicKey;
+                return true;
+            case "USE_KNOWN_PUBLIC_KEY":
+                if (!RakPublicKey.TryCreate(options.ServerPublicKey, out var known))
+                {
+                    return false;
+                }
+                security = ConnectSecurity.KnownServerKey(known);
+                return true;
+            case "USE_TWO_WAY_AUTHENTICATION":
+                if (!RakPublicKey.TryCreate(options.ServerPublicKey, out var server)
+                    || options.ClientKeys is not { } clientKeys
+                    || !RakKeyPair.TryImport(clientKeys.PublicKey, clientKeys.PrivateKey, out var identity))
+                {
+                    return false;
+                }
+                security = ConnectSecurity.TwoWayAuthentication(server, identity);
+                return true;
+            default:
+                throw new PeerCommandException("connect", $"unknown publicKeyMode '{options.PublicKeyMode}'");
+        }
     }
 
     public Task<uint> SendAsync(SendOptions options, CancellationToken cancellationToken = default)

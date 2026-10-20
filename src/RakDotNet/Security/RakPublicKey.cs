@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using RakDotNet.Protocol.Security;
 
 namespace RakDotNet.Security;
 
@@ -6,19 +7,32 @@ namespace RakDotNet.Security;
 public sealed class RakPublicKey : IEquatable<RakPublicKey>
 {
     /// <summary>cat::EasyHandshake::PUBLIC_KEY_BYTES</summary>
-    public const int Length = 64;
+    public const int Length = EasyHandshake.PublicKeyBytes;
 
-    private RakPublicKey() { }
+    private readonly byte[] _bytes;
 
-    /// <summary>False when <paramref name="bytes"/> is not a valid key.</summary>
-    public static bool TryCreate(ReadOnlySpan<byte> bytes, [NotNullWhen(true)] out RakPublicKey? key) =>
-        throw new NotImplementedException();
+    private RakPublicKey(byte[] bytes) => _bytes = bytes;
 
-    public ReadOnlySpan<byte> Bytes => throw new NotImplementedException();
+    /// <summary>
+    /// False when <paramref name="bytes"/> is not a valid key: not 64 bytes, or not a point cat accepts as a
+    /// server or client key (on the curve, x not zero).
+    /// </summary>
+    public static bool TryCreate(ReadOnlySpan<byte> bytes, [NotNullWhen(true)] out RakPublicKey? key)
+    {
+        key = EasyHandshake.IsValidPublicKey(bytes) ? new RakPublicKey(bytes.ToArray()) : null;
+        return key is not null;
+    }
 
-    public bool Equals(RakPublicKey? other) => throw new NotImplementedException();
+    public ReadOnlySpan<byte> Bytes => _bytes;
+
+    public bool Equals(RakPublicKey? other) => other is not null && _bytes.AsSpan().SequenceEqual(other._bytes);
 
     public override bool Equals(object? obj) => Equals(obj as RakPublicKey);
 
-    public override int GetHashCode() => throw new NotImplementedException();
+    public override int GetHashCode()
+    {
+        var hash = new HashCode();
+        hash.AddBytes(_bytes);
+        return hash.ToHashCode();
+    }
 }

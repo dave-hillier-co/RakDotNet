@@ -333,11 +333,15 @@ public sealed partial class RakPeer
         lock (_attemptsGate)
         {
             if (!_attempts.TryGetValue(attempt.Address, out var current) || !ReferenceEquals(current, attempt))
+            {
+                attempt.Security?.Dispose();
                 return;
+            }
         }
         RememberSocket(attempt.Address, attempt.Options.SocketIndex);
         var result = _core.Connect(attempt.EndPoint, attempt.Password, attempt.Options.AttemptCount,
-                                   (int)attempt.Options.AttemptInterval.TotalMilliseconds, (long)attempt.Options.Timeout.TotalMilliseconds, nowUs);
+                                   (int)attempt.Options.AttemptInterval.TotalMilliseconds, (long)attempt.Options.Timeout.TotalMilliseconds, nowUs,
+                                   attempt.Security);
         if (result == ConnectionAttemptResult.ConnectionAttemptStarted)
         {
             attempt.Applied = true;
@@ -369,6 +373,8 @@ public sealed partial class RakPeer
         }
         if (attempt.Applied)
             _core.CancelConnectionAttempt(attempt.EndPoint);
+        else
+            attempt.Security?.Dispose();
         attempt.Cancel(CancellationToken.None);
     }
 
@@ -1223,6 +1229,8 @@ public sealed partial class RakPeer
         }
 
         _plugins.ReleaseAll();
+        lock (_cycleGate)
+            _core.Dispose();
         _reader.Complete(fault);
         _stopped.TrySetResult();
     }

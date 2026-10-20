@@ -9,6 +9,7 @@ public class ConnectionRequestTests
     // doSecurity as an unsigned char (0 without LIBCAT_SECURITY), then the password as the remaining bytes.
     // No offline magic: this message travels inside the reliability layer.
     private const string Header = "09" + Codec.GuidHex + Codec.TimeHex + "00";
+    private const string SecureHeader = "09" + Codec.GuidHex + Codec.TimeHex + "01";
 
     [Fact]
     public void Request_without_a_password_encodes_as_id_guid_time_security_byte()
@@ -47,23 +48,65 @@ public class ConnectionRequestTests
     }
 
     [Fact]
-    public void Request_with_security_reports_the_flag_and_fails()
+    public void Request_with_security_carries_the_proof_then_no_identity_then_the_password()
     {
-        // RakPeer.cpp:5011-5025: with doSecurity a proof and optional identity follow, which are not supported.
-        var bytes = Convert.FromHexString(Header);
-        bytes[17] = 1;
+        // RakPeer.cpp:5010-5031: doSecurity 1, the 32-byte proof aligned, doIdentity 0, then the password.
+        var proof = Enumerable.Range(0, ConnectionRequest.ProofLength).Select(i => (byte)(i + 1)).ToArray();
+        var request = new ConnectionRequest(Codec.Guid, Codec.Time, "pw"u8.ToArray()) { DoSecurity = true, Proof = proof };
 
-        Assert.False(Codec.TryDecode<ConnectionRequest>(bytes, out var request));
-        Assert.True(request!.DoSecurity);
-        Assert.Equal(Codec.Guid, request.ClientGuid);
+        Assert.Equal(SecureHeader + Convert.ToHexStringLower(proof) + "00" + "7077", Codec.EncodeHex(request));
     }
 
     [Fact]
-    public void Encoding_with_security_is_not_supported()
+    public void Request_with_an_identity_carries_it_after_the_proof()
+    {
+        // RakPeer.cpp:5019-5025: doIdentity 1 and the 160-byte identity proof, aligned.
+        var proof = new byte[ConnectionRequest.ProofLength];
+        var identity = Enumerable.Range(0, ConnectionRequest.IdentityLength).Select(i => (byte)i).ToArray();
+        var request = new ConnectionRequest(Codec.Guid, Codec.Time, ReadOnlyMemory<byte>.Empty) { DoSecurity = true, Proof = proof, Identity = identity };
+
+        Assert.Equal(SecureHeader + Convert.ToHexStringLower(proof) + "01" + Convert.ToHexStringLower(identity), Codec.EncodeHex(request));
+    }
+
+    [Fact]
+    public void Request_with_security_decodes_proof_identity_and_password()
+    {
+        var proof = Enumerable.Range(0, ConnectionRequest.ProofLength).Select(i => (byte)(255 - i)).ToArray();
+        var identity = Enumerable.Range(0, ConnectionRequest.IdentityLength).Select(i => (byte)(i * 7)).ToArray();
+
+        var request = Codec.Decode<ConnectionRequest>(SecureHeader + Convert.ToHexStringLower(proof) + "01" + Convert.ToHexStringLower(identity) + "7077");
+
+        Assert.True(request.DoSecurity);
+        Assert.Equal(proof, request.Proof.ToArray());
+        Assert.Equal(identity, request.Identity.ToArray());
+        Assert.Equal("pw"u8.ToArray(), request.Password.ToArray());
+    }
+
+    [Fact]
+    public void Request_with_security_cut_short_of_its_proof_fails()
+    {
+        Codec.AssertPrefixesShorterThanFail<ConnectionRequest>(Convert.FromHexString(SecureHeader + new string('0', 64) + "00"), 18 + 32 + 1);
+    }
+
+    [Fact]
+    public void A_server_without_security_reads_everything_after_the_flag_as_the_password()
+    {
+        // RakPeer.cpp:3519-3520 without _using_security: the proof and identity become part of the password.
+        var bytes = Convert.FromHexString(SecureHeader + "aabb");
+        var reader = new BitStreamReader(bytes);
+
+        Assert.True(ConnectionRequest.TryReadWithoutSecurity(ref reader, out var request));
+        Assert.True(request.DoSecurity);
+        Assert.Equal(new byte[] { 0xaa, 0xbb }, request.Password.ToArray());
+        Assert.True(request.Proof.IsEmpty);
+    }
+
+    [Fact]
+    public void Encoding_with_security_needs_a_whole_proof()
     {
         var request = new ConnectionRequest(1, 2, ReadOnlyMemory<byte>.Empty) { DoSecurity = true };
 
-        Assert.Throws<NotSupportedException>(() => Codec.Encode(request));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Codec.Encode(request));
     }
 
     [Fact]

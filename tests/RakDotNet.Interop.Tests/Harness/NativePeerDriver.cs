@@ -18,6 +18,9 @@ public sealed partial class NativePeerDriver : IPeerDriver
 {
     public const string BinaryEnvironmentVariable = "RAKDOTNET_INTEROP_PEER";
 
+    /// <summary>The interop peer built against RakNet with LIBCAT_SECURITY=1 (interop-peer-secure).</summary>
+    public const string SecureBinaryEnvironmentVariable = "RAKDOTNET_INTEROP_PEER_SECURE";
+
     private const int MaxStandardErrorLines = 1000;
 
     private readonly Process _process;
@@ -86,8 +89,39 @@ public sealed partial class NativePeerDriver : IPeerDriver
         return File.Exists(path) ? path : null;
     }
 
+    /// <summary>
+    /// The secure native peer binary: <see cref="SecureBinaryEnvironmentVariable"/> when set, otherwise
+    /// tools/interop-peer/build/interop-peer-secure under the repo root.
+    /// </summary>
+    public static string ResolveSecureBinaryPath(Func<string, string?>? getEnvironmentVariable = null)
+    {
+        getEnvironmentVariable ??= Environment.GetEnvironmentVariable;
+        var fromEnvironment = getEnvironmentVariable(SecureBinaryEnvironmentVariable);
+        if (!string.IsNullOrEmpty(fromEnvironment))
+        {
+            return fromEnvironment;
+        }
+
+        var name = OperatingSystem.IsWindows() ? "interop-peer-secure.exe" : "interop-peer-secure";
+        return Path.Combine(RepoPaths.FindRepoRoot(), "tools", "interop-peer", "build", name);
+    }
+
+    /// <summary>The secure native peer binary, or null when it has not been built.</summary>
+    public static string? FindSecureBinary()
+    {
+        var path = ResolveSecureBinaryPath();
+        return File.Exists(path) ? path : null;
+    }
+
     public static Task<NativePeerDriver> LaunchAsync(CancellationToken cancellationToken = default) =>
         LaunchAsync(ResolveBinaryPath(), [], cancellationToken);
+
+    /// <summary>Launches interop-peer-secure, whose RakNet has secure connections.</summary>
+    public static Task<NativePeerDriver> LaunchSecureAsync(CancellationToken cancellationToken = default) =>
+        LaunchAsync(ResolveSecureBinaryPath(), [], cancellationToken);
+
+    /// <summary>Whether the peer's RakNet was built with LIBCAT_SECURITY=1, from its ready event.</summary>
+    public bool HasSecurity { get; private set; }
 
     public static async Task<NativePeerDriver> LaunchAsync(string fileName, IEnumerable<string> arguments, CancellationToken cancellationToken = default)
     {
@@ -116,6 +150,7 @@ public sealed partial class NativePeerDriver : IPeerDriver
             var ready = await driver._ready.Task.WaitAsync(driver.CommandTimeout, cancellationToken).ConfigureAwait(false);
             driver.RakNetVersion = (string?)ready["raknetVersion"] ?? "";
             driver.ProtocolVersion = (int?)ready["protocolVersion"] ?? 0;
+            driver.HasSecurity = (bool?)ready["security"] ?? false;
             return driver;
         }
         catch
@@ -185,6 +220,20 @@ public sealed partial class NativePeerDriver : IPeerDriver
     public async Task<PeerStarted> StartupAsync(StartupOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.Security is { } security)
+        {
+            // InitializeSecurity works only before Startup (RakPeer.cpp:765-766).
+            var initialized = await SendCommandAsync("initSecurity", new JsonObject
+            {
+                ["publicKey"] = Convert.ToHexStringLower(security.Keys.PublicKey),
+                ["privateKey"] = Convert.ToHexStringLower(security.Keys.PrivateKey),
+                ["requireClientKey"] = security.RequireClientKey,
+            }, cancellationToken).ConfigureAwait(false);
+            if ((bool?)initialized["initialized"] != true)
+            {
+                throw new PeerCommandException("initSecurity", "InitializeSecurity returned false");
+            }
+        }
         var reply = await SendCommandAsync("startup", new JsonObject
         {
             ["port"] = options.Port,
@@ -199,7 +248,7 @@ public sealed partial class NativePeerDriver : IPeerDriver
     public async Task<string> ConnectAsync(ConnectOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        var reply = await SendCommandAsync("connect", new JsonObject
+        var fields = new JsonObject
         {
             ["host"] = options.Remote.Address.ToString(),
             ["port"] = options.Remote.Port,
@@ -207,8 +256,67 @@ public sealed partial class NativePeerDriver : IPeerDriver
             ["attempts"] = options.Attempts,
             ["attemptIntervalMs"] = options.AttemptIntervalMs,
             ["timeoutMs"] = options.TimeoutMs,
-        }, cancellationToken).ConfigureAwait(false);
+        };
+        if (options.Security is { } security)
+        {
+            fields["publicKeyMode"] = security.PublicKeyMode;
+            if (security.ServerPublicKey is { } serverKey)
+            {
+                fields["serverPublicKey"] = Convert.ToHexStringLower(serverKey);
+            }
+            if (security.ClientKeys is { } clientKeys)
+            {
+                fields["clientPublicKey"] = Convert.ToHexStringLower(clientKeys.PublicKey);
+                fields["clientPrivateKey"] = Convert.ToHexStringLower(clientKeys.PrivateKey);
+            }
+        }
+        var reply = await SendCommandAsync("connect", fields, cancellationToken).ConfigureAwait(false);
         return (string?)reply["result"] ?? "";
+    }
+
+    public async Task<SecurityKeys> GenerateKeysAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("generateKeys", new JsonObject(), cancellationToken).ConfigureAwait(false);
+        return new SecurityKeys(Convert.FromHexString((string)reply["publicKey"]!), Convert.FromHexString((string)reply["privateKey"]!));
+    }
+
+    public Task AddSecurityExceptionAsync(string ip, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("addSecurityException", new JsonObject { ["ip"] = ip }, cancellationToken);
+
+    public Task RemoveSecurityExceptionAsync(string? ip, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("removeSecurityException", ip is null ? new JsonObject() : new JsonObject { ["ip"] = ip }, cancellationToken);
+
+    public async Task<bool> IsInSecurityExceptionListAsync(string ip, CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("securityException", new JsonObject { ["ip"] = ip }, cancellationToken).ConfigureAwait(false);
+        return (bool?)reply["listed"] ?? false;
+    }
+
+    public Task SetIncomingPasswordAsync(ReadOnlyMemory<byte> password, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("setIncomingPassword", new JsonObject { ["data"] = Convert.ToHexStringLower(password.Span) }, cancellationToken);
+
+    public async Task<byte[]> GetIncomingPasswordAsync(CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("incomingPassword", new JsonObject(), cancellationToken).ConfigureAwait(false);
+        return Convert.FromHexString((string?)reply["data"] ?? "");
+    }
+
+    public Task UnbanAsync(string ip, CancellationToken cancellationToken = default) =>
+        SendCommandAsync("unban", new JsonObject { ["ip"] = ip }, cancellationToken);
+
+    public Task ClearBansAsync(CancellationToken cancellationToken = default) =>
+        SendCommandAsync("clearBans", new JsonObject(), cancellationToken);
+
+    public async Task<bool> IsBannedAsync(string ip, CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("isBanned", new JsonObject { ["ip"] = ip }, cancellationToken).ConfigureAwait(false);
+        return (bool?)reply["banned"] ?? false;
+    }
+
+    public async Task<byte[]?> GetClientPublicKeyAsync(ulong target, CancellationToken cancellationToken = default)
+    {
+        var reply = await SendCommandAsync("clientPublicKey", new JsonObject { ["target"] = FormatGuid(target) }, cancellationToken).ConfigureAwait(false);
+        return reply["publicKey"] is { } key ? Convert.FromHexString((string)key!) : null;
     }
 
     public async Task<uint> SendAsync(SendOptions options, CancellationToken cancellationToken = default)

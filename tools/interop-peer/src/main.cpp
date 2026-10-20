@@ -4,7 +4,9 @@
 #include "Hex.h"
 #include "Names.h"
 #include "PacketEvent.h"
+#include "KeyGeneration.h"
 #include "PluginCommands.h"
+#include "SecurityCommands.h"
 
 #include "GetTime.h"
 #include "MessageIdentifiers.h"
@@ -220,6 +222,11 @@ namespace
                 reply["ok"] = false;
                 reply["error"] = e.what();
             }
+            catch (const interop::SecurityCommandError& e)
+            {
+                reply["ok"] = false;
+                reply["error"] = e.what();
+            }
             catch (const json::exception& e)
             {
                 reply["ok"] = false;
@@ -320,6 +327,8 @@ namespace
                 Shutdown(command);
                 return true;
             }
+            else if (interop::DispatchSecurityCommand(peer_, cmd, command, result))
+                return false;
             else
                 throw CommandError("unknown cmd '" + cmd + "'");
             return false;
@@ -355,13 +364,14 @@ namespace
             unsigned attempts = InRange<unsigned>(Optional<long long>(command, "attempts", 12), "attempts");
             unsigned interval = InRange<unsigned>(Optional<long long>(command, "attemptIntervalMs", 500), "attemptIntervalMs");
             RakNet::TimeMS timeout = InRange<RakNet::TimeMS>(Optional<long long>(command, "timeoutMs", 0), "timeoutMs");
+            interop::ConnectKey publicKey(command);
 
             RakNet::ConnectionAttemptResult attempt = peer_->Connect(
                 host.c_str(),
                 port,
                 password.empty() ? nullptr : reinterpret_cast<const char*>(password.data()),
                 static_cast<int>(password.size()),
-                nullptr,
+                publicKey.Get(),
                 0,
                 attempts,
                 interval,
@@ -612,6 +622,7 @@ int main()
         ready["event"] = "ready";
         ready["raknetVersion"] = RAKNET_VERSION;
         ready["protocolVersion"] = RAKNET_PROTOCOL_VERSION;
+        ready["security"] = interop::SecurityCompiledIn();
         output.Write(ready);
 
         peer.StartReceiving();

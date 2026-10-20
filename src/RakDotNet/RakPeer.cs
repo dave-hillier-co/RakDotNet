@@ -4,7 +4,9 @@ using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using RakDotNet.Protocol.Peer;
+using RakDotNet.Protocol.Security;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Messages;
 using RakDotNet.Security;
@@ -90,6 +92,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     private volatile int _maxIncomingConnections;
     private volatile SystemAddressBox _externalAddress = new(SystemAddress.Unassigned);
     private readonly BanList _banList;
+    private readonly AddressPatternCollection _securityExceptions;
     private volatile byte[] _incomingPassword;
     private long _defaultTimeoutMs;
     private long _unreliableTimeoutMs;
@@ -116,6 +119,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         _offlinePingResponse = options.OfflinePingResponse.ToArray();
         _maxIncomingConnections = Math.Min(options.MaxIncomingConnections, options.MaxConnections);
         _banList = new BanList(this, core.Bans);
+        _securityExceptions = new AddressPatternCollection(this, core.SecurityExceptions);
         _incomingPassword = options.IncomingPassword.ToArray();
         _defaultTimeoutMs = (long)options.DefaultTimeout.TotalMilliseconds;
         _unreliableTimeoutMs = (long)options.UnreliableTimeout.TotalMilliseconds;
@@ -146,6 +150,11 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
             // The core reads ipList whenever it builds a handshake message, so SetInternalAddress changes this array in
             // the I/O cycle.
             var internalAddresses = LocalAddressList.Build(HostAddresses(), transports[0].LocalAddress.Port).ToArray();
+            // InitializeSecurity copies the key pair into the server handshake (RakPeer.cpp:787-795); the exported
+            // private key is zeroed once the core holds it.
+            var privateKey = GC.AllocateArray<byte>(RakKeyPair.PrivateKeyLength, pinned: true);
+            options.Security?.Keys.ExportPrivateKey(privateKey);
+            using var zero = new ZeroOnDispose(privateKey);
             var core = new PeerCore(new PeerOptions
             {
                 Guid = guid.Value,
@@ -160,11 +169,16 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
                 AllowConnectionResponseIpMigration = options.AllowConnectionResponseIpMigration,
                 OutgoingBandwidthLimit = (uint)options.PerConnectionOutgoingBandwidthLimit,
                 SessionLimits = options.Limits.ToSessionLimits(),
+                Security = options.Security is { } security
+                    ? new ServerSecurityOptions(security.Keys.PublicKey.Bytes.ToArray(), privateKey, security.RequireClientKey)
+                    : null,
             })
             {
                 OccasionalPing = options.OccasionalPing,
             };
             core.SetOfflinePingResponse(options.OfflinePingResponse.Span);
+            foreach (var pattern in options.SecurityExceptions)
+                core.SecurityExceptions.Add(pattern);
             var peer = new RakPeer(options, guid, transports, internalAddresses, core, options.Limits.EventQueueCapacity);
             peer.StartPlugins();
             peer.StartLoop();
@@ -919,7 +933,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     public BanList BanList => _banList;
 
     /// <summary>The security exception list; applies to incoming connections only.</summary>
-    public AddressPatternCollection SecurityExceptions => throw new NotImplementedException();
+    public AddressPatternCollection SecurityExceptions => _securityExceptions;
 
     /// <summary>Whether <see cref="RakPeerOptions.Security"/> was set at start.</summary>
     public bool IsSecurityEnabled => _options.Security is not null;
@@ -1063,10 +1077,10 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.Limits.EventQueueCapacity, nameof(options));
         _ = options.Limits.ToSessionLimits();
         NetworkSimulator.Validate(options.NetworkSimulator, nameof(options));
-
-        // Milestone 7: the secure handshake.
-        if (options.Security is not null || options.SecurityExceptions.Count > 0)
-            throw new NotImplementedException("Secure connections are not implemented.");
+        if (options.SecurityExceptions is null || options.SecurityExceptions.Any(p => p is null))
+            throw new ArgumentException("The security exception list may not be null or hold null.", nameof(options));
+        if (options.Security is { Keys: null })
+            throw new ArgumentException("Server security needs a key pair.", nameof(options));
     }
 
     private static void ValidateOfflinePingResponse(ReadOnlyMemory<byte> response, string parameter)
@@ -1301,21 +1315,62 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(options.AttemptCount, nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.AttemptInterval, TimeSpan.Zero, nameof(options));
         ArgumentOutOfRangeException.ThrowIfLessThan(options.Timeout, TimeSpan.Zero, nameof(options));
-        if (options.Security.Mode != PublicKeyMode.InsecureConnection)
-            throw new NotImplementedException("Secure connections are not implemented.");
+        ArgumentNullException.ThrowIfNull(options.Security, nameof(options));
         ThrowIfStopped();
 
         lock (_attemptsGate)
         {
             if (TryGetConnection(remote, out _))
                 return ConnectAttemptResult.AlreadyConnectedToEndpoint;
+            // SendConnectionRequest prepares the handshake between these two checks (RakPeer.cpp:3292-3298).
+            ClientSecurity? security = null;
+            if (options.Security.Mode != PublicKeyMode.InsecureConnection)
+            {
+                security = CreateClientSecurity(options.Security);
+                if (security is null)
+                    return ConnectAttemptResult.SecurityInitializationFailed;
+            }
             if (_attempts.ContainsKey(remote))
+            {
+                security?.Dispose();
                 return ConnectAttemptResult.ConnectionAttemptAlreadyInProgress;
-            pending = new PendingConnect(remote, remote.ToIPEndPoint(), options, completion);
+            }
+            pending = new PendingConnect(remote, remote.ToIPEndPoint(), options, completion) { Security = security };
             _attempts.Add(remote, pending);
         }
         Enqueue(new PeerCommand { Kind = CommandKind.Connect, Target = remote, State = pending });
         return ConnectAttemptResult.Started;
+    }
+
+    // GenerateConnectionRequestChallenge (RakPeer.cpp:3193-3262): null where it fails. A disposed identity key pair is a
+    // programming error and throws.
+    private static ClientSecurity? CreateClientSecurity(ConnectSecurity security)
+    {
+        var mode = security.Mode switch
+        {
+            PublicKeyMode.AcceptAnyPublicKey => ClientKeyMode.AcceptAnyPublicKey,
+            PublicKeyMode.UseKnownPublicKey => ClientKeyMode.UseKnownPublicKey,
+            PublicKeyMode.UseTwoWayAuthentication => ClientKeyMode.UseTwoWayAuthentication,
+            _ => throw new ArgumentOutOfRangeException(nameof(security), security.Mode, null),
+        };
+        Span<byte> identityPrivate = stackalloc byte[RakKeyPair.PrivateKeyLength];
+        try
+        {
+            var identity = security.ClientIdentity;
+            identity?.ExportPrivateKey(identityPrivate);
+            return ClientSecurity.Create(mode, security.ServerPublicKey is { } key ? key.Bytes : default,
+                                         identity is null ? default : identity.PublicKey.Bytes,
+                                         identity is null ? default : identityPrivate, SystemSecureRandom.Instance);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(identityPrivate);
+        }
+    }
+
+    private sealed class ZeroOnDispose(byte[] secret) : IDisposable
+    {
+        public void Dispose() => CryptographicOperations.ZeroMemory(secret);
     }
 
     // Queues a datagram that bypasses the core; the payload is rented and returned once sent.
