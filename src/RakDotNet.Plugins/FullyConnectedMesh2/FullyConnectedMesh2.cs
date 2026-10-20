@@ -51,16 +51,16 @@ public sealed record VerifiedJoinAccepted(bool ThisSystemAccepted, IReadOnlyList
 /// elapsed runtime in microseconds or the total connection count and our GUID); a system with no GUID is answered with
 /// ID_FCM2_RESPOND_CONNECTION_COUNT, from which it makes its own, and GUIDs are spread with ID_FCM2_INFORM_FCMGUID and
 /// ID_FCM2_UPDATE_MIN_TOTAL_CONNECTION_COUNT. These are consumed. When the host changes, ID_FCM2_NEW_HOST with the old
-/// host's GUID is injected at the head of the stream from the new host's GUID; one that arrives from the network is
-/// consumed; it is RakNet's 17 bytes long, the eight after the old host zero where RakNet leaves them uninitialised.
-/// Everything is sent HIGH_PRIORITY and RELIABLE_ORDERED on channel 0, and multi-byte values are big-endian.
+/// host's GUID is injected at the head of the stream from the new host's GUID, in RakNet's 17 bytes, the eight after the
+/// old host zero where RakNet leaves them uninitialised; one that arrives from the network is consumed. Everything is sent HIGH_PRIORITY and RELIABLE_ORDERED on channel 0, and multi-byte values are big-endian.
 /// </para>
 /// <para>
 /// The verified join messages and their bit layouts are RakNet's: ID_FCM2_VERIFIED_JOIN_START lists systems as GUID,
 /// SystemAddress, a 32-bit bit count and that many bits of <see cref="VerifiedJoinStartUserData"/> padded to a byte;
 /// ID_FCM2_VERIFIED_JOIN_CAPABLE lists GUID, SystemAddress and a <see cref="VerifiedJoinState"/> byte, followed by
 /// <see cref="VerifiedJoinCapableUserData"/>. A client that loses the host mid-join gets ID_FCM2_VERIFIED_JOIN_FAILED
-/// injected with RakNet's two-byte length, the second byte zero where RakNet leaves it uninitialised.
+/// injected with RakNet's two-byte length, the second byte zero where RakNet leaves it uninitialised. A rejected or failed
+/// join forgets the user data once, where RakNet frees it twice (FullyConnectedMesh2.cpp:1186-1196).
 /// </para>
 /// <para>
 /// RakNet's behaviour is kept where it surprises: <see cref="ConnectToRemoteNewIncomingConnections"/> reads
@@ -95,12 +95,15 @@ public sealed class FullyConnectedMesh2 : IRakPlugin
 
     /// <summary>
     /// WriteVJCUserData: writes data after the list of an outgoing ID_FCM2_VERIFIED_JOIN_CAPABLE, which the host reads
-    /// after <see cref="SkipToVerifiedJoinCapableUserData"/>. Called on the dispatch step or the caller of
-    /// <see cref="StartVerifiedJoin"/>'s answer.
+    /// after <see cref="SkipToVerifiedJoinCapableUserData"/>. Called on the dispatch step.
     /// </summary>
     public Action<BitStream>? VerifiedJoinCapableUserData { get; set; }
 
-    /// <summary>WriteVJSUserData: writes the data sent for one system in ID_FCM2_VERIFIED_JOIN_START.</summary>
+    /// <summary>
+    /// WriteVJSUserData: writes the data sent for one system in ID_FCM2_VERIFIED_JOIN_START, on the caller of
+    /// <see cref="StartVerifiedJoin"/> or <see cref="RespondOnVerifiedJoinCapable(ReadOnlySpan{byte}, SystemAddress, RakNetGuid, bool, ReadOnlySpan{byte})"/>
+    /// or on the dispatch step.
+    /// </summary>
     public Action<BitStream, RakNetGuid>? VerifiedJoinStartUserData { get; set; }
 
     /// <summary>
