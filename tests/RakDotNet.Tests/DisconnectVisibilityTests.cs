@@ -10,6 +10,7 @@ namespace RakDotNet.Tests;
 public sealed class DisconnectVisibilityTests
 {
     private const int Rounds = 40;
+    private const int CloseRounds = 200;
 
     [Fact]
     public async Task A_background_peer_reports_a_connection_as_its_event_says_as_soon_as_the_event_is_read()
@@ -32,6 +33,32 @@ public sealed class DisconnectVisibilityTests
             Assert.Equal(ConnectionState.NotConnected, states);
             DrainClient(client);
         }
+    }
+
+    // RakPeer.cpp:3275-3276: Connect is refused only while a slot for the address is active. Closed reports the slot
+    // closed, so a Connect made as soon as it completes must start.
+    [Fact]
+    public async Task A_connect_made_as_soon_as_a_close_completes_starts()
+    {
+        var token = TestContext.Current.CancellationToken;
+        using var server = RakPeer.Start(Options(maxIncoming: 4));
+        using var client = RakPeer.Start(Options(maxIncoming: 0));
+        var serverAddress = server.Sockets[0].LocalAddress;
+
+        var connected = await client.ConnectAsync(serverAddress, cancellationToken: token);
+        for (var round = 0; round < CloseRounds; round++)
+        {
+            Assert.True(connected.IsConnected, $"round {round}: {connected.AttemptResult} {connected.Failure}");
+
+            await connected.Connection!.CloseAsync(notify: true, cancellationToken: token);
+            connected = await client.ConnectAsync(serverAddress, cancellationToken: token);
+
+            DrainClient(client);
+            while (server.Events.TryRead(out _))
+            {
+            }
+        }
+        Assert.True(connected.IsConnected, $"{connected.AttemptResult} {connected.Failure}");
     }
 
     private static async Task<ConnectionState> WaitForAsync(RakPeer peer, PeerEventKind kind, RakNetGuid guid, CancellationToken token)
