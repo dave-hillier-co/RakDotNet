@@ -220,7 +220,8 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `GetRakPeerInterface` / `SetRakPeerInterface` / `SetTCPInterface` | the `IPluginHost` passed to `OnAttached`; `host.Peer` |
 | `GetMyGUIDUnified` | `host.RakNetGuid` |
 | `SendUnified` / `SendListUnified` | `host.Send` / `host.Broadcast` with any `OutgoingMessage` |
-| `AllocatePacketUnified` / `PushBackPacketUnified` / `DeallocPacketUnified` | `host.Inject` / `OwnedPeerEvent.Dispose` |
+| `AllocatePacketUnified` / `PushBackPacketUnified` / `DeallocPacketUnified` | `host.Inject` / `OwnedPeerEvent.Dispose`; `generatedLocally: true` for a packet whose `wasGeneratedLocally` the plugin sets |
+| `packet->data[0] = id` in `OnReceive`, passing the packet on | `e.RewriteId(id)`, for a `Message` event that stays one |
 
 ### 10.2 `IPeerDriver` on the public API
 

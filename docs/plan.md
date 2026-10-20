@@ -104,6 +104,8 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | `SystemAddressAndGuidTest`, `PacketAndLowLevelTestsTest` | Address and GUID handling, low-level packet cases |
 | `SecurityFunctionsTest`, Encryption | Secure handshake, identity keys, security exceptions, encrypted delivery |
 | MessageFilter | Filter sets on the server: allowed IDs, a change of set, kick and ban on a disallowed message, time limits, timestamped and RPC4 messages |
+| ReadyEvent | Two and three systems waiting on each other: set, unset, forced completion, status by query, a disconnect leaving the wait list |
+| TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
 
 ## Milestones
 

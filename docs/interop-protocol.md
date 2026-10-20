@@ -70,6 +70,22 @@ Plugin commands attach a RakNet plugin to the peer and drive it. They live in `t
 
 Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFilterSetActions`, `messageFilterSetMaxTime` or `messageFilterSetSystem` names gets `SetDisallowedMessageCallback` and `SetTimeoutCallback`, which record what `messageFilterInfo` reports. A recorded `guid` is `"0"` and `address` empty when the filter knew only the other.
 
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `readyEventAttach` | `channel` (0) | | `AttachPlugin` of a `ReadyEvent` after `SetSendChannel`; again is a no-op |
+| `readyEventSet` | `eventId`, `isReady` (true) | `result` (bool) | `SetEvent` |
+| `readyEventForceCompletion` | `eventId` | | `ForceCompletion` |
+| `readyEventDelete` | `eventId` | `result` (bool) | `DeleteEvent` |
+| `readyEventAddToWaitList` | `eventId`, `target` (guid; omitted is `UNASSIGNED_RAKNET_GUID`, every connected system) | `result` (bool) | `AddToWaitList` |
+| `readyEventRemoveFromWaitList` | `eventId`, `target` (guid; omitted is `UNASSIGNED_RAKNET_GUID`, everyone) | `result` (bool) | `RemoveFromWaitList` |
+| `readyEventInfo` | `eventId` | `eventIds` (ascending), `hasEvent`, `isSet`, `isCompleted`, `isCompletionProcessing`, `waitList` (array of `{guid,status}` in wait-list order, `status` a `ReadyEventSystemStatus` name such as `RES_READY`) | `GetEventListSize`, `GetEventAtIndex`, `HasEvent`, `IsEventSet`, `IsEventCompleted`, `IsEventCompletionProcessing`, `GetRemoteWaitListSize`, `GetFromWaitListAtIndex`, `GetReadyStatus` |
+| `twoWayAuthAttach` | | | `AttachPlugin` of a `TwoWayAuthentication`, created with `OP_NEW` because its `GetInstance` is never defined; again is a no-op |
+| `twoWayAuthAddPassword` | `identifier`, `password` | `result` (bool) | `AddPassword` |
+| `twoWayAuthChallenge` | `identifier`, `target` (guid) | `result` (bool) | `Challenge` |
+| `twoWayAuthClear` | | | `Clear` |
+
+TwoWayAuthentication's results reach the driver as `packet` events.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

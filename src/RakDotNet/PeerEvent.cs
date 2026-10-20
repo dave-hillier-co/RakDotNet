@@ -69,8 +69,9 @@ public readonly ref struct PeerEvent
     public ulong ReceivedTime => Segment.ReceivedTime;
 
     /// <summary>
-    /// Packet::wasGeneratedLocally: set only on the ID_CONNECTION_LOST of a silent local close (RakPeer.cpp:1676).
-    /// Loopback and injected packets leave it clear, as AllocPacket does (RakPeer.cpp:165, 183).
+    /// Packet::wasGeneratedLocally: set on the ID_CONNECTION_LOST of a silent local close (RakPeer.cpp:1676) and on
+    /// packets injected with <c>generatedLocally</c>, as plugins push them back (TwoWayAuthentication.cpp:272).
+    /// Loopback and other injected packets leave it clear, as AllocPacket does (RakPeer.cpp:165, 183).
     /// </summary>
     public bool IsLocal => Segment.IsLocal;
 
