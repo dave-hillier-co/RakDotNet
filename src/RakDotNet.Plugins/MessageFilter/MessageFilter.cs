@@ -310,13 +310,15 @@ public sealed class MessageFilter : IRakPlugin
                 return PluginResult.Continue;
         }
 
-        byte messageId;
+        int? messageId;
         if (data[0] == (byte)MessageId.Timestamp)
         {
             // sizeof(MessageID) + sizeof(RakNet::TimeMS): 4 bytes of time, not the 8 RakPeer writes.
             if (data.Length < 1 + sizeof(uint))
                 return PluginResult.Consume;
-            messageId = data[1 + sizeof(uint)];
+            // At exactly five bytes RakNet reads the ID one past the packet (undefined behaviour). There is no ID to
+            // filter on: an unfiltered system's message passes as in RakNet, a filtered system's is dropped unreported.
+            messageId = data.Length > 1 + sizeof(uint) ? data[1 + sizeof(uint)] : null;
         }
         else
         {
@@ -330,7 +332,9 @@ public sealed class MessageFilter : IRakPlugin
             if (!_systems.TryGetValue(SystemKey.From(system), out var membership))
                 return PluginResult.Continue;
             filterSet = membership.FilterSet;
-            var allowed = filterSet.AllowedIds[messageId];
+            if (messageId is not { } id)
+                return PluginResult.Consume;
+            var allowed = filterSet.AllowedIds[id];
             if (allowed && data[0] == (byte)MessageId.RpcPlugin)
                 allowed = filterSet.AllowedRpc4.Contains(ReadRpc4FunctionName(data));
             if (allowed)

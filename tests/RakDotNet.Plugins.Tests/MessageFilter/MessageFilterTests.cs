@@ -138,6 +138,39 @@ public sealed class MessageFilterTests : IDisposable
     }
 
     [Fact]
+    public void A_five_byte_timestamped_message_reaches_the_application_from_an_unfiltered_system()
+    {
+        // MessageFilter.cpp:327-328 reads the ID one past a five-byte packet; an unfiltered system never uses it.
+        var connection = _mesh.Connect(_client, _server);
+
+        connection.Send(new byte[] { (byte)MessageId.Timestamp, 0, 0, 0, 0 }, Reliability.ReliableOrdered);
+        connection.Send(new byte[] { User }, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Single(_mesh.Seen(_server), e => e.Id == (byte)MessageId.Timestamp);
+        Assert.Equal([User], UserMessages(_server));
+    }
+
+    [Fact]
+    public void A_five_byte_timestamped_message_from_a_filtered_system_is_dropped_without_a_kick()
+    {
+        var reported = new List<byte>();
+        _filter.AutoAddNewConnectionsToFilter = 0;
+        _filter.SetAllowMessageId(true, 0, 255, 0);
+        _filter.SetActionOnDisallowedMessage(kickOnDisallowed: true, banOnDisallowed: false, TimeSpan.Zero, 0);
+        _filter.SetDisallowedMessageCallback(0, (_, _, id) => reported.Add(id));
+        var connection = _mesh.Connect(_client, _server);
+
+        connection.Send(new byte[] { (byte)MessageId.Timestamp, 0, 0, 0, 0 }, Reliability.ReliableOrdered);
+        connection.Send(new byte[] { User }, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.DoesNotContain(_mesh.Seen(_server), e => e.Id == (byte)MessageId.Timestamp);
+        Assert.Equal([User], UserMessages(_server));
+        Assert.Empty(reported);
+    }
+
+    [Fact]
     public void An_rpc4_call_passes_only_when_its_function_is_allowed()
     {
         _filter.AutoAddNewConnectionsToFilter = 0;
