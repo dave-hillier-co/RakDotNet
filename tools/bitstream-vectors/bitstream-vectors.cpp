@@ -235,5 +235,17 @@ int main()
         for (int b = 0; b < tree.encodingTable[i].bitLength; b++) printf("%d", code.ReadBit() ? 1 : 0);
         printf("\n");
     }
+    // A table whose merged weights pass 2^32: the unsigned sums wrap (DS_HuffmanEncodingTree.cpp:109).
+    {
+        static unsigned int overflow[256];
+        for (int i = 0; i < 256; i++) overflow[i] = 1;
+        overflow[0] = 0x80000000u;
+        overflow[1] = 0x80000000u;
+        overflow[2] = 0xC0000000u;
+        HuffmanEncodingTree wrapped;
+        wrapped.GenerateFromFrequencyTable(overflow);
+        unsigned char in[] = {2, 0, 1, 3};
+        CASE("huff_overflow_encode_2013", wrapped.EncodeArray(in, 4, &bs));
+    }
     return 0;
 }

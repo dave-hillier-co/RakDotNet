@@ -156,6 +156,28 @@ public class BitSerializerTests
     }
 
     [Fact]
+    public void SerializeOrthMatrix_reading_leaves_everything_outside_the_upper_3x3_alone()
+    {
+        // BitStream.h:1059-1070 hands ReadOrthMatrix only m00..m22, so the translation and the fourth column keep their values.
+        Span<byte> buffer = stackalloc byte[16];
+        var writing = new BitSerializer(new BitStreamWriter(buffer));
+        var sent = Matrix4x4.CreateTranslation(5, 6, 7);
+        Assert.True(writing.SerializeOrthMatrix(ref sent));
+        var written = writing.Writer;
+
+        var reading = new BitSerializer(new BitStreamReader(written.Written, written.BitsWritten));
+        var target = Matrix4x4.CreateTranslation(1, 2, 3);
+        target.M11 = 0;
+        target.M14 = 4;
+        target.M44 = 9;
+        Assert.True(reading.SerializeOrthMatrix(ref target));
+        Assert.Equal(1f, target.M11, 0.0001f);
+        Assert.Equal(new Vector3(1, 2, 3), target.Translation);
+        Assert.Equal(4f, target.M14);
+        Assert.Equal(9f, target.M44);
+    }
+
+    [Fact]
     public void SerializeBits_and_Serialize_bytes_copy_raw_data()
     {
         // BitStream.h:997-1004 and 1072-1078: Serialize(char*, n) is Write(char*, n), unaligned; SerializeBits is WriteBits.

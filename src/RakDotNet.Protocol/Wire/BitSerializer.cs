@@ -438,7 +438,10 @@ public ref struct BitSerializer
         return Assign(_reader.TryReadNormQuat(out var read), read, ref value);
     }
 
-    /// <summary>BitStream::SerializeOrthMatrix (BitStream.h:1059-1070): the upper 3x3 of <paramref name="value"/>.</summary>
+    /// <summary>
+    /// BitStream::SerializeOrthMatrix (BitStream.h:1059-1070): the upper 3x3 of <paramref name="value"/>. Reading sets
+    /// only M11 to M33 and leaves the other elements as they were.
+    /// </summary>
     public bool SerializeOrthMatrix(ref Matrix4x4 value)
     {
         if (IsWriting)
@@ -446,7 +449,12 @@ public ref struct BitSerializer
             _writer.WriteOrthMatrix(value);
             return true;
         }
-        return Assign(_reader.TryReadOrthMatrix(out var read), read, ref value);
+        if (!_reader.TryReadOrthMatrix(out var read))
+            return false;
+        (value.M11, value.M12, value.M13) = (read.M11, read.M12, read.M13);
+        (value.M21, value.M22, value.M23) = (read.M21, read.M22, read.M23);
+        (value.M31, value.M32, value.M33) = (read.M31, read.M32, read.M33);
+        return true;
     }
 
     private static bool Assign<T>(bool ok, T read, ref T value)

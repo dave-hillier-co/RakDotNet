@@ -34,7 +34,8 @@ public sealed class HuffmanEncodingTree
         _left = new int[nodeCount];
         _right = new int[nodeCount];
         _value = new byte[nodeCount];
-        var weight = new long[nodeCount];
+        // HuffmanEncodingTreeNode::weight is unsigned (DS_HuffmanEncodingTreeNode.h:21), so sums wrap modulo 2^32.
+        var weight = new uint[nodeCount];
         var parent = new int[nodeCount];
         Array.Fill(_left, -1);
         Array.Fill(_right, -1);
@@ -58,7 +59,7 @@ public sealed class HuffmanEncodingTree
             var node = next++;
             _left[node] = lesser;
             _right[node] = greater;
-            weight[node] = weight[lesser] + weight[greater];
+            weight[node] = unchecked(weight[lesser] + weight[greater]);
             parent[lesser] = node;
             parent[greater] = node;
             if (sorted.Count == 0)
@@ -175,7 +176,7 @@ public sealed class HuffmanEncodingTree
             output.WriteBits(_codes[value].AsSpan(1), bitCount, rightAlignedBits: false);
     }
 
-    private static void Insert(List<int> sorted, long[] weight, int node)
+    private static void Insert(List<int> sorted, uint[] weight, int node)
     {
         var index = sorted.FindIndex(n => weight[n] >= weight[node]);
         if (index < 0)
