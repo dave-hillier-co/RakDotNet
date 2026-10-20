@@ -33,7 +33,10 @@ namespace RakDotNet.Plugins;
 /// </para>
 /// <para>
 /// Messages are accepted only from the system a set was set up for. A file length, offset or chunk length that does not
-/// fit the file or the message drops the message, where RakNet would read or write past its buffers.
+/// fit the file or the message drops the message, where RakNet would read or write past its buffers. So that a sender
+/// cannot exhaust the receiver's memory, a chunk of a file sent incrementally is dropped unless the set header has
+/// arrived, the file's index is within the set's file count and the files given a buffer, this one included, are no
+/// longer together than the set; RakNet allocates whatever length a chunk states.
 /// </para>
 /// <para>
 /// Members may be called from any thread; handlers and progress callbacks run on the dispatch step, on the caller of
@@ -522,8 +525,20 @@ public sealed class FileListTransfer : IRakPlugin, IDisposable
             if (!isTheFullFile)
                 receiver.PartLength = partLength;
 
-            if (!receiver.PushedFiles.TryGetValue(fileIndex, out var block))
+            if (receiver.PushedFiles.TryGetValue(fileIndex, out var block))
             {
+                // A later chunk must fit the buffer the first one allocated.
+                if (isTheFullFile && block is not null && (ulong)offset + chunkLength > (uint)block.Length)
+                    return;
+            }
+            else
+            {
+                // RakNet allocates whatever length the sender states (FileListTransfer.cpp:760-764). Here the files must be
+                // in the set the header announced, and their lengths together within its length.
+                if (!receiver.GotSetHeader || fileIndex >= receiver.SetCount
+                    || receiver.PushedFileBytes + byteLengthOfThisFile > receiver.SetTotalFinalLength)
+                    return;
+                receiver.PushedFileBytes += byteLengthOfThisFile;
                 block = new byte[byteLengthOfThisFile];
                 receiver.PushedFiles[fileIndex] = block;
             }
@@ -796,6 +811,9 @@ public sealed class FileListTransfer : IRakPlugin, IDisposable
 
         // pushedFiles: the buffer each file sent incrementally is assembled in; null once the handler declined it.
         public SortedList<uint, byte[]?> PushedFiles { get; } = [];
+
+        // The lengths of every file given a buffer in PushedFiles, kept within SetTotalFinalLength.
+        public ulong PushedFileBytes { get; set; }
 
         public uint PartLength { get; set; } = 1;
     }

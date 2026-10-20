@@ -191,6 +191,61 @@ public sealed class CloudServerTests : IDisposable
     }
 
     [Fact]
+    public void A_specific_subscriber_that_disconnects_takes_its_empty_rows_with_it()
+    {
+        var server = AddServer();
+        var absent = AddClient(server);
+        var subscriber = AddClient(server);
+        var poster = AddClient(server);
+        Get(subscriber, server, new CloudQuery { Keys = { Key1, Key2 }, SubscribeToResults = true }, [absent.Guid]);
+
+        subscriber.Peer.Close(server.Guid, notify: true);
+        _mesh.RunUntil(() => !server.Peer.TryGetConnection(subscriber.Guid, out _), "the subscriber disconnected");
+        poster.Cloud.Post(Key1, "posted"u8, server.Guid);
+
+        // RakNet leaves the rows it allocated for the subscription (CloudServer.cpp:957-991); they are released here.
+        var rows = Get(poster, server, new CloudQuery { Keys = { Key1, Key2 } }).Rows;
+        Assert.Equal([poster.Guid], rows.Select(r => r.ClientGuid));
+    }
+
+    [Fact]
+    public void Subscriptions_are_limited_per_client_by_default()
+    {
+        Assert.Equal(CloudServer.DefaultMaxSubscriptionsPerClient, new CloudServer().MaxSubscriptionsPerClient);
+        Assert.True(CloudServer.DefaultMaxSubscriptionsPerClient > 0);
+    }
+
+    [Fact]
+    public void A_get_that_would_take_a_client_past_its_subscription_limit_is_dropped()
+    {
+        var server = AddServer();
+        server.Cloud.MaxSubscriptionsPerClient = 4;
+        var client = AddClient(server);
+        var (a, b, c) = (new RakNetGuid(1), new RakNetGuid(2), new RakNetGuid(3));
+
+        // Each key subscribed to specific systems counts once per system; two keys of three systems is six.
+        client.Cloud.Get(new CloudQuery { Keys = { Key1, Key2 }, SubscribeToResults = true }, [a, b, c], server.Guid);
+        _mesh.Settle();
+        Assert.Empty(client.Gets);
+
+        Get(client, server, new CloudQuery { Keys = { Key1, Key2 }, SubscribeToResults = true }, [a, b]);
+        // Subscribing to a key again replaces its subscription, so its count is taken out first.
+        Get(client, server, new CloudQuery { Keys = { Key1 }, SubscribeToResults = true }, [a, b]);
+        Get(client, server, new CloudQuery { Keys = { Key1 }, SubscribeToResults = true });
+        // A subscription to every system counts once: 2 + 1 + 1 is four, and one more is over.
+        Get(client, server, new CloudQuery { Keys = { new CloudKey("ApplicationName", 3) }, SubscribeToResults = true });
+        var count = client.Gets.Count;
+        client.Cloud.Get(new CloudQuery { Keys = { new CloudKey("ApplicationName", 4) }, SubscribeToResults = true }, ReadOnlySpan<RakNetGuid>.Empty, server.Guid);
+        _mesh.Settle();
+        Assert.Equal(count, client.Gets.Count);
+
+        // A get that does not subscribe is not limited, and 0 lifts the limit.
+        Get(client, server, new CloudQuery { Keys = { new CloudKey("ApplicationName", 4) } }, [a, b, c]);
+        server.Cloud.MaxSubscriptionsPerClient = 0;
+        Get(client, server, new CloudQuery { Keys = { new CloudKey("ApplicationName", 4) }, SubscribeToResults = true }, [a, b, c]);
+    }
+
+    [Fact]
     public void Posts_beyond_the_upload_limit_per_client_are_dropped()
     {
         var server = AddServer();

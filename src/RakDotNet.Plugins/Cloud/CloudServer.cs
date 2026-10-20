@@ -26,7 +26,7 @@ namespace RakDotNet.Plugins;
 /// row count is patched into place as RakNet patches it, writing over the bits already there
 /// (CloudServer.cpp:1238-1244).</item>
 /// <item>A subscription to specific systems adds an empty row for each system that has not posted the key, which a
-/// later query returns once anyone has posted it.</item>
+/// later query returns once anyone has posted it, until the subscriber disconnects.</item>
 /// <item>The address of the server in a row is what the client sees it as, with a loopback address replaced by
 /// <see cref="RakPeer.InternalAddresses"/>[0] for new rows, or <see cref="ForcedExternalAddress"/> with that port;
 /// a port of 0 becomes the bound port.</item>
@@ -36,6 +36,11 @@ namespace RakDotNet.Plugins;
 /// Malformed requests are dropped. A post whose data is shorter than its stated length is dropped before the filters,
 /// where RakNet stores uninitialised bytes; a release of a key whose data RakNet lost track of after an upload over the
 /// limit forgets the key, where RakNet reads past its list.
+/// </para>
+/// <para>
+/// So that a client cannot exhaust the server's memory, which RakNet allows: a get that would take a client past
+/// <see cref="MaxSubscriptionsPerClient"/> is dropped, and when a client disconnects the empty rows its specific
+/// subscriptions added, and keys left with nothing, are released, where RakNet keeps them (CloudServer.cpp:957-991).
 /// </para>
 /// <para>Members may be called from any thread; hooks run on the dispatch step.</para>
 /// </remarks>
@@ -69,6 +74,24 @@ public sealed class CloudServer : IRakPlugin
         get { lock (_gate) return field; }
         set { lock (_gate) field = value; }
     }
+
+    /// <summary>The default <see cref="MaxSubscriptionsPerClient"/>.</summary>
+    public const int DefaultMaxSubscriptionsPerClient = 4096;
+
+    /// <summary>
+    /// The most subscriptions a client may hold at once, counting a key subscribed to specific systems once per system
+    /// and a key subscribed to every system once. A get that subscribes past it is dropped. 0 for no limit. RakNet has
+    /// no such limit, so one small request could make it allocate a row for every key and system named.
+    /// </summary>
+    public int MaxSubscriptionsPerClient
+    {
+        get { lock (_gate) return field; }
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            lock (_gate) field = value;
+        }
+    } = DefaultMaxSubscriptionsPerClient;
 
     /// <summary>SetMaxBytesPerDownload: stored only; RakNet never applies it.</summary>
     public ulong MaxBytesPerDownload
@@ -323,10 +346,17 @@ public sealed class CloudServer : IRakPlugin
                         var keyDataIndex = IndexOf(list.KeyData, d => system.CompareTo(d.ClientGuid), out var keyDataExists);
                         if (!keyDataExists)
                             continue;
-                        Remove(list.KeyData[keyDataIndex].SpecificSubscribers, guid);
+                        var cloudData = list.KeyData[keyDataIndex];
+                        Remove(cloudData.SpecificSubscribers, guid);
                         list.SubscriberCount--;
+                        // RakNet keeps the row once unused (CloudServer.cpp:977-983); it is released, as
+                        // RemoveSpecificSubscriber releases it, so a client cannot grow the server by subscribing and leaving.
+                        if (cloudData.IsUnused)
+                            list.KeyData.RemoveAt(keyDataIndex);
                     }
                 }
+                if (list.IsUnused)
+                    _dataRepository.RemoveAt(repositoryIndex);
             }
             _remoteSystems.Remove(guid);
         }
@@ -508,6 +538,8 @@ public sealed class CloudServer : IRakPlugin
             if (!filter.OnGetRequest(sender, address, query, specificSystems))
                 return;
         }
+        if (query.SubscribeToResults && WouldExceedSubscriptionLimit(sender, query.Keys, specificSystems))
+            return;
 
         var request = new GetRequest(query, specificSystems, sender, host.GetTime(), _nextGetRequestId++);
 
@@ -541,6 +573,28 @@ public sealed class CloudServer : IRakPlugin
         if (query.SubscribeToResults)
             Subscribe(host, request, sender);
     }
+
+    // Whether subscribing to these keys would take the client past MaxSubscriptionsPerClient. Subscribing to a key the
+    // client already holds replaces that subscription, so its count is taken out first.
+    private bool WouldExceedSubscriptionLimit(RakNetGuid sender, List<CloudKey> keys, List<RakNetGuid> specificSystems)
+    {
+        var limit = MaxSubscriptionsPerClient;
+        if (limit == 0)
+            return false;
+        var distinctKeys = keys.ToHashSet();
+        long total = (long)distinctKeys.Count * SubscriptionCount(specificSystems.Distinct().Count());
+        if (_remoteSystems.TryGetValue(sender, out var client))
+        {
+            foreach (var subscription in client.SubscribedKeys)
+            {
+                if (!distinctKeys.Contains(subscription.Key))
+                    total += SubscriptionCount(subscription.SpecificSystems.Count);
+            }
+        }
+        return total > limit;
+    }
+
+    private static int SubscriptionCount(int specificSystemCount) => Math.Max(1, specificSystemCount);
 
     // The subscription half of OnGetRequest (CloudServer.cpp:594-716).
     private void Subscribe(IPluginHost host, GetRequest request, RakNetGuid sender)

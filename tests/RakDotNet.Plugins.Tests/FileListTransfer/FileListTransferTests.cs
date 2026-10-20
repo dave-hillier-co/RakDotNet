@@ -295,6 +295,60 @@ public sealed class FileListTransferTests : IDisposable
     }
 
     [Fact]
+    public void A_push_before_the_set_header_is_dropped()
+    {
+        var (senderAddress, _) = Connect();
+        var setId = _receiver.SetupReceive(_handler, senderAddress);
+
+        // RakNet asserts the header arrived (FileListTransfer.cpp:733-735) and otherwise allocates the stated length.
+        SendRaw(ReferencePush(setId, "early", fileLength: 256 * 1024 * 1024, offset: 0, chunk: [], done: false));
+        _mesh.Settle();
+
+        Assert.Empty(_handler.Progress);
+        Assert.True(_receiver.IsHandlerActive(setId));
+    }
+
+    [Fact]
+    public void Pushes_may_claim_no_more_than_the_set_header_announced()
+    {
+        var (senderAddress, _) = Connect();
+        var setId = _receiver.SetupReceive(_handler, senderAddress);
+        Header(setId, fileCount: 2, totalLength: 20);
+
+        // An empty chunk of a 256 MiB file: RakNet allocates the whole file (FileListTransfer.cpp:760-764).
+        SendRaw(ReferencePush(setId, "huge", fileLength: 256 * 1024 * 1024, offset: 0, chunk: [], done: false));
+        // A file index past the set's file count.
+        SendRaw(ReferencePush(setId, "extra", fileLength: 1, offset: 0, chunk: [], done: false, fileIndex: 2));
+        _mesh.Settle();
+        Assert.Empty(_handler.Progress);
+
+        // The files' lengths together may reach the set's length, counting each file once, but not pass it.
+        SendRaw(ReferencePush(setId, "a", fileLength: 15, offset: 0, chunk: [1], done: false, fileIndex: 0));
+        SendRaw(ReferencePush(setId, "a", fileLength: 15, offset: 1, chunk: [2], done: false, fileIndex: 0));
+        SendRaw(ReferencePush(setId, "b", fileLength: 6, offset: 0, chunk: [3], done: false, fileIndex: 1));
+        SendRaw(ReferencePush(setId, "b", fileLength: 5, offset: 0, chunk: [3], done: false, fileIndex: 1));
+        _mesh.Settle();
+
+        Assert.Equal([("a", 15), ("a", 15), ("b", 5)], _handler.Progress.Select(p => (p.File.FileName, p.FirstDataChunk.Length)));
+    }
+
+    [Fact]
+    public void A_later_chunk_stating_a_longer_file_than_the_first_is_dropped()
+    {
+        var (senderAddress, _) = Connect();
+        var setId = _receiver.SetupReceive(_handler, senderAddress);
+        Header(setId, fileCount: 1, totalLength: 20);
+
+        SendRaw(ReferencePush(setId, "a", fileLength: 10, offset: 0, chunk: [1], done: false));
+        // Fits the 20 bytes it states but not the 10-byte buffer the first chunk allocated.
+        SendRaw(ReferencePush(setId, "a", fileLength: 20, offset: 15, chunk: [2], done: true));
+        _mesh.Settle();
+
+        Assert.Single(_handler.Progress);
+        Assert.Empty(_handler.Files);
+    }
+
+    [Fact]
     public void A_whole_file_shorter_than_its_stated_length_is_dropped()
     {
         var (senderAddress, _) = Connect();
@@ -339,7 +393,7 @@ public sealed class FileListTransferTests : IDisposable
 
     private void SendRaw(byte[] message) => _senderPeer.Send(message, _receiverPeer.RakNetGuid, Reliability.ReliableOrdered, Priority.High, 0);
 
-    private static byte[] ReferencePush(ushort setId, string name, uint fileLength, uint offset, byte[] chunk, bool done)
+    private static byte[] ReferencePush(ushort setId, string name, uint fileLength, uint offset, byte[] chunk, bool done, uint fileIndex = 0)
     {
         var message = new byte[256 + chunk.Length];
         var writer = new BitStreamWriter(message);
@@ -347,7 +401,7 @@ public sealed class FileListTransferTests : IDisposable
         default(FileListNodeContext).Write(ref writer);
         writer.WriteUInt16(setId);
         writer.WriteCompressedString(name.AsSpan(), 512);
-        writer.WriteCompressed(0u);
+        writer.WriteCompressed(fileIndex);
         writer.WriteCompressed(fileLength);
         writer.WriteCompressed(offset);
         writer.WriteCompressed((uint)chunk.Length);
