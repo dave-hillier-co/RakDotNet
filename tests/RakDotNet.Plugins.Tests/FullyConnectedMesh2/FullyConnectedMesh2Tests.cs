@@ -66,11 +66,12 @@ public sealed class FullyConnectedMesh2Tests : IDisposable
         _mesh.Connect(newer, older);
         _mesh.Settle();
 
-        // FullyConnectedMesh2.cpp:437-451: ID_FCM2_NEW_HOST, then the old host, from the new host, generated locally.
+        // FullyConnectedMesh2.cpp:437-451: ID_FCM2_NEW_HOST, then the old host, from the new host, generated locally, in
+        // a packet of sizeof(MessageID)+sizeof(RakNetGUID) bytes.
         foreach (var peer in new[] { older, newer })
         {
             var newHost = Assert.Single(_mesh.Seen(peer), e => e.Id == (byte)MessageId.Fcm2NewHost);
-            Assert.Equal([(byte)MessageId.Fcm2NewHost, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], newHost.Data);
+            Assert.Equal([(byte)MessageId.Fcm2NewHost, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0], newHost.Data);
             Assert.Equal(older.RakNetGuid, newHost.RakNetGuid);
             Assert.True(newHost.IsLocal);
             Assert.DoesNotContain(_mesh.Seen(peer), e => Internal.Contains(e.Id));

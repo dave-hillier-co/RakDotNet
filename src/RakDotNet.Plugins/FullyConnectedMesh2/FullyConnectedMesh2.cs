@@ -52,7 +52,8 @@ public sealed record VerifiedJoinAccepted(bool ThisSystemAccepted, IReadOnlyList
 /// ID_FCM2_RESPOND_CONNECTION_COUNT, from which it makes its own, and GUIDs are spread with ID_FCM2_INFORM_FCMGUID and
 /// ID_FCM2_UPDATE_MIN_TOTAL_CONNECTION_COUNT. These are consumed. When the host changes, ID_FCM2_NEW_HOST with the old
 /// host's GUID is injected at the head of the stream from the new host's GUID; one that arrives from the network is
-/// consumed. Everything is sent HIGH_PRIORITY and RELIABLE_ORDERED on channel 0, and multi-byte values are big-endian.
+/// consumed; it is RakNet's 17 bytes long, the eight after the old host zero where RakNet leaves them uninitialised.
+/// Everything is sent HIGH_PRIORITY and RELIABLE_ORDERED on channel 0, and multi-byte values are big-endian.
 /// </para>
 /// <para>
 /// The verified join messages and their bit layouts are RakNet's: ID_FCM2_VERIFIED_JOIN_START lists systems as GUID,
@@ -73,6 +74,9 @@ public sealed record VerifiedJoinAccepted(bool ThisSystemAccepted, IReadOnlyList
 /// </remarks>
 public sealed class FullyConnectedMesh2 : IRakPlugin
 {
+    // sizeof(MessageID)+sizeof(RakNetGUID): the GUID's 64 bits, its 16-bit systemIndex and padding to 16 bytes.
+    private const int NewHostPacketLength = 1 + 16;
+
     // AllocatePacketUnified(sizeof(MessageID)+sizeof(unsigned char)) with only the ID set (FullyConnectedMesh2.cpp:326-327).
     private static readonly byte[] FailedPacket = [(byte)MessageId.Fcm2VerifiedJoinFailed, 0];
 
@@ -989,10 +993,13 @@ public sealed class FullyConnectedMesh2 : IRakPlugin
     }
 
     // PushNewHost (FullyConnectedMesh2.cpp:437-451): ID_FCM2_NEW_HOST and the old host, from the new host, at the head.
+    // The packet is sizeof(MessageID)+sizeof(RakNetGUID) long, and RakNetGUID's in-memory size includes its 16-bit
+    // systemIndex and padding, so eight bytes the BitStream never writes follow the GUID.
     private void PushNewHost(RakNetGuid newHost, RakNetGuid oldHost)
     {
         var host = RequireHost();
-        Span<byte> packet = stackalloc byte[1 + sizeof(ulong)];
+        Span<byte> packet = stackalloc byte[NewHostPacketLength];
+        packet.Clear();
         var writer = new BitStreamWriter(packet);
         writer.WriteByte((byte)MessageId.Fcm2NewHost);
         writer.WriteRakNetGuid(oldHost);
