@@ -643,13 +643,16 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     /// <summary>
     /// PushBackPacket with a copy of <paramref name="data"/>. With <paramref name="atHead"/> the next read returns it
-    /// (RakPeer.cpp:2838-2841). Plugins get OnInjected first.
+    /// (RakPeer.cpp:2838-2841). Plugins get OnInjected first. <paramref name="generatedLocally"/> sets
+    /// <see cref="PeerEvent.IsLocal"/>, which AllocPacket leaves clear (RakPeer.cpp:165, 183) and plugins set on the
+    /// packets they push back (TwoWayAuthentication.cpp:272).
     /// </summary>
-    public void Inject(ReadOnlySpan<byte> data, SystemAddress source, RakNetGuid sourceGuid, bool atHead = false)
+    public void Inject(ReadOnlySpan<byte> data, SystemAddress source, RakNetGuid sourceGuid, bool atHead = false, bool generatedLocally = false)
     {
         ThrowIfStopped();
         var segment = _pool.Rent();
         segment.SetData(data);
+        segment.IsLocal = generatedLocally;
         segment.Address = source;
         segment.RakNetGuid = sourceGuid;
         segment.Connection = sourceGuid.IsAssigned && TryGetConnection(sourceGuid, out var connection) ? connection : null;

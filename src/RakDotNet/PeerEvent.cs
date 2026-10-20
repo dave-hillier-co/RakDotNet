@@ -170,6 +170,35 @@ public readonly ref struct PeerEvent
         return new OwnedPeerEvent(segment, _generation);
     }
 
+    /// <summary>
+    /// Packet::data[0] = <paramref name="id"/>: the rewrite a plugin makes to a message it passes on, which later plugins
+    /// and the reader then see (TwoWayAuthentication.cpp:375, Router2.cpp:1260). Writes <see cref="Data"/>[0] whatever it
+    /// holds, as RakNet does.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The event is not a <see cref="PeerEventKind.Message"/>, or <paramref name="id"/> would make it another kind.
+    /// </exception>
+    public void RewriteId(MessageId id)
+    {
+        var segment = Segment;
+        if (segment.Kind != PeerEventKind.Message || segment.Length == 0)
+            throw new InvalidOperationException("Only a non-empty Message event can have its ID rewritten.");
+        var data = segment.WritableData;
+        var previous = data[0];
+        data[0] = (byte)id;
+        RakPeer.Classify(segment);
+        if (segment.Kind == PeerEventKind.Message)
+            return;
+        data[0] = previous;
+        segment.Kind = PeerEventKind.Message;
+        segment.IsIncoming = false;
+        segment.DisconnectReason = default;
+        segment.Receipt = default;
+        segment.ConnectFailure = default;
+        segment.RemoteProtocolVersion = 0;
+        throw new InvalidOperationException($"Rewriting the ID to {id} would change the kind of the event.");
+    }
+
     /// <summary>An unpooled copy of <see cref="Data"/>.</summary>
     public byte[] ToArray() => Segment.Data.ToArray();
 
