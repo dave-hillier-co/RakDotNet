@@ -92,6 +92,18 @@ public sealed class HttpConnection2Tests : IDisposable
     }
 
     [Fact]
+    public void A_content_length_read_as_negative_completes_with_no_body()
+    {
+        // ReadIntFromSubstring reads 3000000000 as a negative int, which HTTPConnection2.cpp:326-374 completes at once with
+        // no body, as it does a length of 0.
+        _server.Reply(close: false, "HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nbody");
+
+        _http.TransmitRequest(HttpFormat.FormatForGet(Uri("/negative")), "127.0.0.1", _server.Port);
+
+        Assert.Equal(-1, PumpUntilResponse().ContentOffset);
+    }
+
+    [Fact]
     public void A_connection_closed_before_the_body_is_complete_completes_the_request()
     {
         // HTTPConnection2.cpp:547-601.

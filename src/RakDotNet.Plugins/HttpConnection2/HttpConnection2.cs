@@ -269,7 +269,9 @@ public sealed class HttpConnection2 : ITcpPlugin
             sent.ContentOffset = body + 4 == received.Length ? -1 : body + 4;
             return true;
         }
-        if (sent.ContentLength == 0)
+        // Any length not above 0 completes with no body, a negative one read from a long number included
+        // (HTTPConnection2.cpp:326-374).
+        if (sent.ContentLength <= 0)
         {
             sent.ContentOffset = -1;
             return true;
