@@ -106,6 +106,8 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | MessageFilter | Filter sets on the server: allowed IDs, a change of set, kick and ban on a disallowed message, time limits, timestamped and RPC4 messages |
 | ReadyEvent | Two and three systems waiting on each other: set, unset, forced completion, status by query, a disconnect leaving the wait list |
 | TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
+| RPC4 | Slots by priority, local and interrupted signals, a blocking call returning data, calls and the remote error, the messages as a system without RPC4 receives them, CallLoopback and local callbacks |
+| RandSync, ReplicaManager3 (`VariableDeltaSerializer`), NetworkIDObject | Construction and updates keeping two generators in step, skipped and replayed numbers; acknowledged, lost and unchanged variable updates; IDs from an authority found on the other system; GridSectorizer cells agreeing on both |
 
 ## Milestones
 

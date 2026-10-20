@@ -231,7 +231,16 @@ public sealed class Rpc4 : IRakPlugin
                     pending.Completion.TrySetCanceled(cancellationToken);
             });
         }
-        host.Send(message, target, reliability, priority, orderingChannel);
+        try
+        {
+            host.Send(message, target, reliability, priority, orderingChannel);
+        }
+        catch
+        {
+            if (TryTakePending(pending))
+                pending.Cancellation.Dispose();
+            throw;
+        }
         return pending.Completion.Task;
     }
 
