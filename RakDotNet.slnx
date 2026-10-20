@@ -7,6 +7,7 @@
   <Folder Name="/src/">
     <Project Path="src/RakDotNet.Compatibility/RakDotNet.Compatibility.csproj" />
     <Project Path="src/RakDotNet.Connections/RakDotNet.Connections.csproj" />
+    <Project Path="src/RakDotNet.Plugins/RakDotNet.Plugins.csproj" />
     <Project Path="src/RakDotNet.Protocol/RakDotNet.Protocol.csproj" />
     <Project Path="src/RakDotNet.Testing/RakDotNet.Testing.csproj" />
     <Project Path="src/RakDotNet/RakDotNet.csproj" />
@@ -16,6 +17,7 @@
     <Project Path="tests/RakDotNet.Connections.Tests/RakDotNet.Connections.Tests.csproj" />
     <Project Path="tests/RakDotNet.Interop.FakePeer/RakDotNet.Interop.FakePeer.csproj" />
     <Project Path="tests/RakDotNet.Interop.Tests/RakDotNet.Interop.Tests.csproj" />
+    <Project Path="tests/RakDotNet.Plugins.Tests/RakDotNet.Plugins.Tests.csproj" />
     <Project Path="tests/RakDotNet.Protocol.Tests/RakDotNet.Protocol.Tests.csproj" />
     <Project Path="tests/RakDotNet.Samples.Tests/RakDotNet.Samples.Tests.csproj" />
     <Project Path="tests/RakDotNet.Testing.Tests/RakDotNet.Testing.Tests.csproj" />
