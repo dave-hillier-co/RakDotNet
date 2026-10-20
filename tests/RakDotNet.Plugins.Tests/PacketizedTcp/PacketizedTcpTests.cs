@@ -117,6 +117,49 @@ public sealed class PacketizedTcpTests : IDisposable
     }
 
     [Fact]
+    public void A_peer_that_declares_a_message_over_the_limit_is_closed_and_reported_lost()
+    {
+        Assert.Equal(134_217_728, _server.MaxMessageLength);
+        var packetizedAtRaw = _raw.Connect("127.0.0.1", ServerPort, block: true);
+        var rawAtServer = Poll.Address(_server.HasNewIncomingConnection, "the raw connection");
+
+        _raw.Send([0xFF, 0xFF, 0xFF, 0xFF], packetizedAtRaw, broadcast: false);
+        for (var i = 0; i < 16; i++)
+            _raw.Send(new byte[4096], packetizedAtRaw, broadcast: false);
+
+        Poll.True(() =>
+        {
+            Assert.Null(_server.Receive());
+            return _server.HasLostConnection() == rawAtServer;
+        }, "the server to drop the connection");
+        Assert.Empty(_server.GetConnectionList());
+        Assert.Equal(packetizedAtRaw, Poll.Address(_raw.HasLostConnection, "the raw side to see the close"));
+    }
+
+    [Fact]
+    public void A_message_at_the_limit_arrives_and_one_byte_more_closes_the_connection()
+    {
+        _server.MaxMessageLength = 10;
+        var (clientAtServer, server) = Connect();
+
+        _client.Send(new byte[10], server, broadcast: false);
+        Assert.Equal(new byte[10], ReceiveMessages(_server, 1)[0].Data.ToArray());
+
+        _client.Send(new byte[11], server, broadcast: false);
+        Poll.True(() =>
+        {
+            Assert.Null(_server.Receive());
+            return _server.HasLostConnection() == clientAtServer;
+        }, "the server to drop the connection");
+    }
+
+    [Fact]
+    public void The_limit_is_positive()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => _server.MaxMessageLength = 0);
+    }
+
+    [Fact]
     public void Connection_events_pass_through_and_a_close_is_lost_at_the_other_side()
     {
         var (clientAtServer, server) = Connect();

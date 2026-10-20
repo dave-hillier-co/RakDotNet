@@ -14,26 +14,61 @@ public sealed class ByteQueue
     private int _readOffset;
     private int _writeOffset;
 
+    /// <summary>A queue that holds at most <paramref name="maximumLength"/> bytes; by default as many as an array can.</summary>
+    public ByteQueue(int maximumLength = MaximumArrayLength - 1)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumLength);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(maximumLength, MaximumArrayLength - 1);
+        MaximumLength = maximumLength;
+    }
+
+    // Array.MaxLength, which is not a constant.
+    private const int MaximumArrayLength = 0x7FFFFFC7;
+
+    /// <summary>
+    /// The most bytes the queue holds. RakNet grows without a bound, and its growth overflows past about 1 GiB; here the
+    /// growth is capped at this length and the free byte.
+    /// </summary>
+    public int MaximumLength { get; }
+
     /// <summary>GetBytesWritten: how many bytes are queued (DS_ByteQueue.cpp:113-119).</summary>
     public int BytesWritten => _writeOffset >= _readOffset ? _writeOffset - _readOffset : _writeOffset + (_data.Length - _readOffset);
 
     /// <summary>WriteBytes (DS_ByteQueue.cpp:30-68).</summary>
+    /// <exception cref="InvalidOperationException">
+    /// The queue would hold more than <see cref="MaximumLength"/> bytes; nothing is written.
+    /// </exception>
     public void WriteBytes(ReadOnlySpan<byte> data)
     {
         var bytesWritten = BytesWritten;
         var length = data.Length;
+        if ((long)bytesWritten + length > MaximumLength)
+            throw new InvalidOperationException($"The queue holds at most {MaximumLength} bytes; {bytesWritten} are queued and {length} more were written.");
         // One byte always stays free, so a full queue is never mistaken for an empty one.
         if (_data.Length == 0 || length > _data.Length - bytesWritten - 1)
         {
             var oldLength = _data.Length;
-            var grow = Math.Max(length + oldLength + 1, MinimumAllocation);
-            Array.Resize(ref _data, oldLength + grow);
+            // DS_ByteQueue.cpp:41-44 grows by the old length, the new bytes and one, in long arithmetic here so a large
+            // queue cannot overflow, and capped at the maximum and the free byte.
+            var grown = oldLength + Math.Max((long)length + oldLength + 1, MinimumAllocation);
+            Array.Resize(ref _data, (int)Math.Min(grown, (long)MaximumLength + 1));
+            var growth = _data.Length - oldLength;
             if (_writeOffset < _readOffset)
             {
-                // The wrapped head moves after the old end. DS_ByteQueue.cpp:50-55 has a second branch for a head longer
-                // than the growth, which cannot happen: the growth always exceeds the old length.
-                _data.AsSpan(0, _writeOffset).CopyTo(_data.AsSpan(oldLength));
-                _writeOffset = _readOffset + bytesWritten;
+                if (_writeOffset <= growth)
+                {
+                    // The wrapped head moves after the old end (DS_ByteQueue.cpp:45-49).
+                    _data.AsSpan(0, _writeOffset).CopyTo(_data.AsSpan(oldLength));
+                    _writeOffset = _readOffset + bytesWritten;
+                }
+                else
+                {
+                    // A growth capped at the maximum can be shorter than the head: as much of the head as fits moves
+                    // after the old end and the rest to the start (DS_ByteQueue.cpp:50-55).
+                    _data.AsSpan(0, growth).CopyTo(_data.AsSpan(oldLength));
+                    _data.AsSpan(growth, _writeOffset - growth).CopyTo(_data);
+                    _writeOffset -= growth;
+                }
             }
         }
 

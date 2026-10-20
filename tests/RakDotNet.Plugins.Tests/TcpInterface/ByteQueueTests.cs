@@ -102,4 +102,38 @@ public sealed class ByteQueueTests
     }
 
     private static byte[] Sequence(int start, int count) => [.. Enumerable.Range(start, count).Select(i => (byte)i)];
+
+    [Fact]
+    public void Growth_stops_at_the_capacity_and_a_write_past_it_throws_leaving_the_queue_as_it_was()
+    {
+        var queue = new ByteQueue(maximumLength: 1000);
+        queue.WriteBytes(new byte[600]);
+        queue.WriteBytes(new byte[400]);
+
+        Assert.Equal(1000, queue.BytesWritten);
+        Assert.Throws<InvalidOperationException>(() => queue.WriteBytes([1]));
+        Assert.Equal(1000, queue.BytesWritten);
+    }
+
+    [Fact]
+    public void The_default_maximum_is_the_largest_array_less_the_free_byte()
+    {
+        Assert.Equal(Array.MaxLength - 1, new ByteQueue().MaximumLength);
+    }
+
+    [Fact]
+    public void A_capped_growth_shorter_than_the_wrapped_head_keeps_the_bytes_in_order()
+    {
+        // 600 bytes allocate 601; after reading 500 and writing 499 the head wraps 499 bytes long. Growing for 400 more
+        // is capped at 1001, a growth of 400, shorter than the head.
+        var queue = new ByteQueue(maximumLength: 1000);
+        queue.WriteBytes(Sequence(0, 600));
+        queue.IncrementReadOffset(500);
+        queue.WriteBytes(Sequence(600, 499));
+        queue.WriteBytes(Sequence(1099, 400));
+
+        var read = new byte[999];
+        Assert.True(queue.ReadBytes(read, peek: false));
+        Assert.Equal(Sequence(500, 999), read);
+    }
 }

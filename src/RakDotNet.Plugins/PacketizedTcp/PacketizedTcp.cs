@@ -20,6 +20,10 @@ namespace RakDotNet.Plugins;
 /// multiple of 65536 queues ID_DOWNLOAD_PROGRESS (PacketizedTCP.cpp:211-249). The notification queues of this class
 /// survive <see cref="TcpInterface.Stop"/>, as RakNet's do.
 /// </para>
+/// <para>
+/// Unlike RakNet, a header that declares more than <see cref="MaxMessageLength"/> closes the connection, which is then
+/// reported as lost.
+/// </para>
 /// </remarks>
 public class PacketizedTcp : TcpInterface
 {
@@ -38,6 +42,22 @@ public class PacketizedTcp : TcpInterface
         : base(timeProvider)
     {
     }
+
+    /// <summary>
+    /// The longest message a remote system may send. Default 134,217,728 (128 MiB), as
+    /// <see cref="PeerLimits.MaxSplitMessageBytes"/>. RakNet buffers whatever length a header declares, up to 4 GiB; here a
+    /// connection whose header declares more is closed and reported as lost, so a remote system cannot make this
+    /// buffer without end.
+    /// </summary>
+    public int MaxMessageLength
+    {
+        get;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            field = value;
+        }
+    } = 134_217_728;
 
     /// <summary>Send: the length then the bytes (PacketizedTCP.cpp:44-62). An empty message is a zero length.</summary>
     public override void Send(ReadOnlySpan<byte> data, SystemAddress address, bool broadcast)
@@ -189,6 +209,11 @@ public class PacketizedTcp : TcpInterface
         queue.WriteBytes(incoming.Data.Span);
         if (!TryPeekLength(queue, out var length))
             return;
+        if (length > MaxMessageLength)
+        {
+            DropOversized(incoming.Address);
+            return;
+        }
 
         if (queue.BytesWritten >= length + HeaderLength)
         {
@@ -198,8 +223,15 @@ public class PacketizedTcp : TcpInterface
                 var message = new byte[length];
                 queue.ReadBytes(message, peek: false);
                 _waitingPackets.Enqueue(new TcpPacket(incoming.Address, message));
+                if (!TryPeekLength(queue, out length))
+                    return;
+                if (length > MaxMessageLength)
+                {
+                    DropOversized(incoming.Address);
+                    return;
+                }
             }
-            while (TryPeekLength(queue, out length) && queue.BytesWritten >= length + HeaderLength);
+            while (queue.BytesWritten >= length + HeaderLength);
             return;
         }
 
@@ -219,6 +251,15 @@ public class PacketizedTcp : TcpInterface
         queue.ReadBytes(progress.AsSpan(13), peek: true);
         queue.DecrementReadOffset(HeaderLength);
         _waitingPackets.Enqueue(new TcpPacket(incoming.Address, progress) { BitLength = incoming.Data.Length * 8 });
+    }
+
+    // A header over MaxMessageLength: the stream is forgotten, the connection closed and reported as lost. Each buffered
+    // stream then holds at most one message under the limit, its header and one receive.
+    private void DropOversized(SystemAddress address)
+    {
+        RemoveFromConnectionList(address);
+        _lostConnections.Enqueue(address);
+        base.CloseConnection(address);
     }
 
     // RakNet peeks the header even when fewer than four bytes are buffered, leaving the rest of the length undefined;
