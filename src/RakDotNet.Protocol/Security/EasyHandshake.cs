@@ -38,6 +38,26 @@ internal class EasyHandshake : IDisposable
     public bool GenerateServerKey(Span<byte> publicKey, Span<byte> privateKey) =>
         new KeyMaker().GenerateKeyPair(Math, Random, publicKey, privateKey);
 
+    /// <summary>
+    /// The check KeyAgreementResponder::Initialize, KeyAgreementInitiator::Initialize and SetIdentity make of a
+    /// public key: 64 bytes holding an affine point on the curve whose x is not zero.
+    /// </summary>
+    public static bool IsValidPublicKey(ReadOnlySpan<byte> publicKey)
+    {
+        if (publicKey.Length != PublicKeyBytes)
+            return false;
+        var math = KeyAgreementCommon.InstantiateMath(Bits)!;
+        try
+        {
+            var point = math.Get(0);
+            return math.LoadVerifyAffineXY(publicKey[..Bytes], publicKey[Bytes..], point) && !math.IsAffineIdentity(point);
+        }
+        finally
+        {
+            math.Clear();
+        }
+    }
+
     /// <summary>Zeroes the curve registers, as ~EasyHandshake deletes tls_math.</summary>
     public virtual void Dispose()
     {

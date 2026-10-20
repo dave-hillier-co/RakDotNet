@@ -139,7 +139,7 @@ This page maps every unit of RakNet 4.081 `Source/` (a `.h`/`.cpp` pair, a lone 
 
 | C++ unit (files) | C# location | Milestone | Note |
 |---|---|---|---|
-| `EasyHandshake` (`crypt/tunnel/EasyHandshake.hpp`, `.cpp`) | [`EasyHandshake.cs`](../src/RakDotNet.Protocol/Security/EasyHandshake.cs) | M7 | `EasyHandshake`, `ServerEasyHandshake` and `ClientEasyHandshake` over the 256-bit curve; each object owns its curve registers and takes an `ISecureRandom` in place of its `FortunaOutput`. |
+| `EasyHandshake` (`crypt/tunnel/EasyHandshake.hpp`, `.cpp`) | [`EasyHandshake.cs`](../src/RakDotNet.Protocol/Security/EasyHandshake.cs) | M7 | `EasyHandshake`, `ServerEasyHandshake` and `ClientEasyHandshake` over the 256-bit curve; each object owns its curve registers and takes an `ISecureRandom` in place of its `FortunaOutput`. `IsValidPublicKey` is the point check the responder and initiator make of a key, which `RakPublicKey` and `RakKeyPair` apply on creation; `RakKeyPair.Generate` is `GenerateServerKey`. |
 | `KeyAgreement` (`crypt/tunnel/KeyAgreement.hpp`, `.cpp`) | [`KeyAgreementCommon.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementCommon.cs) | M7 | Curve constants and key generation; only the 256-bit curve is instantiated. |
 | `KeyMaker` (`crypt/tunnel/KeyMaker.hpp`, `.cpp`) | [`KeyAgreementCommon.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementCommon.cs) | M7 | Long-term key pair generation. |
 | `KeyAgreementResponder` (`crypt/tunnel/KeyAgreementResponder.hpp`, `.cpp`) | [`KeyAgreementResponder.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementResponder.cs) | M7 | Server side: challenge answer, ephemeral rekey after 100 challenges, initiator identity verification. `Sign` is not called by RakNet. |

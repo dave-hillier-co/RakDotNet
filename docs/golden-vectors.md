@@ -40,6 +40,7 @@ The secure handshake is randomised, so it cannot be captured as datagrams and re
 
 - `tools/cat-vectors` is a C++ program built with CMake against the pinned RakNet, compiling cat through `Source/SecureHandshake.cpp` exactly as RakNet does. `tools/cat-vectors/build.sh` builds it and writes `tests/vectors/cat/<primitive>.json`. Set `RAKNET_SOURCE_DIR` to build from a local checkout. Regenerating is an explicit act, and the output is deterministic, so a rerun leaves the files unchanged.
 - Inputs come from SplitMix64 streams with fixed seeds and are written into the vectors. Where cat draws from its CSPRNG, the tool substitutes a recording `FortunaOutput`, and the vector holds every byte drawn, in order; the C# tests replay them through `ISecureRandom`.
+- `handshake.json` holds complete handshakes, the derived keys and encrypted traffic; `tunnel.json` holds what cat refuses: public and private keys offered to the server, the client and as an identity, identity proofs and answers tampered with field by field, and datagrams that are corrupted at every byte, truncated to every length, extended, reflected, swapped, replayed or sent to another session. Each case records cat's verdict, and the C# must give the same one.
 - The files sit in a subfolder so the scenario tests, which read every `tests/vectors/*.json`, do not see them. `tests/RakDotNet.Protocol.Tests/Security` reads them from the source tree.
 
 | File | Contents |

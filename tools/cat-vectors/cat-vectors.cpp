@@ -1090,6 +1090,335 @@ static void HandshakeVectors(const std::string &dir)
               sections);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Tunnel rejections: key validation, identity proofs, tampered answers and datagrams
+
+// A key pair as EasyHandshake::GenerateServerKey makes it from a ReplayRandom with the given seed.
+struct KeyPair
+{
+    u8 publicKey[EasyHandshake::PUBLIC_KEY_BYTES];
+    u8 privateKey[EasyHandshake::PRIVATE_KEY_BYTES];
+    explicit KeyPair(u64 seed)
+    {
+        Bytes unused;
+        ServerKey(seed, publicKey, privateKey, unused);
+    }
+};
+
+// The identity is set on a client initialized with validServerKey, as SetIdentity needs.
+static std::string KeyCase(const char *name, const u8 *publicKey, const u8 *privateKey, const u8 *validServerKey, u64 seed)
+{
+    ServerEasyHandshake server;
+    ReplayRandom *serverRandom = new ReplayRandom(seed);
+    ReplaceRandom(server, serverRandom);
+    bool serverOk = server.Initialize(publicKey, privateKey);
+    ClientEasyHandshake client;
+    ReplaceRandom(client, new ReplayRandom(seed + 1));
+    bool clientOk = client.Initialize(publicKey);
+    ClientEasyHandshake identity;
+    ReplaceRandom(identity, new ReplayRandom(seed + 2));
+    if (!identity.Initialize(validServerKey)) abort();
+    bool identityOk = identity.SetIdentity(publicKey, privateKey);
+    return Obj()
+        .Str("name", name)
+        .HexField("publicKey", publicKey, EasyHandshake::PUBLIC_KEY_BYTES)
+        .HexField("privateKey", privateKey, EasyHandshake::PRIVATE_KEY_BYTES)
+        .Add("serverInitialized", Bool(serverOk))
+        .HexField("serverRandom", serverRandom->drawn)
+        .Add("clientInitialized", Bool(clientOk))
+        .Add("identitySet", Bool(identityOk))
+        .Render();
+}
+
+static std::vector<std::string> KeyValidation()
+{
+    std::vector<std::string> cases;
+    KeyPair a(0x7e550000), b(0x7e550001);
+    const int n = EasyHandshake::BYTES;
+    BigTwistedEdwards *math = KeyAgreementCommon::InstantiateMath(256);
+    Bytes p = SaveReg(math, math->GetModulus());
+    delete math;
+    u64 seed = 0x7e551000;
+
+    cases.push_back(KeyCase("valid", a.publicKey, a.privateKey, a.publicKey, seed += 16));
+    {
+        u8 pub[EasyHandshake::PUBLIC_KEY_BYTES];
+        memcpy(pub, a.publicKey, sizeof(pub));
+        pub[0] ^= 1;
+        cases.push_back(KeyCase("x flipped", pub, a.privateKey, a.publicKey, seed += 16));
+        memcpy(pub, a.publicKey, sizeof(pub));
+        pub[n] ^= 1;
+        cases.push_back(KeyCase("y flipped", pub, a.privateKey, a.publicKey, seed += 16));
+        memcpy(pub, a.publicKey, sizeof(pub));
+        pub[n - 1] ^= 0x80;
+        cases.push_back(KeyCase("x high bit flipped", pub, a.privateKey, a.publicKey, seed += 16));
+
+        // (-x, y) is on the curve too.
+        memcpy(pub, a.publicKey, sizeof(pub));
+        int borrow = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            int d = (int)p[i] - (int)a.publicKey[i] - borrow;
+            borrow = d < 0;
+            pub[i] = (u8)(d + (borrow ? 256 : 0));
+        }
+        cases.push_back(KeyCase("x negated", pub, a.privateKey, a.publicKey, seed += 16));
+
+        memset(pub, 0, sizeof(pub));
+        cases.push_back(KeyCase("zero", pub, a.privateKey, a.publicKey, seed += 16));
+        pub[n] = 1;
+        cases.push_back(KeyCase("identity", pub, a.privateKey, a.publicKey, seed += 16));
+        memcpy(pub, &p[0], n);
+        cases.push_back(KeyCase("x is p, y is 1", pub, a.privateKey, a.publicKey, seed += 16));
+        memcpy(pub, a.publicKey, sizeof(pub));
+        memcpy(pub + n, &p[0], n);
+        cases.push_back(KeyCase("y is p", pub, a.privateKey, a.publicKey, seed += 16));
+        memset(pub, 0xff, sizeof(pub));
+        cases.push_back(KeyCase("all ones", pub, a.privateKey, a.publicKey, seed += 16));
+    }
+    cases.push_back(KeyCase("private key of another pair", a.publicKey, b.privateKey, a.publicKey, seed += 16));
+    {
+        u8 zero[EasyHandshake::PRIVATE_KEY_BYTES];
+        memset(zero, 0, sizeof(zero));
+        cases.push_back(KeyCase("zero private key", a.publicKey, zero, a.publicKey, seed += 16));
+    }
+    return cases;
+}
+
+// A two-way handshake whose identity proof is then tampered with field by field; the client's identity is
+// set from identityPublic and identityPrivate, which may not belong together.
+static std::string IdentityCase(const char *name, u64 seed, const KeyPair &server_keys, const u8 *identityPublic,
+                                const u8 *identityPrivate)
+{
+    const int n = EasyHandshake::BYTES;
+    ServerEasyHandshake server;
+    ReplayRandom *serverRandom = new ReplayRandom(seed);
+    ReplaceRandom(server, serverRandom);
+    ClientEasyHandshake client;
+    ReplayRandom *clientRandom = new ReplayRandom(seed + 1);
+    ReplaceRandom(client, clientRandom);
+    if (!server.Initialize(server_keys.publicKey, server_keys.privateKey)) abort();
+    if (!client.Initialize(server_keys.publicKey)) abort();
+    if (!client.SetIdentity(identityPublic, identityPrivate)) abort();
+
+    u8 challenge[EasyHandshake::CHALLENGE_BYTES];
+    client.GenerateChallenge(challenge);
+    AuthenticatedEncryption serverAuth, clientAuth;
+    u8 answer[EasyHandshake::ANSWER_BYTES];
+    if (!server.ProcessChallenge(challenge, answer, &serverAuth)) abort();
+    u8 identity[EasyHandshake::IDENTITY_BYTES];
+    bool processed = client.ProcessAnswerWithIdentity(answer, identity, &clientAuth);
+
+    BigTwistedEdwards *math = KeyAgreementCommon::InstantiateMath(256);
+    Bytes q = SaveReg(math, math->GetCurveQ());
+    delete math;
+
+    std::vector<std::string> tampers;
+    struct Tamper { const char *name; int offset; int kind; };
+    // kind 0 flips bit 0 of the byte at offset, 1 zeroes the 32-byte field there, 2 writes q there,
+    // 3 fills the field with 0xff.
+    const Tamper list[] = {
+        { "none", 0, -1 },
+        { "public key x", 0, 0 },
+        { "public key y", n, 0 },
+        { "random number", n * 2, 0 },
+        { "e", n * 3, 0 },
+        { "s", n * 4, 0 },
+        { "s high byte", n * 5 - 1, 0 },
+        { "e zero", n * 3, 1 },
+        { "s zero", n * 4, 1 },
+        { "e is q", n * 3, 2 },
+        { "s is q", n * 4, 2 },
+        { "s all ones", n * 4, 3 },
+        { "public key zero", 0, 1 },
+    };
+    for (size_t i = 0; i < sizeof(list) / sizeof(list[0]); ++i)
+    {
+        u8 proof[EasyHandshake::IDENTITY_BYTES];
+        memcpy(proof, identity, sizeof(proof));
+        switch (list[i].kind)
+        {
+        case 0: proof[list[i].offset] ^= 1; break;
+        case 1: memset(proof + list[i].offset, 0, n); break;
+        case 2: memcpy(proof + list[i].offset, &q[0], n); break;
+        case 3: memset(proof + list[i].offset, 0xff, n); break;
+        }
+        u8 verifiedKey[EasyHandshake::PUBLIC_KEY_BYTES];
+        memset(verifiedKey, 0, sizeof(verifiedKey));
+        bool verified = server.VerifyInitiatorIdentity(answer, proof, verifiedKey);
+        Obj o;
+        o.Str("name", list[i].name).HexField("identity", proof, sizeof(proof)).Add("verified", Bool(verified));
+        if (verified) o.HexField("verifiedPublicKey", verifiedKey, sizeof(verifiedKey));
+        tampers.push_back(o.Render());
+    }
+    return Obj()
+        .Str("name", name)
+        .HexField("serverPublicKey", server_keys.publicKey, EasyHandshake::PUBLIC_KEY_BYTES)
+        .HexField("serverPrivateKey", server_keys.privateKey, EasyHandshake::PRIVATE_KEY_BYTES)
+        .HexField("clientPublicKey", identityPublic, EasyHandshake::PUBLIC_KEY_BYTES)
+        .HexField("clientPrivateKey", identityPrivate, EasyHandshake::PRIVATE_KEY_BYTES)
+        .HexField("challenge", challenge, sizeof(challenge))
+        .HexField("answer", answer, sizeof(answer))
+        .Add("answerProcessed", Bool(processed))
+        .HexField("identity", identity, sizeof(identity))
+        .Add("verifications", Array(tampers, "      "))
+        .HexField("serverRandom", serverRandom->drawn)
+        .HexField("clientRandom", clientRandom->drawn)
+        .Render();
+}
+
+// An anonymous handshake whose answer is tampered with field by field before the genuine one is processed.
+static std::string AnswerCase(u64 seed, const KeyPair &server_keys)
+{
+    const int n = EasyHandshake::BYTES;
+    ServerEasyHandshake server;
+    ReplayRandom *serverRandom = new ReplayRandom(seed);
+    ReplaceRandom(server, serverRandom);
+    ClientEasyHandshake client;
+    ReplayRandom *clientRandom = new ReplayRandom(seed + 1);
+    ReplaceRandom(client, clientRandom);
+    server.Initialize(server_keys.publicKey, server_keys.privateKey);
+    client.Initialize(server_keys.publicKey);
+    u8 challenge[EasyHandshake::CHALLENGE_BYTES];
+    client.GenerateChallenge(challenge);
+    AuthenticatedEncryption serverAuth;
+    u8 answer[EasyHandshake::ANSWER_BYTES];
+    server.ProcessChallenge(challenge, answer, &serverAuth);
+
+    std::vector<std::string> attempts;
+    const int offsets[] = { 0, n - 1, n, n * 2 - 1, n * 2, n * 3 - 1, n * 3, n * 4 - 1, -1 };
+    for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i)
+    {
+        u8 tampered[EasyHandshake::ANSWER_BYTES];
+        memcpy(tampered, answer, sizeof(tampered));
+        if (offsets[i] >= 0) tampered[offsets[i]] ^= 1;
+        AuthenticatedEncryption clientAuth;
+        bool ok = client.ProcessAnswer(tampered, &clientAuth);
+        attempts.push_back(Obj().Add("offset", Num(offsets[i])).HexField("answer", tampered, sizeof(tampered)).Add("processed", Bool(ok)).Render());
+    }
+    return Obj()
+        .HexField("serverPublicKey", server_keys.publicKey, EasyHandshake::PUBLIC_KEY_BYTES)
+        .HexField("serverPrivateKey", server_keys.privateKey, EasyHandshake::PRIVATE_KEY_BYTES)
+        .HexField("challenge", challenge, sizeof(challenge))
+        .HexField("answer", answer, sizeof(answer))
+        .Add("attempts", Array(attempts, "    "))
+        .HexField("serverRandom", serverRandom->drawn)
+        .HexField("clientRandom", clientRandom->drawn)
+        .Render();
+}
+
+// Keys a client and server AuthenticatedEncryption with an anonymous handshake.
+struct KeyedSession
+{
+    ServerEasyHandshake server;
+    ClientEasyHandshake client;
+    ReplayRandom *serverRandom, *clientRandom;
+    AuthenticatedEncryption serverAuth, clientAuth;
+
+    KeyedSession(u64 seed, const KeyPair &keys)
+    {
+        serverRandom = new ReplayRandom(seed);
+        ReplaceRandom(server, serverRandom);
+        clientRandom = new ReplayRandom(seed + 1);
+        ReplaceRandom(client, clientRandom);
+        if (!server.Initialize(keys.publicKey, keys.privateKey) || !client.Initialize(keys.publicKey)) abort();
+        u8 challenge[EasyHandshake::CHALLENGE_BYTES];
+        u8 answer[EasyHandshake::ANSWER_BYTES];
+        if (!client.GenerateChallenge(challenge) || !server.ProcessChallenge(challenge, answer, &serverAuth) ||
+            !client.ProcessAnswer(answer, &clientAuth))
+            abort();
+    }
+
+    Obj Describe(const KeyPair &keys) const
+    {
+        return Obj()
+            .HexField("serverPublicKey", keys.publicKey, EasyHandshake::PUBLIC_KEY_BYTES)
+            .HexField("serverPrivateKey", keys.privateKey, EasyHandshake::PRIVATE_KEY_BYTES)
+            .HexField("serverRandom", serverRandom->drawn)
+            .HexField("clientRandom", clientRandom->drawn);
+    }
+};
+
+// Every single-byte corruption (bit 0 and bit 7), every truncation and a one-byte extension of datagram,
+// sent by the other side, decrypted by `by` in that order.
+static void Corrupt(Traffic &t, const char *by, const Bytes &datagram)
+{
+    for (size_t i = 0; i < datagram.size(); ++i)
+    {
+        const u8 bits[] = { 0x01, 0x80 };
+        for (int j = 0; j < 2; ++j)
+        {
+            Bytes c = datagram;
+            c[i] ^= bits[j];
+            t.DecryptRaw(by, c);
+        }
+    }
+    for (size_t length = 0; length < datagram.size(); ++length)
+        t.DecryptRaw(by, Bytes(datagram.begin(), datagram.begin() + length));
+    Bytes longer = datagram;
+    longer.push_back(0);
+    t.DecryptRaw(by, longer);
+}
+
+static std::string DatagramCase(u64 seed, const KeyPair &keys, const KeyPair &otherKeys)
+{
+    KeyedSession session(seed, keys);
+    Traffic t(&session.clientAuth, &session.serverAuth);
+
+    t.Encrypt("client", 16);
+    Bytes fromClient = t.client.sent.back();
+    Corrupt(t, "server", fromClient);
+    t.DecryptRaw("client", fromClient); // reflected back to its sender
+    t.Decrypt("server", 0);
+    t.Decrypt("server", 0); // replayed
+
+    t.Encrypt("server", 0);
+    Bytes fromServer = t.server.sent.back();
+    Corrupt(t, "client", fromServer);
+    t.DecryptRaw("server", fromServer);
+    t.Decrypt("client", 0);
+    t.Decrypt("client", 0);
+
+    // Two datagrams with their overheads swapped.
+    t.Encrypt("client", 8);
+    t.Encrypt("client", 8);
+    {
+        Bytes a = t.client.sent[1], b = t.client.sent[2];
+        Bytes swapped = a;
+        memcpy(&swapped[8], &b[8], AuthenticatedEncryption::OVERHEAD_BYTES);
+        t.DecryptRaw("server", swapped);
+    }
+    t.Decrypt("server", 2);
+    t.Decrypt("server", 1);
+
+    // The same datagram, decrypted by the server of an unrelated session.
+    KeyedSession other(seed + 0x100, otherKeys);
+    Traffic otherTraffic(&other.clientAuth, &other.serverAuth);
+    otherTraffic.DecryptRaw("server", fromClient);
+
+    return session.Describe(keys)
+        .Add("traffic", Array(t.ops, "    "))
+        .Add("otherSession", other.Describe(otherKeys).Add("traffic", Array(otherTraffic.ops, "      ")).Render())
+        .Render();
+}
+
+static void TunnelVectors(const std::string &dir)
+{
+    KeyPair server(0x7e552000), other(0x7e552001), clientA(0x7e552002), clientB(0x7e552003);
+    std::vector<std::string> identities;
+    identities.push_back(IdentityCase("matched key pair", 0x7e553000, server, clientA.publicKey, clientA.privateKey));
+    identities.push_back(IdentityCase("private key of another pair", 0x7e554000, server, clientA.publicKey, clientB.privateKey));
+
+    std::vector<std::pair<std::string, std::string> > sections;
+    sections.push_back(std::make_pair(std::string("keys"), Array(KeyValidation(), "  ")));
+    sections.push_back(std::make_pair(std::string("identities"), Array(identities, "  ")));
+    sections.push_back(std::make_pair(std::string("answers"), AnswerCase(0x7e555000, server)));
+    sections.push_back(std::make_pair(std::string("datagrams"), DatagramCase(0x7e556000, server, other)));
+    WriteFile(dir, "tunnel",
+              "Rejections in cat's tunnel with recorded CSPRNG draws: key pairs ServerEasyHandshake::Initialize, ClientEasyHandshake::Initialize and SetIdentity accept or refuse, identity proofs VerifyInitiatorIdentity accepts or refuses, tampered answers, and tampered, truncated, extended, reflected, swapped, replayed and foreign datagrams.",
+              sections);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2)
@@ -1109,6 +1438,7 @@ int main(int argc, char **argv)
     CookieJarVectors(dir);
     CurveVectors(dir);
     HandshakeVectors(dir);
+    TunnelVectors(dir);
     EasyHandshake::Shutdown();
     return 0;
 }
