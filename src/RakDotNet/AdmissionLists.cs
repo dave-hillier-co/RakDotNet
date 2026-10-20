@@ -5,31 +5,77 @@ using RakDotNet.Protocol.Peer;
 namespace RakDotNet;
 
 /// <summary>
-/// The security exception list: addresses allowed to connect without security. Patterns use <c>*</c> per octet, as
-/// RakNet's; they are validated on <see cref="Add"/>. Applies to incoming connections only.
+/// The security exception list: address patterns a server with security lets through the offline handshake without
+/// a challenge, and answers without security (RakPeer.cpp:5211-5228). Patterns are stored as given and match as
+/// RakNet's do: character by character, a <c>*</c> matching everything from that character on, and an address longer
+/// than 15 characters never matching. Applies to incoming connections only.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Changes take effect at once, from any thread, as RakPeer's do under securityExceptionMutex.
+/// </para>
+/// <para>
+/// As in RakNet 4.081, the list does not let a client connect without security: its ID_CONNECTION_REQUEST carries no
+/// key proof, which a server with security ignores (RakPeer.cpp:3460-3465), so the attempt fails once the half-open
+/// connection times out. A client that passes a public key while listed gets a reply without the handshake answer,
+/// which it cannot process (RakPeer.cpp:4964-4992), so its attempt fails too.
+/// </para>
+/// </remarks>
 public sealed class AddressPatternCollection : IReadOnlyCollection<string>
 {
-    private AddressPatternCollection() { }
+    private readonly RakPeer _peer;
+    private readonly SecurityExceptionList _list;
 
-    public int Count => throw new NotImplementedException();
+    internal AddressPatternCollection(RakPeer peer, SecurityExceptionList list)
+    {
+        _peer = peer;
+        _list = list;
+    }
 
-    /// <summary>AddToSecurityExceptionList</summary>
-    public void Add(string pattern) => throw new NotImplementedException();
+    public int Count => _list.Count;
 
-    /// <summary>RemoveFromSecurityExceptionList</summary>
-    public bool Remove(string pattern) => throw new NotImplementedException();
+    /// <summary>AddToSecurityExceptionList: appends the pattern, even when it is listed already.</summary>
+    public void Add(string pattern)
+    {
+        ArgumentNullException.ThrowIfNull(pattern);
+        _peer.ThrowIfStopped();
+        _list.Add(pattern);
+    }
+
+    /// <summary>
+    /// RemoveFromSecurityExceptionList: removes every listed pattern that <paramref name="address"/> matches, so
+    /// removing <c>10.0.0.5</c> also removes <c>10.0.0.*</c> (RakPeer.cpp:868-881). False when nothing matched.
+    /// </summary>
+    public bool Remove(string address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        _peer.ThrowIfStopped();
+        return _list.Remove(address);
+    }
 
     /// <summary>RemoveFromSecurityExceptionList(0)</summary>
-    public void Clear() => throw new NotImplementedException();
+    public void Clear()
+    {
+        _peer.ThrowIfStopped();
+        _list.Clear();
+    }
 
     /// <summary>IsInSecurityExceptionList</summary>
-    public bool Contains(IPAddress address) => throw new NotImplementedException();
+    public bool Contains(IPAddress address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        return _list.Contains(address.ToString());
+    }
 
     /// <inheritdoc cref="Contains(IPAddress)"/>
-    public bool Contains(string address) => throw new NotImplementedException();
+    public bool Contains(string address)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        return _list.Contains(address);
+    }
 
-    public IEnumerator<string> GetEnumerator() => throw new NotImplementedException();
+    /// <summary>A snapshot of the listed patterns, in list order.</summary>
+    public IEnumerator<string> GetEnumerator() => ((IEnumerable<string>)_list.Snapshot()).GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }

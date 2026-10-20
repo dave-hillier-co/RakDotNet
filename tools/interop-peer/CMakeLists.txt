@@ -63,13 +63,20 @@ function(interop_peer_settings target)
   endif()
 endfunction()
 
-# Translation logic (hex, enum names, packet events), shared by the peer and its tests.
+# cat::EasyHandshake key generation, compiled as RakNet is because cat's headers are not valid C++17.
+add_library(interop_keys STATIC src/KeyGeneration.cpp)
+target_include_directories(interop_keys PUBLIC src)
+target_link_libraries(interop_keys PUBLIC raknet_static)
+set_target_properties(interop_keys PROPERTIES CXX_STANDARD 98 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON)
+
+# Translation logic (hex, enum names, packet events, security commands), shared by the peer and its tests.
 add_library(interop_logic STATIC
   src/Hex.cpp
   src/Names.cpp
-  src/PacketEvent.cpp)
+  src/PacketEvent.cpp
+  src/SecurityCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)
-target_link_libraries(interop_logic PUBLIC raknet_static nlohmann_json::nlohmann_json)
+target_link_libraries(interop_logic PUBLIC raknet_static interop_keys nlohmann_json::nlohmann_json)
 interop_peer_settings(interop_logic)
 
 add_executable(interop-peer src/main.cpp)
@@ -81,3 +88,60 @@ add_executable(interop-peer-tests tests/LogicTests.cpp)
 target_link_libraries(interop-peer-tests PRIVATE interop_logic)
 interop_peer_settings(interop-peer-tests)
 add_test(NAME interop-peer-logic COMMAND interop-peer-tests)
+
+# interop-peer-secure: the same peer linked against RakNet compiled with LIBCAT_SECURITY=1, which builds
+# DependentExtensions/cat through Source/SecureHandshake.cpp. A separate binary, because a RakNet build either has
+# secure connections or does not. Its sources are taken from the targets above, so commands added there are built
+# into both peers.
+option(LIBCAT_SECURITY "Also build interop-peer-secure against RakNet with LIBCAT_SECURITY=1" ON)
+if(LIBCAT_SECURITY)
+  set(RAKNET_DEPENDENT_EXTENSIONS "${raknet_SOURCE_DIR}/DependentExtensions")
+  if(NOT EXISTS "${RAKNET_DEPENDENT_EXTENSIONS}/cat")
+    message(FATAL_ERROR "No DependentExtensions/cat found under ${raknet_SOURCE_DIR}")
+  endif()
+
+  add_library(raknet_static_secure STATIC ${RAKNET_SOURCES})
+  target_include_directories(raknet_static_secure SYSTEM PUBLIC "${RAKNET_SOURCE_ROOT}" "${RAKNET_DEPENDENT_EXTENSIONS}")
+  target_compile_definitions(raknet_static_secure PUBLIC LIBCAT_SECURITY=1)
+  get_target_property(raknet_options raknet_static COMPILE_OPTIONS)
+  if(raknet_options)
+    target_compile_options(raknet_static_secure PRIVATE ${raknet_options})
+  endif()
+  set_target_properties(raknet_static_secure PROPERTIES CXX_STANDARD 98 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS ON)
+  target_link_libraries(raknet_static_secure PUBLIC Threads::Threads)
+
+  # Each interop target's secure twin links the secure twins of its interop dependencies.
+  function(interop_secure_twin target twin kind)
+    get_target_property(sources ${target} SOURCES)
+    if(kind STREQUAL "EXECUTABLE")
+      add_executable(${twin} ${sources})
+    else()
+      add_library(${twin} STATIC ${sources})
+    endif()
+    get_target_property(includes ${target} INCLUDE_DIRECTORIES)
+    if(includes)
+      target_include_directories(${twin} PUBLIC ${includes})
+    endif()
+    get_target_property(libraries ${target} LINK_LIBRARIES)
+    foreach(library IN LISTS libraries)
+      if(library STREQUAL "raknet_static")
+        target_link_libraries(${twin} PUBLIC raknet_static_secure)
+      elseif(TARGET ${library}_secure)
+        target_link_libraries(${twin} PUBLIC ${library}_secure)
+      else()
+        target_link_libraries(${twin} PUBLIC ${library})
+      endif()
+    endforeach()
+    foreach(property CXX_STANDARD CXX_STANDARD_REQUIRED CXX_EXTENSIONS COMPILE_OPTIONS)
+      get_target_property(value ${target} ${property})
+      if(value)
+        set_target_properties(${twin} PROPERTIES ${property} "${value}")
+      endif()
+    endforeach()
+    set_target_properties(${twin} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  endfunction()
+
+  interop_secure_twin(interop_keys interop_keys_secure LIBRARY)
+  interop_secure_twin(interop_logic interop_logic_secure LIBRARY)
+  interop_secure_twin(interop-peer interop-peer-secure EXECUTABLE)
+endif()

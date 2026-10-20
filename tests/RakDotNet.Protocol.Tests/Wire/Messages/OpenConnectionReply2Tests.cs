@@ -44,21 +44,45 @@ public class OpenConnectionReply2Tests
     }
 
     [Fact]
-    public void Reply_requiring_security_reports_the_flag_and_fails()
+    public void Reply_requiring_security_carries_the_handshake_answer_after_the_flag_byte()
     {
-        // RakPeer.cpp:4894-4898: with doSecurity the handshake answer follows, which is not supported.
-        var bytes = Convert.FromHexString(ReplyHex);
-        bytes[34] = 0x80;
+        // RakPeer.cpp:5300-5305 and 5405: the flag bit, then WriteAlignedBytes of the 128-byte answer, which starts at
+        // the next byte boundary.
+        var answer = Enumerable.Range(0, OpenConnectionReply2.AnswerLength).Select(i => (byte)(i + 3)).ToArray();
+
+        var bytes = Codec.Encode(new OpenConnectionReply2(Codec.Guid, Client, 1200, RequiresSecurity: true, Answer: answer));
+
+        Assert.Equal(ReplyHex[..^2] + "80" + Convert.ToHexStringLower(answer), Convert.ToHexStringLower(bytes));
+    }
+
+    [Fact]
+    public void Reply_requiring_security_decodes_the_answer()
+    {
+        var answer = Enumerable.Range(0, OpenConnectionReply2.AnswerLength).Select(i => (byte)(255 - i)).ToArray();
+
+        var reply = Codec.Decode<OpenConnectionReply2>(ReplyHex[..^2] + "80" + Convert.ToHexStringLower(answer));
+
+        Assert.True(reply.RequiresSecurity);
+        Assert.Equal(answer, reply.Answer.ToArray());
+        Assert.Equal(1200, reply.MtuSize);
+    }
+
+    [Fact]
+    public void Reply_requiring_security_without_a_whole_answer_reports_the_flag_and_fails()
+    {
+        // RakPeer.cpp:4894-4898 reads the answer with ReadAlignedBytes, which fails when it is cut short.
+        var bytes = Convert.FromHexString(ReplyHex[..^2] + "80" + new string('a', 2 * 127));
 
         Assert.False(Codec.TryDecode<OpenConnectionReply2>(bytes, out var reply));
         Assert.True(reply.RequiresSecurity);
         Assert.Equal(Codec.Guid, reply.ServerGuid);
+        Assert.True(reply.Answer.IsEmpty);
     }
 
     [Fact]
-    public void Encoding_with_security_is_not_supported()
+    public void Encoding_with_security_needs_a_whole_answer()
     {
-        Assert.Throws<NotSupportedException>(() => Codec.Encode(new OpenConnectionReply2(1, Client, 1200, RequiresSecurity: true)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Codec.Encode(new OpenConnectionReply2(1, Client, 1200, RequiresSecurity: true)));
     }
 
     [Fact]

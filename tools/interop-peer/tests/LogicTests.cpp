@@ -4,6 +4,7 @@
 #include "Hex.h"
 #include "Names.h"
 #include "PacketEvent.h"
+#include "SecurityCommands.h"
 
 #include "MessageIdentifiers.h"
 
@@ -128,6 +129,46 @@ namespace
         const unsigned char data[] = {0x86};
         nlohmann::ordered_json event = interop::DescribePacket(data, sizeof(data), 18446744073709551615ull, "127.0.0.1:1", 0);
         CHECK(event["guid"] == "18446744073709551615");
+    }
+
+    TEST(Connect_without_a_public_key_mode_passes_no_public_key)
+    {
+        interop::ConnectKey key(nlohmann::json::parse(R"({"host":"127.0.0.1","port":1})"));
+        CHECK(key.Get() == nullptr);
+    }
+
+    TEST(Connect_with_a_known_key_passes_it_with_its_mode)
+    {
+        const std::string serverKey(128, 'a');
+        interop::ConnectKey key(nlohmann::json{{"publicKeyMode", "USE_KNOWN_PUBLIC_KEY"}, {"serverPublicKey", serverKey}});
+        CHECK(key.Get() != nullptr);
+        CHECK(key.Get()->publicKeyMode == RakNet::PKM_USE_KNOWN_PUBLIC_KEY);
+        CHECK(static_cast<unsigned char>(key.Get()->remoteServerPublicKey[63]) == 0xaa);
+        CHECK(key.Get()->myPublicKey == nullptr);
+    }
+
+    TEST(Connect_refuses_an_unknown_mode_and_a_key_of_the_wrong_length)
+    {
+        bool unknownMode = false;
+        bool shortKey = false;
+        try
+        {
+            interop::ConnectKey key(nlohmann::json{{"publicKeyMode", "PKM_USE_KNOWN_PUBLIC_KEY"}});
+        }
+        catch (const interop::SecurityCommandError&)
+        {
+            unknownMode = true;
+        }
+        try
+        {
+            interop::ConnectKey key(nlohmann::json{{"publicKeyMode", "USE_KNOWN_PUBLIC_KEY"}, {"serverPublicKey", "abcd"}});
+        }
+        catch (const interop::SecurityCommandError&)
+        {
+            shortKey = true;
+        }
+        CHECK(unknownMode);
+        CHECK(shortKey);
     }
 
     TEST(Truncated_ID_TIMESTAMP_packet_is_reported_as_ID_TIMESTAMP_without_timestamp)

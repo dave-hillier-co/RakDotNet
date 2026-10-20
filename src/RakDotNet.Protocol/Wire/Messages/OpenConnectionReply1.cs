@@ -5,10 +5,10 @@ namespace RakDotNet.Protocol.Wire.Messages;
 /// (RakPeer.cpp:5164-5186; parsed at 4742-4755 and 4845).
 /// </summary>
 /// <remarks>
-/// RakNet security is not supported. When <see cref="HasSecurity"/> is set, a cookie and the server's public key
-/// sit between the flag and the MTU (RakPeer.cpp:5170-5176); <see cref="TryRead"/> then returns false with
-/// <see cref="ServerGuid"/> and <see cref="HasSecurity"/> filled in so the caller can report why, and
-/// <see cref="Write"/> throws <see cref="NotSupportedException"/>.
+/// This is the reply of a server without security. When <see cref="HasSecurity"/> is set, a cookie and the server's
+/// public key sit between the flag and the MTU (RakPeer.cpp:5170-5176), the form <see cref="SecureOpenConnectionReply1"/>
+/// reads and writes; <see cref="TryRead"/> then returns false with <see cref="ServerGuid"/> and <see cref="HasSecurity"/>
+/// filled in, and <see cref="Write"/> throws <see cref="NotSupportedException"/>.
 /// </remarks>
 public readonly record struct OpenConnectionReply1(ulong ServerGuid, ushort MtuSize, bool HasSecurity = false)
     : IWireMessage<OpenConnectionReply1>
@@ -16,7 +16,7 @@ public readonly record struct OpenConnectionReply1(ulong ServerGuid, ushort MtuS
     public void Write(ref BitStreamWriter writer)
     {
         if (HasSecurity)
-            throw new NotSupportedException("RakNet security is not supported.");
+            throw new NotSupportedException("A reply with security is a SecureOpenConnectionReply1.");
         MessageIdField.Write(ref writer, MessageId.OpenConnectionReply1);
         OfflineMagic.Write(ref writer);
         writer.WriteUInt64(ServerGuid);

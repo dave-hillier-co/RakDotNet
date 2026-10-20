@@ -10,7 +10,7 @@ Requires CMake 3.24 or later and a C++17 compiler.
 tools/interop-peer/build.sh
 ```
 
-The binary is written to `tools/interop-peer/build/interop-peer`. RakNet is fetched from GitHub at a pinned commit and nlohmann/json from a pinned release. To build from a local RakNet checkout without fetching it:
+The binaries are written to `tools/interop-peer/build`: `interop-peer`, and `interop-peer-secure`, the same peer linked against RakNet compiled with `LIBCAT_SECURITY=1` for secure connections. Configure with `-DLIBCAT_SECURITY=OFF` to build only the plain peer. RakNet is fetched from GitHub at a pinned commit and nlohmann/json from a pinned release. To build from a local RakNet checkout without fetching it:
 
 ```sh
 RAKNET_SOURCE_DIR=/path/to/RakNet tools/interop-peer/build.sh
@@ -24,7 +24,7 @@ RakNet's own CMake files are not used; `CMakeLists.txt` compiles `Source/*.cpp` 
 ctest --test-dir tools/interop-peer/build
 ```
 
-These cover the translation logic (hex, enum names, packet events). The full peer is exercised by `RakDotNet.Interop.Tests`.
+These cover the translation logic (hex, enum names, packet events, connect keys). The full peer is exercised by `RakDotNet.Interop.Tests`.
 
 ## Usage
 

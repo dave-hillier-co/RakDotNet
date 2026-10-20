@@ -20,15 +20,17 @@
 On launch the peer prints one event before reading commands:
 
 ```json
-{"event":"ready","raknetVersion":"4.081","protocolVersion":6}
+{"event":"ready","raknetVersion":"4.081","protocolVersion":6,"security":false}
 ```
+
+`security` is true when the peer's RakNet was compiled with `LIBCAT_SECURITY=1` (see [Secure build](#secure-build)).
 
 ## Commands
 
 | `cmd` | Fields (defaults) | Reply fields | RakNet call |
 |---|---|---|---|
 | `startup` | `port` (0), `host` ("127.0.0.1"), `maxConnections` (8), `maxIncoming` (8) | `port` (actually bound), `guid` | `Startup`, `SetMaximumIncomingConnections` |
-| `connect` | `host`, `port`, `password` (hex, ""), `attempts` (12), `attemptIntervalMs` (500), `timeoutMs` (0) | `result` (`ConnectionAttemptResult` name, e.g. `CONNECTION_ATTEMPT_STARTED`) | `Connect` |
+| `connect` | `host`, `port`, `password` (hex, ""), `attempts` (12), `attemptIntervalMs` (500), `timeoutMs` (0), and the `PublicKey` fields: `publicKeyMode` (`INSECURE_CONNECTION`), `serverPublicKey`, `clientPublicKey`, `clientPrivateKey` (hex, absent) | `result` (`ConnectionAttemptResult` name, e.g. `CONNECTION_ATTEMPT_STARTED`) | `Connect` |
 | `send` | `target` (guid), `data` (hex, includes the message ID byte), `reliability` (`RELIABLE_ORDERED`), `priority` (`HIGH_PRIORITY`), `channel` (0), `broadcast` (false) | `receipt` (uint32) | `Send` |
 | `sendList` | `parts` (array of non-empty hex strings, sent joined as one message), then the fields of `send` except `data` | `receipt` (uint32) | `SendList` |
 | `close` | `target`, `notify` (true), `channel` (0) | | `CloseConnection` |
@@ -48,6 +50,29 @@ On launch the peer prints one event before reading commands:
 | `info` | | `guid`, `boundAddress`, and `connections`, an array of `{guid,address,mtu,averagePing,lastPing,lowestPing,externalAddress}` | `GetMyGUID`, `GetMyBoundAddress`, `GetConnectionList`, `GetGuidFromSystemAddress`, `GetMTUSize`, `GetAveragePing`, `GetLastPing`, `GetLowestPing`, `GetExternalID` |
 | `time` | | `time` (decimal string) | `RakNet::GetTime`, the clock `ID_TIMESTAMP` values are written in |
 | `shutdown` | `blockMs` (100) | | `Shutdown`, then the process exits 0 after the reply |
+
+Security commands, also in the plain build, where `generateKeys` fails and `initSecurity` reports `initialized: false`
+because RakNet has no secure connections there:
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `generateKeys` | | `publicKey` (64 bytes hex), `privateKey` (32 bytes hex) | `cat::EasyHandshake::GenerateServerKey`, as Samples/Encryption makes server and client keys |
+| `initSecurity` | `publicKey`, `privateKey` (hex), `requireClientKey` (false) | `initialized` (bool) | `InitializeSecurity`; only before `startup` |
+| `disableSecurity` | | | `DisableSecurity` |
+| `addSecurityException` | `ip` | | `AddToSecurityExceptionList` |
+| `removeSecurityException` | `ip` (absent clears the list) | | `RemoveFromSecurityExceptionList` |
+| `securityException` | `ip` | `listed` (bool) | `IsInSecurityExceptionList` |
+| `clientPublicKey` | `target` | `publicKey` (hex, or null when the system proved no identity) | `GetClientPublicKeyFromSystemAddress` |
+| `setIncomingPassword` | `data` (hex, "") | | `SetIncomingPassword` |
+| `incomingPassword` | | `data` (hex) | `GetIncomingPassword` |
+| `unban` | `ip` | | `RemoveFromBanList` |
+| `clearBans` | | | `ClearBanList` |
+| `isBanned` | `ip` | `banned` (bool) | `IsBanned` |
+
+`publicKeyMode` takes RakNet's `PublicKeyMode` names without the `PKM_` prefix: `INSECURE_CONNECTION`,
+`ACCEPT_ANY_PUBLIC_KEY`, `USE_KNOWN_PUBLIC_KEY` (needs `serverPublicKey`) and `USE_TWO_WAY_AUTHENTICATION` (needs
+`serverPublicKey`, `clientPublicKey` and `clientPrivateKey`). A key of the wrong length fails the command; a missing one
+is passed as a null pointer, for which `Connect` returns `SECURITY_INITIALIZATION_FAILED`.
 
 `stats` object: `messagesInResendBuffer`, `bytesInResendBuffer`, `packetlossLastSecond`, `packetlossTotal`, `isLimitedByCongestionControl`, `bpsLimitByCongestionControl`, `isLimitedByOutgoingBandwidthLimit`, `bpsLimitByOutgoingBandwidthLimit`, and `runningTotal` and `valueOverLastSecond` objects keyed by the `RNSPerSecondMetrics` names (`USER_MESSAGE_BYTES_PUSHED`, `USER_MESSAGE_BYTES_SENT`, `USER_MESSAGE_BYTES_RESENT`, `USER_MESSAGE_BYTES_RECEIVED_PROCESSED`, `USER_MESSAGE_BYTES_RECEIVED_IGNORED`, `ACTUAL_BYTES_SENT`, `ACTUAL_BYTES_RECEIVED`).
 
@@ -70,6 +95,33 @@ Other events:
 |---|---|---|
 | `ready` | `raknetVersion`, `protocolVersion` | process start |
 | `log` | `message` | optional diagnostics the driver may display |
+
+## Secure build
+
+`tools/interop-peer/build.sh` builds a second binary, `tools/interop-peer/build/interop-peer-secure`, from the same
+sources against RakNet compiled with `LIBCAT_SECURITY=1`, which builds `DependentExtensions/cat` through
+`Source/SecureHandshake.cpp`. The CMake option `LIBCAT_SECURITY` (on by default) controls it; configure with
+`-DLIBCAT_SECURITY=OFF` to build only the plain peer. Drivers find the secure binary at
+`RAKDOTNET_INTEROP_PEER_SECURE`, or at its build path when that is unset; scenarios that need secure connections skip
+when it is missing.
+
+A secure session generates keys, initialises the server before starting it, and connects with the server's key:
+
+```text
+> {"seq":1,"cmd":"generateKeys"}
+< {"seq":1,"ok":true,"publicKey":"e5ab...2931","privateKey":"6bec...e819"}
+> {"seq":2,"cmd":"initSecurity","publicKey":"e5ab...2931","privateKey":"6bec...e819","requireClientKey":false}
+< {"seq":2,"ok":true,"initialized":true}
+> {"seq":3,"cmd":"startup","port":0}
+< {"seq":3,"ok":true,"port":61234,"guid":"1520003954185392640"}
+```
+
+and, on the client:
+
+```text
+> {"seq":1,"cmd":"connect","host":"127.0.0.1","port":61234,"publicKeyMode":"USE_KNOWN_PUBLIC_KEY","serverPublicKey":"e5ab...2931"}
+< {"seq":1,"ok":true,"result":"CONNECTION_ATTEMPT_STARTED"}
+```
 
 ## Example
 

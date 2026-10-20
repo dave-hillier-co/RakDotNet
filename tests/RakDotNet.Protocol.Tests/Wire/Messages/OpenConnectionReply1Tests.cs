@@ -37,7 +37,7 @@ public class OpenConnectionReply1Tests
     [Fact]
     public void Reply_from_a_server_with_security_reports_the_flag_and_fails()
     {
-        // RakPeer.cpp:4752-4755: with hasSecurity the cookie and public key follow, which are not supported.
+        // RakPeer.cpp:4752-4755: with hasSecurity the cookie and public key follow, which SecureOpenConnectionReply1 reads.
         var bytes = Convert.FromHexString(ReplyHex);
         bytes[25] = 1;
 
@@ -47,7 +47,7 @@ public class OpenConnectionReply1Tests
     }
 
     [Fact]
-    public void Encoding_with_security_is_not_supported()
+    public void Encoding_with_security_is_left_to_SecureOpenConnectionReply1()
     {
         Assert.Throws<NotSupportedException>(() => Codec.Encode(new OpenConnectionReply1(1, 1492, HasSecurity: true)));
     }

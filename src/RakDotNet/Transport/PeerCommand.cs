@@ -1,5 +1,6 @@
 using System.Net;
 using System.Threading.Tasks.Sources;
+using RakDotNet.Protocol.Peer;
 using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Transport;
@@ -79,6 +80,9 @@ internal sealed class PendingConnect(SystemAddress address, IPEndPoint endPoint,
 
     /// <summary>Set by the I/O cycle once the core accepted the attempt.</summary>
     public bool Applied { get; set; }
+
+    /// <summary>The secure handshake Connect prepared, or null for an insecure attempt; handed to the core, which owns it from then on.</summary>
+    public ClientSecurity? Security { get; set; }
 
     public void Complete(ConnectResult result)
     {

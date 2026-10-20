@@ -7,10 +7,10 @@ namespace RakDotNet.Protocol.Wire.Messages;
 /// echoed from ID_OPEN_CONNECTION_REPLY_1, client GUID (RakPeer.cpp:4758-4853; parsed at 5203-5253).
 /// </summary>
 /// <remarks>
-/// RakNet security is not supported. When the server reported hasSecurity in reply 1, the client inserts a cookie,
-/// a challenge flag and optionally a challenge right after the magic (RakPeer.cpp:4760-4821). Nothing in this
-/// message says whether those fields are present (the server knows from its own configuration,
-/// RakPeer.cpp:5211), so this codec always reads and writes the layout without them.
+/// This is the request to a server without security. When the server reported hasSecurity in reply 1, the client
+/// inserts a cookie, a challenge flag and optionally a challenge right after the magic (RakPeer.cpp:4760-4821), the
+/// form <see cref="SecureOpenConnectionRequest2"/> reads and writes. Nothing in the message says which form it is
+/// (the server knows from its own configuration, RakPeer.cpp:5211).
 /// </remarks>
 public readonly record struct OpenConnectionRequest2(IPEndPoint ServerAddress, ushort MtuSize, ulong ClientGuid)
     : IWireMessage<OpenConnectionRequest2>

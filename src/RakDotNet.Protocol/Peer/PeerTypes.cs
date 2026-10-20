@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using RakDotNet.Protocol.Security;
 using RakDotNet.Protocol.Session;
 using RakDotNet.Protocol.Wire.Messages;
 
@@ -76,22 +78,101 @@ internal sealed record PeerOptions
 
     /// <summary>The receive limits every connection's reliability layer enforces.</summary>
     public SessionLimits SessionLimits { get; init; } = SessionLimits.Default;
+
+    /// <summary>InitializeSecurity (RakPeer.cpp:762-812); null is DisableSecurity.</summary>
+    public ServerSecurityOptions? Security { get; init; }
+
+    /// <summary>
+    /// The CSPRNG the secure handshake draws from, in place of cat's Fortuna: the server's ephemeral keys and cookie key.
+    /// Its output never reaches the wire in the clear.
+    /// </summary>
+    public ISecureRandom SecureRandom { get; init; } = SystemSecureRandom.Instance;
 }
 
 /// <summary>
-/// The client half of RakNet's PublicKey argument to Connect, as far as the offline handshake reads it
-/// (GenerateConnectionRequestChallenge, RakPeer.cpp:3193-3262). Connecting without one is PKM_INSECURE_CONNECTION.
+/// The arguments of InitializeSecurity (RakPeer.cpp:762-812): the server's key pair, which
+/// ServerEasyHandshake::Initialize must accept, and bRequireClientKey.
 /// </summary>
-internal sealed record ClientSecurity
+/// <param name="PublicKey">cat::EasyHandshake::PUBLIC_KEY_BYTES of public key.</param>
+/// <param name="PrivateKey">cat::EasyHandshake::PRIVATE_KEY_BYTES of private key; the core copies it.</param>
+/// <param name="RequireClientKey">Clients must prove an identity key (two-way authentication).</param>
+internal sealed record ServerSecurityOptions(ReadOnlyMemory<byte> PublicKey, ReadOnlyMemory<byte> PrivateKey, bool RequireClientKey);
+
+/// <summary>PublicKeyMode (RakPeerInterface.h) for a secure connection attempt; PKM_INSECURE_CONNECTION has no <see cref="ClientSecurity"/>.</summary>
+internal enum ClientKeyMode
 {
-    /// <summary>PKM_ACCEPT_ANY_PUBLIC_KEY.</summary>
-    public static ClientSecurity AcceptAnyPublicKey { get; } = new();
+    /// <summary>PKM_ACCEPT_ANY_PUBLIC_KEY: the server's key is taken from its first reply.</summary>
+    AcceptAnyPublicKey,
+
+    /// <summary>PKM_USE_KNOWN_PUBLIC_KEY.</summary>
+    UseKnownPublicKey,
+
+    /// <summary>PKM_USE_TWO_WAY_AUTHENTICATION: the known key, and the client proves an identity key of its own.</summary>
+    UseTwoWayAuthentication,
+}
+
+/// <summary>
+/// The security members of RequestedConnectionStruct (RakPeer.h:845-852) as GenerateConnectionRequestChallenge sets
+/// them up (RakPeer.cpp:3193-3262): the key mode, the server key the client expects, its ClientEasyHandshake and the
+/// challenge generated in advance. The connection attempt owns it; disposing it zeroes the handshake's keys.
+/// </summary>
+internal sealed class ClientSecurity : IDisposable
+{
+    private ClientSecurity(ClientKeyMode mode, ClientEasyHandshake handshake)
+    {
+        Mode = mode;
+        Handshake = handshake;
+    }
+
+    public ClientKeyMode Mode { get; }
+
+    /// <summary>remote_public_key: zero for <see cref="ClientKeyMode.AcceptAnyPublicKey"/> until the server's reply sets it.</summary>
+    public byte[] RemotePublicKey { get; } = new byte[EasyHandshake.PublicKeyBytes];
+
+    /// <summary>handshakeChallenge.</summary>
+    public byte[] Challenge { get; } = new byte[EasyHandshake.ChallengeBytes];
+
+    /// <summary>client_handshake.</summary>
+    public ClientEasyHandshake Handshake { get; }
 
     /// <summary>
-    /// remote_public_key: the server key the client expects (PKM_USE_KNOWN_PUBLIC_KEY, PKM_USE_TWO_WAY_AUTHENTICATION),
-    /// <see cref="SecureOpenConnectionReply1.PublicKeyLength"/> bytes, or empty to accept any key.
+    /// GenerateConnectionRequestChallenge for a secure mode: null where it returns false, which Connect reports as
+    /// SECURITY_INITIALIZATION_FAILED.
     /// </summary>
-    public ReadOnlyMemory<byte> ServerPublicKey { get; init; }
+    /// <param name="mode">The key mode.</param>
+    /// <param name="serverPublicKey">The server key for the known-key and two-way modes; ignored when accepting any key.</param>
+    /// <param name="identityPublicKey">The client's identity public key for two-way authentication.</param>
+    /// <param name="identityPrivateKey">The client's identity private key for two-way authentication.</param>
+    /// <param name="random">The CSPRNG the challenge and identity proof draw from.</param>
+    public static ClientSecurity? Create(ClientKeyMode mode, ReadOnlySpan<byte> serverPublicKey, ReadOnlySpan<byte> identityPublicKey,
+                                         ReadOnlySpan<byte> identityPrivateKey, ISecureRandom random)
+    {
+        ArgumentNullException.ThrowIfNull(random);
+        var security = new ClientSecurity(mode, new ClientEasyHandshake(random));
+        if (mode == ClientKeyMode.AcceptAnyPublicKey)
+            return security;
+        if (serverPublicKey.Length != EasyHandshake.PublicKeyBytes)
+        {
+            security.Dispose();
+            return null;
+        }
+        serverPublicKey.CopyTo(security.RemotePublicKey);
+        var handshake = security.Handshake;
+        if (!handshake.Initialize(serverPublicKey)
+            || (mode == ClientKeyMode.UseTwoWayAuthentication && !handshake.SetIdentity(identityPublicKey, identityPrivateKey))
+            || !handshake.GenerateChallenge(security.Challenge))
+        {
+            security.Dispose();
+            return null;
+        }
+        return security;
+    }
+
+    public void Dispose()
+    {
+        Handshake.Dispose();
+        CryptographicOperations.ZeroMemory(Challenge);
+    }
 }
 
 /// <summary>RemoteSystemStruct::ConnectMode, RakPeer.h:693.</summary>
@@ -154,6 +235,21 @@ internal sealed class RemoteSystem(int index, IPEndPoint address, ulong guid, Re
     public IPEndPoint MyExternalAddress { get; set; } = InternalAddressList.Unassigned;
 
     public IReadOnlyList<IPEndPoint> TheirInternalAddresses { get; set; } = [];
+
+    /// <summary>answer (RakPeer.h:686): the server's handshake answer, kept to resend for a duplicate request and to verify the client's identity.</summary>
+    public byte[]? Answer { get; set; }
+
+    /// <summary>
+    /// client_public_key (RakPeer.h:690): the identity key a client proved under two-way authentication, all zero when
+    /// none was (GetClientPublicKeyFromSystemAddress tests for a non-zero byte, RakPeer.cpp:2502-2510).
+    /// </summary>
+    public byte[] ClientPublicKey { get; } = new byte[EasyHandshake.PublicKeyBytes];
+
+    /// <summary>
+    /// The slot was taken out of the address lookup (DereferenceRemoteSystem, RakPeer.cpp:3887-3910) after a bad
+    /// challenge: it stays active and is found by GUID, but no longer by address, until it times out.
+    /// </summary>
+    public bool IsDereferenced { get; set; }
 }
 
 /// <summary>

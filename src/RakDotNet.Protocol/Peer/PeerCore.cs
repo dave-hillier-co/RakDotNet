@@ -1,6 +1,9 @@
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using RakDotNet.Protocol.Security;
 using RakDotNet.Protocol.Session;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Messages;
@@ -34,7 +37,15 @@ namespace RakDotNet.Protocol.Peer;
 /// The client discovers the MTU as RakPeer does: OPEN_CONNECTION_REQUEST_1 probes step down through
 /// <see cref="RakNetConstants.MtuSizes"/> as unanswered attempts accumulate, and the server answers with the probe's
 /// size capped at <see cref="RakNetConstants.MaximumMtuSize"/>. Every offline rejection RakPeer sends or reports is
-/// produced, including the security ones the offline handshake detects before any cryptography runs.
+/// produced.
+/// </para>
+/// <para>
+/// With <see cref="PeerOptions.Security"/> the core is a server with security, as after InitializeSecurity: its
+/// ID_OPEN_CONNECTION_REPLY_1 carries a cookie and its public key, it answers each client's challenge in
+/// ID_OPEN_CONNECTION_REPLY_2, checks the client's proof (and identity, with RequireClientKey) in
+/// ID_CONNECTION_REQUEST, and every datagram of the connection is protected by AuthenticatedEncryption. A client asks
+/// for a secure connection by passing a <see cref="ClientSecurity"/> to <see cref="Connect"/>. Both follow the
+/// LIBCAT_SECURITY paths of RakPeer.cpp, quirks included.
 /// </para>
 /// <para>
 /// Each connection keeps RakPeer's history of its last five pongs, from which the ping statistics and the clock
@@ -42,7 +53,7 @@ namespace RakDotNet.Protocol.Peer;
 /// application reads them (RakPeer.cpp:1548-1555), which is the layer above's job.
 /// </para>
 /// </remarks>
-internal sealed class PeerCore
+internal sealed class PeerCore : IDisposable
 {
     // How long a connection may stay half-open, RakPeer.cpp:5877-5881.
     private const long HandshakeTimeoutMs = 10_000;
@@ -63,6 +74,13 @@ internal sealed class PeerCore
     private readonly Queue<OutgoingDatagram> _datagrams = new();
     private readonly Queue<PeerEvent> _events = new();
     private readonly BanTable _bans = new();
+    private readonly SecurityExceptionList _securityExceptions = new();
+
+    // _server_handshake, _cookie_jar, my_public_key and _require_client_public_key (RakPeer.h:1009-1013).
+    private readonly ServerEasyHandshake? _serverHandshake;
+    private readonly CookieJar? _cookieJar;
+    private readonly byte[] _myPublicKey = new byte[EasyHandshake.PublicKeyBytes];
+    private readonly bool _requireClientPublicKey;
     private byte[] _offlinePingResponse = [];
     private long _defaultTimeoutMs;
     private long _unreliableTimeoutMs;
@@ -88,7 +106,45 @@ internal sealed class PeerCore
         OutgoingBandwidthLimit = options.OutgoingBandwidthLimit;
         AllowConnectionResponseIpMigration = options.AllowConnectionResponseIpMigration;
         IncomingPassword = options.IncomingPassword;
+        if (options.Security is { } security)
+        {
+            // InitializeSecurity, RakPeer.cpp:762-812.
+            ArgumentNullException.ThrowIfNull(options.SecureRandom);
+            _serverHandshake = new ServerEasyHandshake(options.SecureRandom);
+            if (!_serverHandshake.Initialize(security.PublicKey.Span, security.PrivateKey.Span))
+            {
+                _serverHandshake.Dispose();
+                throw new ArgumentException("ServerEasyHandshake::Initialize refused the key pair.", nameof(options));
+            }
+            _cookieJar = new CookieJar();
+            _serverHandshake.FillCookieJar(_cookieJar);
+            security.PublicKey.Span.CopyTo(_myPublicKey);
+            _requireClientPublicKey = security.RequireClientKey;
+        }
     }
+
+    /// <summary>
+    /// Zeroes the key material the core holds, as RakPeer's destructor deletes _server_handshake and
+    /// ClearRequestedConnectionList each client_handshake (RakPeer.cpp:332-336, 4435-4452).
+    /// </summary>
+    public void Dispose()
+    {
+        _serverHandshake?.Dispose();
+        foreach (var attempt in _attempts)
+            attempt.Security?.Dispose();
+        _attempts.Clear();
+    }
+
+    /// <summary>_using_security: InitializeSecurity succeeded, so incoming connections are secure.</summary>
+    public bool UsesSecurity => _serverHandshake is not null;
+
+    /// <summary>
+    /// The security exception list. Thread-safe, as RakPeer's is. Only the offline handshake consults it: a listed
+    /// address need not send a challenge and gets a reply without security (RakPeer.cpp:5211-5228), but
+    /// ParseConnectionRequestPacket still ignores its ID_CONNECTION_REQUEST, which carries no proof
+    /// (RakPeer.cpp:3460-3465), so in RakNet 4.081 such a client never completes the connection.
+    /// </summary>
+    public SecurityExceptionList SecurityExceptions => _securityExceptions;
 
     public ulong Guid => _options.Guid;
 
@@ -360,16 +416,20 @@ internal sealed class PeerCore
     /// <param name="intervalMs">timeBetweenSendConnectionAttemptsMS.</param>
     /// <param name="timeoutMs">The connection's timeout, or 0 for <see cref="PeerOptions.TimeoutMs"/>.</param>
     /// <param name="nowUs">The current time.</param>
-    /// <param name="security">The client's public key mode, or null for an insecure connection. The offline handshake
-    /// reports ID_OUR_SYSTEM_REQUIRES_SECURITY and ID_PUBLIC_KEY_MISMATCH from it; a secure handshake itself does not
-    /// start, so a secure server's reply carrying the expected key is ignored.</param>
-    /// <exception cref="ArgumentException">The expected server key is neither empty nor
-    /// <see cref="SecureOpenConnectionReply1.PublicKeyLength"/> bytes.</exception>
+    /// <param name="security">The secure handshake GenerateConnectionRequestChallenge prepared (RakPeer.cpp:3193-3262),
+    /// or null for PKM_INSECURE_CONNECTION. The attempt owns it from here, and it is disposed when the attempt ends or is
+    /// refused.</param>
     public ConnectionAttemptResult Connect(IPEndPoint remote, ReadOnlySpan<byte> password, int attemptCount, int intervalMs, long timeoutMs, long nowUs, ClientSecurity? security = null)
     {
         ArgumentNullException.ThrowIfNull(remote);
-        if (security is not null && !security.ServerPublicKey.IsEmpty && security.ServerPublicKey.Length != SecureOpenConnectionReply1.PublicKeyLength)
-            throw new ArgumentException($"A server public key is {SecureOpenConnectionReply1.PublicKeyLength} bytes.", nameof(security));
+        var result = StartAttempt(remote, password, attemptCount, intervalMs, timeoutMs, nowUs, security);
+        if (result != ConnectionAttemptResult.ConnectionAttemptStarted)
+            security?.Dispose();
+        return result;
+    }
+
+    private ConnectionAttemptResult StartAttempt(IPEndPoint remote, ReadOnlySpan<byte> password, int attemptCount, int intervalMs, long timeoutMs, long nowUs, ClientSecurity? security)
+    {
         if (remote.Port == 0)
             return ConnectionAttemptResult.InvalidParameter;
         if (password.Length > 255)
@@ -391,7 +451,7 @@ internal sealed class PeerCore
     {
         ArgumentNullException.ThrowIfNull(remote);
         if (FindAttempt(remote) is { } attempt)
-            _attempts.Remove(attempt);
+            RemoveAttempt(attempt);
     }
 
     /// <summary>
@@ -692,7 +752,7 @@ internal sealed class PeerCore
                 continue;
             if (attempt.RequestsMade == attempt.AttemptCount + 1)
             {
-                _attempts.Remove(attempt);
+                RemoveAttempt(attempt);
                 _events.Enqueue(new ConnectionAttemptFailed(attempt.Address, RakNetConstants.UnassignedGuid, new[] { (byte)MessageId.ConnectionAttemptFailed }));
                 continue;
             }
@@ -892,16 +952,90 @@ internal sealed class PeerCore
     // ParseConnectionRequestPacket, RakPeer.cpp:3447-3538.
     private void ParseConnectionRequest(RemoteSystem system, ReadOnlySpan<byte> data, long nowUs)
     {
-        if (!TryDecode<ConnectionRequest>(data, out var request))
+        ReadOnlyMemory<byte> password;
+        ulong requestTime;
+        if (_serverHandshake is null)
+        {
+            if (!TryDecodeWithoutSecurity(data, out var request))
+                return;
+            (password, requestTime) = (request.Password, request.RequestTime);
+        }
+        else if (!TryParseSecureRequest(system, data, nowUs, out password, out requestTime))
+        {
             return;
-        if (!request.Password.Span.SequenceEqual(IncomingPassword.Span))
+        }
+
+        if (!password.Span.SequenceEqual(IncomingPassword.Span))
         {
             SendImmediate(system, Encode(new InvalidPassword(Guid)), Reliability.Reliable, Priority.Immediate, 0, 0, nowUs);
             system.Mode = ConnectMode.DisconnectAsapSilently;
             return;
         }
         system.Mode = ConnectMode.HandlingConnectionRequest;
-        OnConnectionRequest(system, request.RequestTime, nowUs);
+        OnConnectionRequest(system, requestTime, nowUs);
+    }
+
+    private static bool TryDecodeWithoutSecurity(ReadOnlySpan<byte> data, [NotNullWhen(true)] out ConnectionRequest? request)
+    {
+        var reader = new BitStreamReader(data);
+        return ConnectionRequest.TryReadWithoutSecurity(ref reader, out request);
+    }
+
+    // RakPeer.cpp:3458-3517: the security half of ParseConnectionRequestPacket, read field by field as the C++ reads it,
+    // so a short read leaves the offset where it was. False when the request is ignored or refused.
+    private bool TryParseSecureRequest(RemoteSystem system, ReadOnlySpan<byte> data, long nowUs, out ReadOnlyMemory<byte> password, out ulong requestTime)
+    {
+        password = ReadOnlyMemory<byte>.Empty;
+        requestTime = 0;
+        var reader = new BitStreamReader(data);
+        if (!reader.TryReadByte(out _) || !reader.TryReadUInt64(out _) || !reader.TryReadUInt64(out requestTime) || !reader.TryReadByte(out var doSecurity))
+            return false;
+        // Ignore the message on bad state.
+        if (doSecurity != 1)
+            return false;
+
+        // Validate the client's proof of the key; a missing or wrong one closes the connection silently.
+        if (!reader.TryReadAlignedBytes(ConnectionRequest.ProofLength, out var proof)
+            || !system.Session.UsesSecurity
+            || !system.Session.Encryption.ValidateProof(proof))
+        {
+            system.Mode = ConnectMode.DisconnectAsapSilently;
+            return false;
+        }
+
+        Array.Clear(system.ClientPublicKey);
+        reader.TryReadByte(out var doClientKey);
+        if (doClientKey == 1)
+        {
+            Span<byte> identity = stackalloc byte[ConnectionRequest.IdentityLength];
+            if (reader.TryReadAlignedBytes(ConnectionRequest.IdentityLength, out var sent))
+                sent.CopyTo(identity);
+            // Only a server requiring client keys checks the identity; any other ignores it.
+            if (_requireClientPublicKey && !_serverHandshake!.VerifyInitiatorIdentity(system.Answer, identity, system.ClientPublicKey))
+            {
+                RefuseClientKey(system, 2, nowUs); // The client identity is invalid.
+                return false;
+            }
+        }
+        else if (_requireClientPublicKey)
+        {
+            RefuseClientKey(system, 1, nowUs); // The client identity is missing.
+            return false;
+        }
+
+        // RakPeer.cpp:3519-3520: the password is every byte after what was read.
+        var start = (reader.BitPosition + 7) >> 3;
+        password = data[start..].ToArray();
+        return true;
+    }
+
+    // RakPeer.cpp:3492-3497 and 3508-3513: ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY and a reason, sent reliably, and the
+    // connection closed silently once it has gone. Its ID is below ID_TIMESTAMP, so a client in the middle of connecting
+    // drops it (RakPeer.cpp:6226-6241) and learns of the failure only when its attempt times out.
+    private static void RefuseClientKey(RemoteSystem system, byte reason, long nowUs)
+    {
+        SendImmediate(system, [(byte)MessageId.RemoteSystemRequiresPublicKey, reason], Reliability.Reliable, Priority.Immediate, 0, 0, nowUs);
+        system.Mode = ConnectMode.DisconnectAsapSilently;
     }
 
     // OnConnectionRequest, RakPeer.cpp:3540-3554.
@@ -982,7 +1116,7 @@ internal sealed class PeerCore
                 OnRejection(from, data);
                 break;
             case MessageId.OpenConnectionRequest1:
-                OnOpenConnectionRequest1(from, data);
+                OnOpenConnectionRequest1(from, data, nowUs);
                 break;
             case MessageId.OpenConnectionRequest2:
                 OnOpenConnectionRequest2(from, data, nowUs);
@@ -1083,47 +1217,52 @@ internal sealed class PeerCore
             var attempt = FindAttempt(from);
             if (attempt is null)
                 return;
-            // RakPeer.cpp:4788-4801. PKM_ACCEPT_ANY_PUBLIC_KEY takes the server's key as the expected one; with
-            // PKM_INSECURE_CONNECTION remote_public_key is never set (RakPeer.cpp:3197-3205), so no key matches it.
-            var expected = attempt.Security switch
+            var serverKey = secure.ServerPublicKey.Span;
+            var security = attempt.Security;
+            // RakPeer.cpp:4775-4786: PKM_ACCEPT_ANY_PUBLIC_KEY takes the key it is sent and challenges it. A key cat
+            // refuses ends the reply there (the C++ returns still holding the queue mutex).
+            if (security is { Mode: ClientKeyMode.AcceptAnyPublicKey })
             {
-                null => ReadOnlySpan<byte>.Empty,
-                { ServerPublicKey.IsEmpty: true } => secure.ServerPublicKey.Span,
-                _ => attempt.Security.ServerPublicKey.Span,
-            };
-            if (!expected.SequenceEqual(secure.ServerPublicKey.Span))
+                serverKey.CopyTo(security.RemotePublicKey);
+                if (!security.Handshake.Initialize(serverKey) || !security.Handshake.GenerateChallenge(security.Challenge))
+                    return;
+            }
+            // RakPeer.cpp:4788-4801. With PKM_INSECURE_CONNECTION remote_public_key is never set (RakPeer.cpp:3197-3205),
+            // so no key matches it.
+            if (security is null || !CryptographicOperations.FixedTimeEquals(serverKey, security.RemotePublicKey))
+            {
                 _events.Enqueue(new ConnectionAttemptFailed(from, secure.ServerGuid, new[] { (byte)MessageId.PublicKeyMismatch }));
-            // Otherwise the client would answer with its handshake challenge, which needs the cat key agreement
-            // (RakPeer.cpp:4803-4818); without it the reply is ignored and the attempt runs out.
+                return;
+            }
+            // RakPeer.cpp:4803-4817: the cookie, then the challenge.
+            SendOffline(from, new SecureOpenConnectionRequest2(secure.Cookie, security.Challenge, from, secure.MtuSize, Guid));
         }
     }
 
     // RakPeer.cpp:4871-5074: the offline handshake is done, so start the connected one.
     private void OnOpenConnectionReply2(IPEndPoint from, ReadOnlySpan<byte> data, long nowUs)
     {
-        if (!TryDecode<OpenConnectionReply2>(data, out var reply))
-        {
-            // RakPeer.cpp:4914-4930: the server requires security and we passed no public key. The packet is the ID and
-            // 0 (the server public key is missing), and the request stays queued.
-            if (reply.RequiresSecurity && FindAttempt(from) is { Security: null })
-                _events.Enqueue(new ConnectionAttemptFailed(from, reply.ServerGuid, new byte[] { (byte)MessageId.RemoteSystemRequiresPublicKey, 0 }));
+        // A reply requiring security whose answer is cut short is read on, as the C++ reads it into an unchanged buffer
+        // (RakPeer.cpp:4894-4898); ProcessAnswer then refuses it.
+        if (!TryDecode<OpenConnectionReply2>(data, out var reply) && !reply.RequiresSecurity)
             return;
-        }
         var attempt = FindAttempt(from);
         if (attempt is null)
             return;
-        // RakPeer.cpp:4966-4992: a request made with a ClientSecurity always processes the server's handshake answer,
-        // which an insecure reply does not carry, and returns before ID_CONNECTION_REQUEST with the request still
-        // queued. Otherwise a forged insecure reply would downgrade a secure connect. (The C++ assigns the slot before
-        // reading the uninitialised answer; here nothing is assigned for a reply that can never complete.)
-        if (attempt.Security is not null)
+        var security = attempt.Security;
+        // RakPeer.cpp:4914-4930: the server requires security and we passed no public key. The packet is the ID and
+        // 0 (the server public key is missing), and the request stays queued.
+        if (reply.RequiresSecurity && security is null)
+        {
+            _events.Enqueue(new ConnectionAttemptFailed(from, reply.ServerGuid, new byte[] { (byte)MessageId.RemoteSystemRequiresPublicKey, 0 }));
             return;
+        }
 
         // A cross connection may already have made this system (RakPeer.cpp:4941-4954).
         var system = FindActive(from);
         var connectedRecently = false;
         if (system is null)
-            system = Assign(from, ConnectMode.UnverifiedSender, reply.MtuSize, reply.ServerGuid, nowUs, out connectedRecently);
+            system = Assign(from, ConnectMode.UnverifiedSender, reply.MtuSize, reply.ServerGuid, nowUs, out connectedRecently, reply.RequiresSecurity);
         if (connectedRecently)
         {
             // RakPeer.cpp:4958 skips the request and the failure alike; the attempt is dropped without an event.
@@ -1134,14 +1273,43 @@ internal sealed class PeerCore
         }
         else
         {
+            // RakPeer.cpp:4964-4998: a request made with a client handshake always processes the server's answer, which
+            // keys this system's encryption. An invalid or missing answer (an insecure reply has none) returns before
+            // ID_CONNECTION_REQUEST, with the slot assigned and the request still queued, so a forged insecure reply
+            // cannot downgrade a secure connect.
+            byte[]? identity = null;
+            if (security is not null)
+            {
+                var answer = reply.Answer.Span;
+                bool answered;
+                if (security.Mode == ClientKeyMode.UseTwoWayAuthentication)
+                {
+                    identity = new byte[EasyHandshake.IdentityBytes];
+                    answered = security.Handshake.ProcessAnswerWithIdentity(answer, identity, system.Session.Encryption);
+                }
+                else
+                {
+                    answered = security.Handshake.ProcessAnswer(answer, system.Session.Encryption);
+                }
+                if (!answered)
+                    return;
+            }
+
             system.WeInitiatedTheConnection = true;
             system.Mode = ConnectMode.RequestedConnection;
             if (attempt.TimeoutMs != 0)
                 system.Session.TimeoutMs = attempt.TimeoutMs;
             var request = new ConnectionRequest(Guid, (ulong)(nowUs / 1000), attempt.Password);
-            SendImmediate(system, Encode(request), Reliability.Reliable, Priority.Immediate, 0, 0, nowUs);
+            if (reply.RequiresSecurity)
+            {
+                // RakPeer.cpp:5012-5025: the proof of the shared key, and the identity under two-way authentication.
+                var proof = new byte[ConnectionRequest.ProofLength];
+                system.Session.Encryption.GenerateProof(proof);
+                request = request with { DoSecurity = true, Proof = proof, Identity = identity ?? ReadOnlyMemory<byte>.Empty };
+            }
+            SendImmediate(system, Encode(request, 1024), Reliability.Reliable, Priority.Immediate, 0, 0, nowUs);
         }
-        _attempts.Remove(attempt);
+        RemoveAttempt(attempt);
     }
 
     // RakPeer.cpp:5075-5126: the server turned the attempt down.
@@ -1153,12 +1321,12 @@ internal sealed class PeerCore
         var attempt = FindAttempt(from);
         if (attempt is null)
             return;
-        _attempts.Remove(attempt);
+        RemoveAttempt(attempt);
         _events.Enqueue(new ConnectionAttemptFailed(from, guid, new[] { data[0] }));
     }
 
     // RakPeer.cpp:5127-5197: answer an MTU probe.
-    private void OnOpenConnectionRequest1(IPEndPoint from, ReadOnlySpan<byte> data)
+    private void OnOpenConnectionRequest1(IPEndPoint from, ReadOnlySpan<byte> data, long nowUs)
     {
         if (data.Length <= 1 + OfflineMagic.Length)
             return;
@@ -1170,27 +1338,73 @@ internal sealed class PeerCore
         }
         // Lower the MTU if it exceeds our own limit (RakPeer.cpp:5182-5186).
         var mtu = Math.Min(data.Length + RakNetConstants.UdpHeaderSize, RakNetConstants.MaximumMtuSize);
+        if (_cookieJar is not null)
+        {
+            // RakPeer.cpp:5167-5177: a cookie for the client's address and this server's public key.
+            var cookie = _cookieJar.Generate(CookieAddress(from, stackalloc byte[CookieAddressBytes]), CookieClock(nowUs));
+            SendOffline(from, new SecureOpenConnectionReply1(Guid, cookie, _myPublicKey, (ushort)mtu));
+            return;
+        }
         SendOffline(from, new OpenConnectionReply1(Guid, (ushort)mtu));
     }
+
+    // The cookie hashes the client's address: RakNet hashes the raw sockaddr (RakPeer.cpp:5172, 5220), and a cookie is
+    // only ever checked by the server that issued it, so any stable encoding of the address and port serves.
+    private const int CookieAddressBytes = 16 + sizeof(ushort) + sizeof(uint);
+
+    private static ReadOnlySpan<byte> CookieAddress(IPEndPoint address, Span<byte> buffer)
+    {
+        address.Address.TryWriteBytes(buffer, out var written);
+        BinaryPrimitives.WriteUInt16LittleEndian(buffer[written..], (ushort)address.Port);
+        written += sizeof(ushort);
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(buffer[written..], (uint)address.Address.ScopeId);
+            written += sizeof(uint);
+        }
+        return buffer[..written];
+    }
+
+    // Clock::msec_fast, the millisecond clock cat's CookieJar reads.
+    private static uint CookieClock(long nowUs) => unchecked((uint)(nowUs / 1000));
 
     // RakPeer.cpp:5198-5418: accept or refuse the connection.
     private void OnOpenConnectionRequest2(IPEndPoint from, ReadOnlySpan<byte> data, long nowUs)
     {
-        if (!TryDecode<OpenConnectionRequest2>(data, out var request))
-            return;
+        ushort mtuSize;
+        ulong clientGuid;
+        var requiresSecurity = false;
+        var challenge = ReadOnlyMemory<byte>.Empty;
+        if (_cookieJar is null)
+        {
+            if (!TryDecode<OpenConnectionRequest2>(data, out var request))
+                return;
+            (mtuSize, clientGuid) = (request.MtuSize, request.ClientGuid);
+        }
+        else
+        {
+            // RakPeer.cpp:5208-5248: the cookie must be this server's for this address, and a client outside the
+            // exception list must have sent a challenge; otherwise the request is ignored.
+            requiresSecurity = !_securityExceptions.Contains(from.Address.ToString());
+            if (!TryDecode<SecureOpenConnectionRequest2>(data, out var request)
+                || !_cookieJar.Verify(CookieAddress(from, stackalloc byte[CookieAddressBytes]), request.Cookie, CookieClock(nowUs)))
+                return;
+            if (requiresSecurity && request.Challenge.IsEmpty)
+                return;
+            (mtuSize, clientGuid, challenge) = (request.MtuSize, request.ClientGuid, request.Challenge);
+        }
 
         var fromAddress = FindActive(from);
-        var fromGuid = FindActive(request.ClientGuid);
+        var fromGuid = FindActive(clientGuid);
         var addressInUse = fromAddress is not null;
         var guidInUse = fromGuid is not null;
-        var reply = new OpenConnectionReply2(Guid, from, request.MtuSize);
 
         if (addressInUse && guidInUse)
         {
             if (ReferenceEquals(fromAddress, fromGuid) && fromAddress!.Mode == ConnectMode.UnverifiedSender)
             {
-                // A duplicate request from packet loss: send the same answer (outcome 1).
-                SendOffline(from, reply);
+                // A duplicate request from packet loss: send the same answer (outcome 1, RakPeer.cpp:5307-5332).
+                SendOffline(from, Reply2(from, mtuSize, requiresSecurity, fromAddress.Answer));
                 return;
             }
             SendOffline(from, new AlreadyConnected(Guid)); // Outcome 2.
@@ -1209,15 +1423,37 @@ internal sealed class PeerCore
             return;
         }
 
-        Assign(from, ConnectMode.UnverifiedSender, request.MtuSize, request.ClientGuid, nowUs, out var connectedRecently);
+        var system = Assign(from, ConnectMode.UnverifiedSender, mtuSize, clientGuid, nowUs, out var connectedRecently, requiresSecurity);
         if (connectedRecently)
         {
             SendOffline(from, new IpRecentlyConnected(Guid)); // RakPeer.cpp:5366-5384.
             return;
         }
-        // The answer goes out even when no slot is free (RakPeer.cpp:5366-5417).
-        SendOffline(from, reply);
+        byte[]? answer = null;
+        if (requiresSecurity && system is not null)
+        {
+            // RakPeer.cpp:5387-5405: answer the challenge, which keys the connection's encryption. A bad challenge takes
+            // the system out of the address lookup and gets no reply.
+            answer = new byte[OpenConnectionReply2.AnswerLength];
+            if (!_serverHandshake!.ProcessChallenge(challenge.Span, answer, system.Session.Encryption))
+            {
+                system.IsDereferenced = true;
+                SlotsVersion++;
+                return;
+            }
+            system.Answer = answer;
+        }
+        // The answer goes out even when no slot is free (RakPeer.cpp:5366-5417); with security the C++ would then
+        // dereference a null slot, so here the reply is not sent.
+        if (requiresSecurity && system is null)
+            return;
+        SendOffline(from, Reply2(from, mtuSize, requiresSecurity, answer));
     }
+
+    private OpenConnectionReply2 Reply2(IPEndPoint client, ushort mtu, bool requiresSecurity, byte[]? answer) =>
+        requiresSecurity
+            ? new OpenConnectionReply2(Guid, client, mtu, true, answer ?? new byte[OpenConnectionReply2.AnswerLength])
+            : new OpenConnectionReply2(Guid, client, mtu);
 
     // AllowIncomingConnections and GetNumberOfRemoteInitiatedConnections, RakPeer.cpp:4038-4041, 3573-3592.
     private bool AllowIncomingConnections() =>
@@ -1225,7 +1461,7 @@ internal sealed class PeerCore
 
     // AssignSystemAddressToRemoteSystemList, RakPeer.cpp:3595-3770. Returns null when no slot is free, or when the
     // frequency limit refuses the address, which sets connectedRecently.
-    private RemoteSystem? Assign(IPEndPoint address, ConnectMode mode, int incomingMtu, ulong guid, long nowUs, out bool connectedRecently)
+    private RemoteSystem? Assign(IPEndPoint address, ConnectMode mode, int incomingMtu, ulong guid, long nowUs, out bool connectedRecently, bool useSecurity = false)
     {
         var nowMs = nowUs / 1000;
         connectedRecently = LimitIpConnectionFrequency
@@ -1243,7 +1479,7 @@ internal sealed class PeerCore
         // the result is at most MAXIMUM_MTU_SIZE (RakPeer.cpp:3644); larger values are clamped here.
         var mtu = Math.Clamp(incomingMtu, DefaultMtu, RakNetConstants.MaximumMtuSize);
         // RakPeer.cpp:3645-3648.
-        var session = new ReliabilityLayer(mtu, nowUs, _options.SessionLimits)
+        var session = new ReliabilityLayer(mtu, nowUs, _options.SessionLimits, useSecurity)
         {
             TimeoutMs = _defaultTimeoutMs,
             UnreliableTimeoutMs = _unreliableTimeoutMs,
@@ -1308,7 +1544,8 @@ internal sealed class PeerCore
             },
         };
 
-    private RemoteSystem? FindActive(IPEndPoint address) => _active.Find(s => s.Address.Equals(address));
+    // GetRemoteSystemFromSystemAddress(address, true, true): the address lookup, which a dereferenced system has left.
+    private RemoteSystem? FindActive(IPEndPoint address) => _active.Find(s => !s.IsDereferenced && s.Address.Equals(address));
 
     // GetRemoteSystemFromSystemAddress(address, false, false), RakPeer.cpp:3407-3424: an active slot, else the first
     // slot the address used before.
@@ -1322,6 +1559,13 @@ internal sealed class PeerCore
         guid == RakNetConstants.UnassignedGuid ? null : _active.Find(s => s.Guid == guid);
 
     private ConnectionAttempt? FindAttempt(IPEndPoint address) => _attempts.Find(a => a.Address.Equals(address));
+
+    // Every way out of requestedConnectionQueue deletes the attempt's client_handshake.
+    private void RemoveAttempt(ConnectionAttempt attempt)
+    {
+        _attempts.Remove(attempt);
+        attempt.Security?.Dispose();
+    }
 
     private void SendOffline<T>(IPEndPoint to, T message, int capacity = 512)
         where T : IWireMessage<T> =>
