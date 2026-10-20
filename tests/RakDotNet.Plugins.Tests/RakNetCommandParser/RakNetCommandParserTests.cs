@@ -145,6 +145,72 @@ public sealed class RakNetCommandParserTests : IDisposable
         Assert.Equal(IPAddress.Loopback, started.Sockets[0].LocalAddress.ToIPEndPoint().Address);
     }
 
+    [Theory]
+    [InlineData("CloseConnection x 1 0", "Successfully called CloseConnection.\r\n")]
+    [InlineData("CloseConnection 1.2.3.4|5 1 99", "Successfully called CloseConnection.\r\n")]
+    [InlineData("Connect 127.0.0.1 0 x 0", "Connect returned false.\r\n")]
+    [InlineData("Connect 127.0.0.1 1 x 0", "Connect returned true.\r\n")]
+    [InlineData("SetTimeoutTime -1 x", "Successfully called SetTimeoutTime.\r\n")]
+    [InlineData("AddToBanList 1.2.3.4 -1", "Successfully called AddToBanList.\r\n")]
+    [InlineData("SetOfflinePingResponse x 4000", "Successfully called SetOfflinePingResponse.\r\n")]
+    public void Arguments_the_API_refuses_get_RakNet_replies(string line, string reply)
+    {
+        Assert.Equal(reply, Run(line));
+    }
+
+    [Fact]
+    public void Advertised_data_RakNet_only_asserts_on_is_reported_as_called()
+    {
+        var data = new string('a', 1900);
+
+        Assert.Equal("Successfully called AdvertiseSystem.\r\n", Run($"AdvertiseSystem 127.0.0.1 1 {data} 1900"));
+    }
+
+    [Fact]
+    public void A_host_name_the_resolver_refuses_is_not_pinged_or_advertised_to()
+    {
+        var host = new string('a', 1900);
+
+        Assert.Equal("Successfully called Ping2.\r\n", Run($"Ping2 {host} 1 0"));
+        Assert.Equal("Successfully called AdvertiseSystem.\r\n", Run($"AdvertiseSystem {host} 1 x 1"));
+        Assert.Equal("Connect returned false.\r\n", Run($"Connect {host} 1 x 1"));
+    }
+
+    [Fact]
+    public void No_command_and_parameters_make_the_console_update_throw()
+    {
+        var long_ = new string('a', 1900);
+        string[][] parameterSets =
+        [
+            ["x", "x", "x", "x"],
+            ["-1", "-1", "-1", "-1"],
+            ["4294967295", "4294967295", "4294967295", "4294967295"],
+            ["127.0.0.1", "0", long_, "1900"],
+            ["127.0.0.1|0", "65536", "", "-5"],
+            [long_, "1", long_, "1900"],
+        ];
+        // Disconnect ends the peer, so it runs last.
+        var commands = Commands().Where(c => c != "Disconnect").Append("Disconnect");
+
+        foreach (var command in commands)
+        {
+            foreach (var parameters in parameterSets)
+            {
+                var line = $"{command} {string.Join(' ', parameters)}";
+                var exception = Record.Exception(() => Run(line));
+                Assert.True(exception is null, $"{line[..Math.Min(line.Length, 60)]}: {exception}");
+            }
+        }
+    }
+
+    private static IEnumerable<string> Commands()
+    {
+        var help = new RecordingTransport();
+        new Plugins.RakNetCommandParser { Peer = null }.SendCommandList(help, Alice);
+        return help.TextSentTo(Alice).Split(["COMMAND LIST:\r\n", ", ", "\r\n"], StringSplitOptions.RemoveEmptyEntries)
+                   .Where(c => !c.Contains(' ', StringComparison.Ordinal));
+    }
+
     public void Dispose() => _mesh.Dispose();
 
     private string Run(string line)

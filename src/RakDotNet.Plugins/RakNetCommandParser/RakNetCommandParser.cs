@@ -29,7 +29,10 @@ namespace RakDotNet.Plugins;
 /// asking before the result's, as ReturnResult(SystemAddress) does. <c>InitializeSecurity</c> returns false, as RakNet's
 /// does with no keys and on a running peer, because server security is fixed when a peer starts here (decision 11.14),
 /// and <c>DisableSecurity</c> does nothing for the same reason. <c>GetIncomingPassword</c> prints the password up to
-/// its first zero byte, where RakNet prints an unterminated buffer.
+/// its first zero byte, where RakNet prints an unterminated buffer. Arguments the C# API refuses with an
+/// <see cref="ArgumentException"/> get RakNet's reply for them, so no line a console user types escapes
+/// <see cref="ConsoleServer.Update"/>: <c>Connect</c> returns false, as RakNet's INVALID_PARAMETER does, and a command
+/// that changes the peer does nothing and reports the call.
 /// </para>
 /// </remarks>
 public class RakNetCommandParser : CommandParser
@@ -297,8 +300,20 @@ public class RakNetCommandParser : CommandParser
     {
         if (!peer.IsActive || Resolve(host) is not { } address)
             return false;
-        return peer.Connect(new SystemAddress(address, port), new ConnectOptions { Password = Bytes(password, passwordLength, 255) })
-               == ConnectAttemptResult.Started;
+        try
+        {
+            return peer.Connect(new SystemAddress(address, port), new ConnectOptions { Password = Bytes(password, passwordLength, 255) })
+                   == ConnectAttemptResult.Started;
+        }
+        catch (ArgumentException)
+        {
+            // Port 0 and the other arguments RakPeer::Connect answers with INVALID_PARAMETER (RakPeer.cpp:993-1001).
+            return false;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
     }
 
     // RakNetCommandParser.cpp:138-162: up to 32 systems.
@@ -370,6 +385,11 @@ public class RakNetCommandParser : CommandParser
         {
             return null;
         }
+        catch (ArgumentException)
+        {
+            // A name the resolver refuses, such as one over 255 characters, resolves to nothing.
+            return null;
+        }
     }
 
     // passwordData and its length: RakNet copies the length given from the parameter's characters and its NUL; what lies
@@ -391,6 +411,12 @@ public class RakNetCommandParser : CommandParser
         catch (ObjectDisposedException)
         {
             // The peer has shut down; RakNet's setters on an inactive peer change nothing that matters.
+        }
+        catch (ArgumentException)
+        {
+            // Arguments the API refuses, where RakNet does nothing or only asserts and the parser still reports the call:
+            // CloseConnection(UNASSIGNED_SYSTEM_ADDRESS), AdvertiseSystem with 399 bytes or more, an ordering channel of
+            // 32 or more. A console user's line never escapes ConsoleServer.Update.
         }
     }
 
