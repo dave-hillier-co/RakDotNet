@@ -30,9 +30,23 @@ public struct EncapsulatedMessageReader
     public bool TryReadNext([NotNullWhen(true)] out EncapsulatedMessage? message)
     {
         message = null;
+        if (!TryReadNext(out var header, out var payload))
+            return false;
+        message = header.ToMessage(payload);
+        return true;
+    }
+
+    /// <summary>
+    /// Reads the next message into its header fields and a slice of the body, without making an
+    /// <see cref="EncapsulatedMessage"/>.
+    /// </summary>
+    internal bool TryReadNext(out EncapsulatedMessage.Header header, out ReadOnlyMemory<byte> payload)
+    {
+        header = default;
+        payload = default;
         if (IsMalformed || (_body.Length - _offset) * 8 < EncapsulatedMessage.MinimumBitsToAttempt)
             return false;
-        if (!EncapsulatedMessage.TryRead(_body[_offset..], out message, out var bytesRead))
+        if (!EncapsulatedMessage.TryRead(_body[_offset..], out header, out payload, out var bytesRead))
         {
             IsMalformed = true;
             return false;

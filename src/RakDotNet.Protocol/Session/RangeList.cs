@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Datagrams;
 
@@ -75,8 +76,7 @@ internal sealed class RangeList
     /// </summary>
     public int Write(ref BitStreamWriter writer, int maxBits)
     {
-        var list = new AckRangeList(_ranges);
-        var written = list.Write(ref writer, maxBits);
+        var written = AckRangeList.Write(ref writer, CollectionsMarshal.AsSpan(_ranges), maxBits);
         _ranges.RemoveRange(0, written);
         return written;
     }

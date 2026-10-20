@@ -30,6 +30,7 @@
 - `src/RakDotNet.Compatibility/`: layer 4 `RakPeerInterface`-shaped facade. Public; no plugin depends on it.
 - `src/RakDotNet.Plugins/`: layer 4 ports of RakNet's plugins, one folder per plugin, namespace `RakDotNet.Plugins`. Public; references `RakDotNet` only.
 - `samples/`: console projects showing the public API in use, one per usage pattern, built with the solution. They reference only public assemblies.
+- `benchmarks/`: the BenchmarkDotNet suite and the loopback comparison with native RakNet ([performance.md](performance.md)).
 - Test folders mirror source folders.
 
 ## Shared types

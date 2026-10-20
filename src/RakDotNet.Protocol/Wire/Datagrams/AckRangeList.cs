@@ -123,11 +123,17 @@ public sealed record AckRangeList
     /// <see cref="DatagramLimits.MaxPayloadBits"/> of the negotiated MTU (ReliabilityLayer.cpp:1823, 3618, 3649), which
     /// leaves out the 28 byte IP/UDP header and the 9 byte header budget; at MTU 1492 that fits 289 single ranges.
     /// </remarks>
-    public int Write(ref BitStreamWriter writer, int maxBits)
+    public int Write(ref BitStreamWriter writer, int maxBits) => Write(ref writer, _ranges, maxBits);
+
+    /// <summary>
+    /// <see cref="Write(ref BitStreamWriter, int)"/> for ranges held elsewhere, without making an
+    /// <see cref="AckRangeList"/>.
+    /// </summary>
+    internal static int Write(ref BitStreamWriter writer, ReadOnlySpan<AckRange> ranges, int maxBits)
     {
         var count = 0;
         var bitsWritten = 0;
-        foreach (var range in _ranges)
+        foreach (var range in ranges)
         {
             if (16 + bitsWritten + CppUInt24Bits * 2 + 1 > maxBits)
                 break;
@@ -136,19 +142,20 @@ public sealed record AckRangeList
                 bitsWritten += CppUInt24Bits;
             count++;
         }
-        WriteRanges(ref writer, count);
+        WriteRanges(ref writer, ranges[..count]);
         return count;
     }
 
-    private void WriteRanges(ref BitStreamWriter writer, int count)
+    private void WriteRanges(ref BitStreamWriter writer, int count) => WriteRanges(ref writer, _ranges.AsSpan(0, count));
+
+    private static void WriteRanges(ref BitStreamWriter writer, ReadOnlySpan<AckRange> ranges)
     {
-        if (count > ushort.MaxValue)
-            throw new InvalidOperationException($"A range list holds at most {ushort.MaxValue} ranges, not {count}.");
+        if (ranges.Length > ushort.MaxValue)
+            throw new InvalidOperationException($"A range list holds at most {ushort.MaxValue} ranges, not {ranges.Length}.");
         writer.AlignToByte(); // DS_RangeList.h:94
-        writer.WriteUInt16((ushort)count);
-        for (var i = 0; i < count; i++)
+        writer.WriteUInt16((ushort)ranges.Length);
+        foreach (var range in ranges)
         {
-            var range = _ranges[i];
             writer.WriteByte(range.IsSingle ? (byte)1 : (byte)0);
             writer.WriteUInt24(range.Min);
             if (!range.IsSingle)
@@ -163,13 +170,28 @@ public sealed record AckRangeList
     public static bool TryRead(ref BitStreamReader reader, out AckRangeList value)
     {
         value = Empty;
+        var ranges = new List<AckRange>();
+        if (!TryRead(ref reader, ranges))
+            return false;
+        if (ranges.Count > 0)
+            value = new AckRangeList(ranges.ToArray());
+        return true;
+    }
+
+    /// <summary>
+    /// <see cref="TryRead(ref BitStreamReader, out AckRangeList)"/> into a list the caller reuses, without making an
+    /// <see cref="AckRangeList"/>. <paramref name="ranges"/> is cleared first, and holds the ranges read before any
+    /// failure.
+    /// </summary>
+    internal static bool TryRead(ref BitStreamReader reader, List<AckRange> ranges)
+    {
+        ranges.Clear();
         reader.AlignToByte(); // DS_RangeList.h:119
         if (!reader.TryReadUInt16(out var count))
             return false;
         if (count > MaxRangesPerDatagram || count * MinRangeBytes * 8 > reader.BitsRemaining)
             return false;
 
-        var ranges = new AckRange[count];
         for (var i = 0; i < count; i++)
         {
             if (!reader.TryReadByte(out var minEqualsMax) || !reader.TryReadUInt24(out var min))
@@ -180,9 +202,8 @@ public sealed record AckRangeList
                 if (!reader.TryReadUInt24(out max) || max.Value < min.Value)
                     return false;
             }
-            ranges[i] = new AckRange(min, max);
+            ranges.Add(new AckRange(min, max));
         }
-        value = count == 0 ? Empty : new AckRangeList(ranges);
         return true;
     }
 

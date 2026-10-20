@@ -130,7 +130,9 @@ public sealed partial class RakPeer
         _wake = new ManualResetEventSlim(false);
         foreach (var transport in _transports)
             transport.SetReadySignal(Wake);
-        _updateTimer = _time.CreateTimer(static state => ((RakPeer)state!).Wake(), this, UpdateInterval, UpdateInterval);
+        // Re-armed by every cycle, so a cycle follows the previous one by UpdateInterval unless something wakes the loop
+        // sooner: RakNet's quitAndDataEvents.WaitOnEvent(10) after each RunUpdateCycle (RakPeer.cpp:6357-6358).
+        _updateTimer = _time.CreateTimer(static state => ((RakPeer)state!).Wake(), this, UpdateInterval, Timeout.InfiniteTimeSpan);
         _loop = new Thread(LoopMain) { IsBackground = true, Name = "RakDotNet I/O" };
         try
         {
@@ -206,6 +208,11 @@ public sealed partial class RakPeer
                 return;
             var nowUs = NowUs;
             DrainCommands(nowUs);
+            // A deliberate departure from RunUpdateCycle, which reads timeNS once and uses it both for SendImmediate of
+            // the buffered commands and for reliabilityLayer.Update (RakPeer.cpp:5583-5871). Reading again means that
+            // applying a burst of sends cannot leave the datagrams framed below with a stale send time, which would
+            // inflate their RTT samples and start their retransmission timers early. The wire is unchanged.
+            nowUs = NowUs;
             if (_receivePaused && _queue.Count < _eventCapacity / 2)
                 _receivePaused = false;
             ReceiveDatagrams(nowUs);
@@ -214,6 +221,9 @@ public sealed partial class RakPeer
             ProcessCoreEvents(nowUs);
             PollConnections(nowUs);
             _activeSystemCount = _core.ActiveSystemCount;
+            // Before the observers, so the next timed cycle is already set when they learn this one ran. Stop sets
+            // Stopped under this lock before it disposes the timer, so the timer is not disposed here.
+            _updateTimer?.Change(UpdateInterval, Timeout.InfiniteTimeSpan);
             foreach (var observer in _lowLevel.Observers.Current)
                 observer.OnUpdateCycle();
             foreach (var observer in _plugins.Observers)
@@ -516,22 +526,22 @@ public sealed partial class RakPeer
             SendDatagram(delayed.Data, delayed.Socket, delayed.Remote, ttl: 0);
             NetworkSimulator.Release(delayed);
         }
-        while (_core.TryDequeueDatagram(out var datagram))
+        while (_core.TryDequeueDatagram(out var endPoint, out var datagram, out var doNotFragment))
         {
-            SystemAddress remote = datagram.Remote;
+            SystemAddress remote = endPoint;
             var socket = SocketOf(remote);
-            if (!_simulator.PassesNow(datagram.Data, socket, remote, nowUs))
+            if (!_simulator.PassesNow(datagram, socket, remote, nowUs))
                 continue;
-            if (datagram.DoNotFragment)
-                SendProbe(datagram.Data, socket, datagram.Remote, nowUs);
+            if (doNotFragment)
+                SendProbe(datagram, socket, endPoint, nowUs);
             else
-                SendDatagram(datagram.Data, socket, remote, ttl: 0);
+                SendDatagram(datagram, socket, remote, ttl: 0);
         }
     }
 
     // RakPeer.cpp:5768-5821: an MTU probe goes out with don't-fragment set. One too large for the path skips the rest of
     // its MTU's attempts; one whose send took more than 100 ms drops the attempt to the smallest MTU.
-    private void SendProbe(byte[] probe, int socket, IPEndPoint remote, long nowUs)
+    private void SendProbe(ReadOnlySpan<byte> probe, int socket, IPEndPoint remote, long nowUs)
     {
         SystemAddress to = remote;
         NotifySent(probe, to);
@@ -598,6 +608,7 @@ public sealed partial class RakPeer
                     break;
                 case SendReceiptAcked acked:
                     OnReceipt(acked.Receipt, acked: true);
+                    _core.Recycle(acked);
                     break;
                 case SendReceiptLost lost:
                     OnReceipt(lost.Receipt, acked: false);
@@ -695,6 +706,7 @@ public sealed partial class RakPeer
         _byGuid.TryGetValue(message.Guid, out var connection);
         var segment = NewSegment(message.Data.Span, message.Guid, message.Remote, connection);
         segment.BitLength = message.BitLength;
+        _core.Recycle(message);
         EnqueueEvent(segment);
     }
 

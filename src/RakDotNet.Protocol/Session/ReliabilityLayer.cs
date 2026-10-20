@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using RakDotNet.Protocol.Security;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Datagrams;
@@ -19,7 +20,7 @@ namespace RakDotNet.Protocol.Session;
 /// <see cref="Receive"/> handles one datagram from the remote system (HandleSocketReceiveFromConnectedPlayer), and
 /// <see cref="Update"/> runs one tick: it discards unreliable messages past the unreliable timeout, sends due
 /// acknowledgements and NAKs, resends reliable messages whose retransmission time has come, then packs queued messages
-/// into datagrams as the congestion window and the bandwidth limit allow. Outputs: <see cref="TryDequeueDatagram"/>
+/// into datagrams as the congestion window and the bandwidth limit allow. Outputs: <see cref="TryDequeueDatagram(Span{byte}, out int)"/>
 /// and <see cref="TryDequeueEvent"/>.
 /// </para>
 /// <para>
@@ -68,6 +69,11 @@ internal sealed class ReliabilityLayer
     // AllocateFromInternalPacketPool sets reliableMessageNumber to (uint32_t)-1 (ReliabilityLayer.cpp:3678).
     private static readonly UInt24 UnassignedMessageNumber = UInt24.MaxValue;
 
+    // The most free messages and delivery events kept for reuse; beyond it they are left to the collector.
+    private const int MaxPooled = 2 * ResendBufferLength;
+
+    private static readonly Comparison<UInt24> ByValue = static (a, b) => a.Value.CompareTo(b.Value);
+
     private readonly int _mtu;
     private readonly bool _useSecurity;
     private AuthenticatedEncryption? _encryption;
@@ -84,6 +90,8 @@ internal sealed class ReliabilityLayer
     private readonly LinkedList<OutgoingMessage> _resendList = new();
     private readonly DatagramHistory _datagramHistory = new();
     private readonly List<UnreliableReceipt> _unreliableReceipts = [];
+    private readonly Stack<OutgoingMessage> _freeMessages = new();
+    private readonly List<UInt24> _datagramMessageNumbers = [];
     private UInt24 _nextReliableMessageNumber;
     private ushort _nextSplitId;
     private int _unacknowledgedBytes;
@@ -106,6 +114,12 @@ internal sealed class ReliabilityLayer
     private readonly OrderingChannels _orderingChannels;
     private readonly SplitMessageAssembler _splitMessages;
     private readonly List<ReceivedMessage> _released = [];
+    private readonly List<AckRange> _receivedRanges = [];
+    private readonly List<UInt24> _knownDatagramNumbers = [];
+    private readonly Stack<MessageDelivered> _freeDeliveries = new();
+    private readonly Stack<ReceiptAcknowledged> _freeReceipts = new();
+    private byte[] _receiveBuffer = [];
+    private byte[] _decryptBuffer = [];
     private long _timeLastDatagramArrivedMs;
 
     // receivePacketCount (ReliabilityLayer.cpp:1499): datagrams handled to the end, the receive frame number.
@@ -122,7 +136,7 @@ internal sealed class ReliabilityLayer
     private ulong _bpsLimitByOutgoingBandwidthLimit;
 
     // Outputs.
-    private readonly Queue<byte[]> _datagrams = new();
+    private readonly DatagramQueue<ValueTuple> _datagrams = new();
     private readonly Queue<SessionEvent> _events = new();
 
     /// <summary>ReliabilityLayer::Reset(true, MTUSize, useSecurity) (ReliabilityLayer.cpp:345-363).</summary>
@@ -291,7 +305,13 @@ internal sealed class ReliabilityLayer
             };
         }
 
-        var message = new OutgoingMessage(data[..byteLength].ToArray(), bitLength, reliability, priority, receipt, nowUs);
+        var message = RentMessage();
+        // A split message's parts share one copy of it, which lives as long as they do.
+        if (needsSplitting)
+            message.Reference(data[..byteLength].ToArray());
+        else
+            message.CopyFrom(data[..byteLength]);
+        message.Set(bitLength, reliability, priority, receipt, nowUs);
         if (reliability.IsSequenced())
         {
             message.OrderingChannel = channel;
@@ -308,12 +328,13 @@ internal sealed class ReliabilityLayer
         if (needsSplitting)
         {
             SplitAndQueue(message);
+            ReleaseMessage(message);
             return true;
         }
 
         // AddToUnreliableLinkedList, ReliabilityLayer.cpp:3715-3736.
         if (message.IsUnreliable)
-            message.UnreliableNode = _unreliable.AddLast(message);
+            _unreliable.AddLast(message.UnreliableNode);
         Queue(message);
         return true;
     }
@@ -332,20 +353,13 @@ internal sealed class ReliabilityLayer
             var bytesToSend = Math.Min(byteLength - offset, blockBytes);
             // ReliabilityLayer.cpp:2990-2993: a full block is whole bytes even when it ends the message.
             var bitLength = bytesToSend != blockBytes ? message.BitLength - offset * 8 : bytesToSend * 8;
-            var part = new OutgoingMessage(
-                message.Data.Slice(offset, bytesToSend),
-                bitLength,
-                message.Reliability,
-                message.Priority,
-                message.Receipt,
-                message.CreationTimeUs
-            )
-            {
-                OrderingChannel = message.OrderingChannel,
-                OrderingIndex = message.OrderingIndex,
-                SequencingIndex = message.SequencingIndex,
-                Split = new SplitHeader(count, id, index),
-            };
+            var part = RentMessage();
+            part.Reference(message.Data.Slice(offset, bytesToSend));
+            part.Set(bitLength, message.Reliability, message.Priority, message.Receipt, message.CreationTimeUs);
+            part.OrderingChannel = message.OrderingChannel;
+            part.OrderingIndex = message.OrderingIndex;
+            part.SequencingIndex = message.SequencingIndex;
+            part.Split = new SplitHeader(count, id, index);
             // Parts are reliable, so none joins the unreliable list (ReliabilityLayer.cpp:3015).
             Queue(part);
         }
@@ -377,13 +391,19 @@ internal sealed class ReliabilityLayer
         }
         _timeLastDatagramArrivedMs = nowUs / 1000;
 
-        // Copy once, so delivered payloads and buffered ordered messages can slice it after the caller reuses its buffer.
-        var bytes = datagram.ToArray();
-        var length = bytes.Length;
-        // ReliabilityLayer.cpp:668-677: decrypted in place; a datagram that fails is dropped.
-        if (_useSecurity && !Encryption.Decrypt(bytes, out length))
-            return false;
-        var reader = new BitStreamReader(bytes.AsSpan(0, length));
+        // ReliabilityLayer.cpp:668-677: decrypted in place, here in a buffer reused from datagram to datagram; a datagram
+        // that fails is dropped.
+        if (_useSecurity)
+        {
+            if (_decryptBuffer.Length < datagram.Length)
+                _decryptBuffer = new byte[Math.Max(datagram.Length, _mtu)];
+            datagram.CopyTo(_decryptBuffer);
+            if (!Encryption.Decrypt(_decryptBuffer.AsSpan(0, datagram.Length), out var decrypted))
+                return false;
+            datagram = _decryptBuffer.AsSpan(0, decrypted);
+        }
+        var length = datagram.Length;
+        var reader = new BitStreamReader(datagram);
         if (!DatagramHeader.TryRead(ref reader, out var header))
         {
             // Not a reliability-layer datagram (ReliabilityLayer.cpp:689-695).
@@ -394,24 +414,24 @@ internal sealed class ReliabilityLayer
         switch (header.Kind)
         {
             case DatagramKind.Ack:
-                if (!AckRangeList.TryRead(ref reader, out var acks))
+                if (!AckRangeList.TryRead(ref reader, _receivedRanges))
                 {
                     Notify("incomingAcks.Deserialize failed", length, isError: true);
                     return false; // ReliabilityLayer.cpp:729-735.
                 }
-                if (!ReceiveAcks(acks, nowUs, length))
+                if (!ReceiveAcks(_receivedRanges, nowUs, length))
                     return false;
                 break;
             case DatagramKind.Nak:
-                if (!AckRangeList.TryRead(ref reader, out var naks))
+                if (!AckRangeList.TryRead(ref reader, _receivedRanges))
                 {
                     Notify("incomingNAKs.Deserialize failed", length, isError: true);
                     return false; // ReliabilityLayer.cpp:811-817.
                 }
-                ReceiveNaks(naks, nowUs);
+                ReceiveNaks(_receivedRanges, nowUs);
                 break;
             default:
-                if (!ReceiveData(header, bytes.AsMemory((reader.BitPosition >> 3)..length), nowUs, length))
+                if (!ReceiveData(header, CopyToReceiveBuffer(datagram[(reader.BitPosition >> 3)..]), nowUs, length))
                     return true;
                 break;
         }
@@ -485,7 +505,47 @@ internal sealed class ReliabilityLayer
             SendQueuedMessages(nowUs, bitsPerSecondLimit, needsBAndAs, isContinuousSend);
     }
 
-    public bool TryDequeueDatagram([NotNullWhen(true)] out byte[]? datagram) => _datagrams.TryDequeue(out datagram);
+    /// <summary>The next datagram to send, as a new array.</summary>
+    public bool TryDequeueDatagram([NotNullWhen(true)] out byte[]? datagram)
+    {
+        datagram = _datagrams.TryDequeue(out var bytes, out _) ? bytes.ToArray() : null;
+        return datagram is not null;
+    }
+
+    /// <summary>
+    /// The next datagram to send, copied into <paramref name="destination"/>, which holds at least <see cref="Mtu"/>
+    /// bytes. Allocates nothing.
+    /// </summary>
+    public bool TryDequeueDatagram(Span<byte> destination, out int length)
+    {
+        if (!_datagrams.TryDequeue(out var datagram, out _))
+        {
+            length = 0;
+            return false;
+        }
+        datagram.CopyTo(destination);
+        length = datagram.Length;
+        return true;
+    }
+
+    /// <summary>
+    /// Hands back a delivery event the caller is done with, payload included, so a later delivery can reuse it instead
+    /// of allocating.
+    /// </summary>
+    public void Recycle(MessageDelivered delivered)
+    {
+        ArgumentNullException.ThrowIfNull(delivered);
+        if (_freeDeliveries.Count < MaxPooled)
+            _freeDeliveries.Push(delivered);
+    }
+
+    /// <summary>Hands back a receipt event the caller is done with, so a later receipt can reuse it.</summary>
+    public void Recycle(ReceiptAcknowledged acknowledged)
+    {
+        ArgumentNullException.ThrowIfNull(acknowledged);
+        if (_freeReceipts.Count < MaxPooled)
+            _freeReceipts.Push(acknowledged);
+    }
 
     public bool TryDequeueEvent([NotNullWhen(true)] out SessionEvent? sessionEvent) => _events.TryDequeue(out sessionEvent);
 
@@ -573,12 +633,22 @@ internal sealed class ReliabilityLayer
         {
             var message = node.Value;
             _unreliable.RemoveFirst();
-            message.UnreliableNode = null;
             message.IsDiscarded = true;
             if (message.Reliability == Reliability.UnreliableWithAckReceipt)
                 _events.Enqueue(new ReceiptDiscarded(message.Receipt));
         }
         _timeToNextUnreliableCullUs = _unreliableTimeoutUs / 2;
+    }
+
+    // Copies a received datagram body into a buffer reused from datagram to datagram, so messages can be read as memory.
+    // Nothing keeps a slice of it past the datagram: ordering and split reassembly copy what they hold, and delivered
+    // payloads are copied into their events.
+    private ReadOnlyMemory<byte> CopyToReceiveBuffer(ReadOnlySpan<byte> body)
+    {
+        if (_receiveBuffer.Length < body.Length)
+            _receiveBuffer = new byte[Math.Max(body.Length, _mtu)];
+        body.CopyTo(_receiveBuffer);
+        return _receiveBuffer.AsMemory(0, body.Length);
     }
 
     // Returns false where the C++ returns before counting the datagram (ReliabilityLayer.cpp:861-895).
@@ -599,20 +669,20 @@ internal sealed class ReliabilityLayer
         _acknowledgements.Insert(header.DatagramNumber);
 
         var messages = new EncapsulatedMessageReader(body);
-        if (!messages.TryReadNext(out var first))
+        if (!messages.TryReadNext(out var first, out var firstPayload))
         {
             // Only the first message failing is reported; a later one ends the loop (ReliabilityLayer.cpp:888-895, 1493).
             Notify("CreateInternalPacketFromBitStream failed", datagramLength, isError: true);
             return false;
         }
-        ReceiveMessage(first, nowUs, datagramLength);
-        while (!IsDead && messages.TryReadNext(out var message))
-            ReceiveMessage(message, nowUs, datagramLength);
+        ReceiveMessage(first, firstPayload, nowUs, datagramLength);
+        while (!IsDead && messages.TryReadNext(out var message, out var payload))
+            ReceiveMessage(message, payload, nowUs, datagramLength);
         return true;
     }
 
     // The body of the parse loop, ReliabilityLayer.cpp:897-1494.
-    private void ReceiveMessage(EncapsulatedMessage message, long nowUs, int datagramLength)
+    private void ReceiveMessage(in EncapsulatedMessage.Header message, ReadOnlyMemory<byte> payload, long nowUs, int datagramLength)
     {
         var isReliable = message.Reliability.IsReliable();
         if (Observer is { IsObserving: true } observer)
@@ -630,8 +700,8 @@ internal sealed class ReliabilityLayer
                 message.SequencingIndex,
                 message.Split,
                 nowUs,
-                message.Payload.Span,
-                message.PayloadBitLength));
+                payload.Span,
+                message.BitLength));
         }
 
         if (isReliable)
@@ -644,7 +714,7 @@ internal sealed class ReliabilityLayer
                     Notify("holeCount > typeRange/(DatagramSequenceNumberType) 2", datagramLength, isError: false);
                 else if (check == MessageNumberCheck.TooFarAhead)
                     Notify("holeCount > 1000000", datagramLength, isError: true);
-                _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
+                _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.BitLength));
                 return;
             }
         }
@@ -652,18 +722,18 @@ internal sealed class ReliabilityLayer
         ReceivedMessage received;
         if (message.Split is null)
         {
-            received = ReceivedMessage.From(message);
+            received = ReceivedMessage.From(message, payload);
         }
         else
         {
             // ReliabilityLayer.cpp:1221-1242.
             var available = _limits.MaxReceiveBufferBytes - BufferedReceiveBytes;
-            switch (_splitMessages.TryInsert(message, nowUs, available, out var progress, out var complete))
+            switch (_splitMessages.TryInsert(message.ToMessage(payload), nowUs, available, out var progress, out var complete))
             {
                 case SplitInsertResult.Accepted:
                     break;
                 case SplitInsertResult.Ignored:
-                    _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
+                    _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.BitLength));
                     return;
                 case SplitInsertResult.SplitCountExceeded:
                     Die(ConnectionDeathCause.SplitCountExceeded);
@@ -681,11 +751,11 @@ internal sealed class ReliabilityLayer
             // Progress goes straight to the output queue, ahead of ordering (ReliabilityLayer.cpp:3171).
             if (progress is not null)
                 _events.Enqueue(new MessageDelivered(progress, progress.Length * 8));
-            if (complete is null)
+            if (complete is not { } whole)
                 return; // Don't have all the parts yet.
             // "Ack immediately, because for large files this can take a long time" (ReliabilityLayer.cpp:3243-3244).
             SendAcks(nowUs);
-            received = complete;
+            received = whole;
         }
 
         _released.Clear();
@@ -705,14 +775,34 @@ internal sealed class ReliabilityLayer
         {
             // Counted as each message reaches the output queue (ReliabilityLayer.cpp:1346, 1412, 1481).
             _metrics[(int)SessionMetric.UserMessageBytesReceivedProcessed].Push(nowUs, (ulong)BitsToBytes(released.BitLength));
-            _events.Enqueue(new MessageDelivered(released.Payload, released.BitLength));
+            _events.Enqueue(Deliver(released.Payload, released.BitLength));
         }
     }
 
-    // The ACK branch of HandleSocketReceiveFromConnectedPlayer, ReliabilityLayer.cpp:696-806.
-    private bool ReceiveAcks(AckRangeList acks, long nowUs, int datagramLength)
+    private ReceiptAcknowledged Acknowledged(uint receipt)
     {
-        foreach (var range in acks.Ranges)
+        if (!_freeReceipts.TryPop(out var acknowledged))
+            return new ReceiptAcknowledged(receipt);
+        acknowledged.Set(receipt);
+        return acknowledged;
+    }
+
+    // A delivery event for the payload, reused when one was recycled. A payload in the receive buffer is copied; one the
+    // session made for itself (reassembled, or held for ordering) is not written to again and is passed on as it is.
+    private MessageDelivered Deliver(ReadOnlyMemory<byte> payload, int bitLength)
+    {
+        var delivered = _freeDeliveries.TryPop(out var free) ? free : new MessageDelivered(default, 0);
+        if (MemoryMarshal.TryGetArray(payload, out var segment) && segment.Array == _receiveBuffer)
+            delivered.CopyFrom(payload.Span, bitLength);
+        else
+            delivered.Reference(payload, bitLength);
+        return delivered;
+    }
+
+    // The ACK branch of HandleSocketReceiveFromConnectedPlayer, ReliabilityLayer.cpp:696-806.
+    private bool ReceiveAcks(List<AckRange> acks, long nowUs, int datagramLength)
+    {
+        foreach (var range in acks)
         {
             if (range.Max == UInt24.MaxValue)
             {
@@ -730,9 +820,9 @@ internal sealed class ReliabilityLayer
     }
 
     // The NAK branch of HandleSocketReceiveFromConnectedPlayer, ReliabilityLayer.cpp:807-857.
-    private void ReceiveNaks(AckRangeList naks, long nowUs)
+    private void ReceiveNaks(List<AckRange> naks, long nowUs)
     {
-        foreach (var range in naks.Ranges)
+        foreach (var range in naks)
         {
             // The C++ calls OnNAK once per number in the range (line 833). It only sets ssThresh from cwnd, which
             // nothing in between changes, so once per range is the same.
@@ -754,24 +844,45 @@ internal sealed class ReliabilityLayer
         }
     }
 
+    // The numbers in the range that the history or an unreliable receipt holds, ascending. The list is reused, so it is
+    // valid until the next call.
     private List<UInt24> KnownDatagramNumbersIn(AckRange range, bool includeUnreliableReceipts)
     {
-        var numbers = new List<UInt24>();
-        for (var i = 0; i < _datagramHistory.Count; i++)
+        var numbers = _knownDatagramNumbers;
+        numbers.Clear();
+        // Whichever is shorter is walked: the range, in ascending order already, or the history, in sending order.
+        var sorted = range.Count <= (uint)_datagramHistory.Count;
+        if (sorted)
         {
-            var number = _datagramHistory.FirstNumber + (uint)i;
-            if (range.Contains(number))
-                numbers.Add(number);
+            for (var n = range.Min.Value; n <= range.Max.Value; n++)
+            {
+                var number = new UInt24(n);
+                if (_datagramHistory.Holds(number))
+                    numbers.Add(number);
+            }
+        }
+        else
+        {
+            for (var i = 0; i < _datagramHistory.Count; i++)
+            {
+                var number = _datagramHistory.FirstNumber + (uint)i;
+                if (range.Contains(number))
+                    numbers.Add(number);
+            }
         }
         if (includeUnreliableReceipts)
         {
             foreach (var receipt in _unreliableReceipts)
             {
                 if (range.Contains(receipt.DatagramNumber) && !numbers.Contains(receipt.DatagramNumber))
+                {
                     numbers.Add(receipt.DatagramNumber);
+                    sorted = false;
+                }
             }
         }
-        numbers.Sort((a, b) => a.Value.CompareTo(b.Value));
+        if (!sorted)
+            numbers.Sort(ByValue);
         return numbers;
     }
 
@@ -782,7 +893,7 @@ internal sealed class ReliabilityLayer
         {
             if (_unreliableReceipts[k].DatagramNumber == datagramNumber)
             {
-                _events.Enqueue(new ReceiptAcknowledged(_unreliableReceipts[k].Receipt));
+                _events.Enqueue(Acknowledged(_unreliableReceipts[k].Receipt));
                 _unreliableReceipts.RemoveAt(k);
             }
             else
@@ -820,12 +931,12 @@ internal sealed class ReliabilityLayer
 
         // Only the last part of a split message reports its receipt (ReliabilityLayer.cpp:2486-2488).
         if (message.Reliability >= Reliability.ReliableWithAckReceipt && (message.Split is not { } split || split.Index + 1 == split.Count))
-            _events.Enqueue(new ReceiptAcknowledged(message.Receipt));
+            _events.Enqueue(Acknowledged(message.Receipt));
 
         // RemoveFromList(internalPacket, isReliable), ReliabilityLayer.cpp:3559-3579.
-        _resendList.Remove(message.ResendNode!);
-        message.ResendNode = null;
+        _resendList.Remove(message.ResendNode);
         _unacknowledgedBytes -= message.UnacknowledgedBytes;
+        ReleaseMessage(message);
     }
 
     // SendACKs, ReliabilityLayer.cpp:3616-3656.
@@ -833,11 +944,12 @@ internal sealed class ReliabilityLayer
     {
         while (_acknowledgements.Count > 0)
         {
-            var writer = new BitStreamWriter(new byte[_mtu]);
+            var room = _datagrams.Reserve(_mtu);
+            var writer = new BitStreamWriter(room);
             // Sliding window never sends B and AS (CCRakNetSlidingWindow.cpp:264-271).
             DatagramHeader.ForAck().Write(ref writer);
             _acknowledgements.Write(ref writer, MaxPayloadBits);
-            SendDatagram(writer.Written, nowUs);
+            SendDatagram(room, writer.BytesWritten, nowUs);
             _window.OnSendAck();
         }
     }
@@ -845,10 +957,11 @@ internal sealed class ReliabilityLayer
     // One NAK datagram per update, ReliabilityLayer.cpp:1815-1825; what does not fit waits for the next.
     private void SendNak(long nowUs)
     {
-        var writer = new BitStreamWriter(new byte[_mtu]);
+        var room = _datagrams.Reserve(_mtu);
+        var writer = new BitStreamWriter(room);
         DatagramHeader.ForNak().Write(ref writer);
         _naks.Write(ref writer, MaxPayloadBits);
-        SendDatagram(writer.Written, nowUs);
+        SendDatagram(room, writer.BytesWritten, nowUs);
     }
 
     // ReliabilityLayer.cpp:1860-1881.
@@ -964,6 +1077,7 @@ internal sealed class ReliabilityLayer
                 // Culled by the unreliable timeout (ReliabilityLayer.cpp:2007-2016).
                 _outgoing.Dequeue();
                 LeaveSendBuffer(message);
+                ReleaseMessage(message);
                 continue;
             }
 
@@ -980,7 +1094,7 @@ internal sealed class ReliabilityLayer
                 _resendBuffer[(int)(message.ReliableMessageNumber.Value % ResendBufferLength)] = message;
                 _bytesInResendBuffer += (ulong)BitsToBytes(message.BitLength);
                 // InsertPacketIntoResendList(internalPacket, time, true, isReliable).
-                message.ResendNode = _resendList.AddLast(message);
+                _resendList.AddLast(message.ResendNode);
                 _unacknowledgedBytes += message.UnacknowledgedBytes;
                 _nextReliableMessageNumber++;
             }
@@ -993,11 +1107,8 @@ internal sealed class ReliabilityLayer
                     _unreliableReceipts.Add(new UnreliableReceipt(datagramNumber, message.Receipt, deadline));
                 }
                 // ClearPacketsAndDatagrams removes sent unreliable messages from the unreliable list (line 3527).
-                if (message.UnreliableNode is { } node)
-                {
-                    _unreliable.Remove(node);
-                    message.UnreliableNode = null;
-                }
+                if (message.UnreliableNode.List is not null)
+                    _unreliable.Remove(message.UnreliableNode);
             }
 
             _metrics[(int)SessionMetric.UserMessageBytesSent].Push(nowUs, (ulong)BitsToBytes(message.BitLength));
@@ -1047,35 +1158,58 @@ internal sealed class ReliabilityLayer
     private void WriteDatagram(int index, long nowUs, bool needsBAndAs, bool isContinuousSend)
     {
         var datagramNumber = _window.TakeNextDatagramNumber();
-        var writer = new BitStreamWriter(new byte[_mtu]);
+        var room = _datagrams.Reserve(_mtu);
+        var writer = new BitStreamWriter(room);
         DatagramHeader.ForData(datagramNumber, isPacketPair: false, isContinuousSend, needsBAndAs).Write(ref writer);
 
         var first = index == 0 ? 0 : _datagramBoundaries[index - 1];
         var end = _datagramBoundaries[index];
-        var messageNumbers = new List<UInt24>();
+        var messageNumbers = _datagramMessageNumbers;
+        messageNumbers.Clear();
         for (var i = first; i < end; i++)
         {
             var message = _packetsThisUpdate[i];
             // Reliable or needs a receipt (line 2174): UNRELIABLE_WITH_ACK_RECEIPT records its unassigned number.
             if (message.Reliability is not (Reliability.Unreliable or Reliability.UnreliableSequenced))
                 messageNumbers.Add(message.ReliableMessageNumber);
-            message.ToEncapsulated().Write(ref writer);
+            EncapsulatedMessage.Write(
+                ref writer,
+                message.Reliability,
+                message.Data.Span,
+                message.BitLength,
+                message.ReliableMessageNumber,
+                message.SequencingIndex,
+                message.OrderingIndex,
+                message.OrderingChannel,
+                message.Split
+            );
+            // An unreliable message is done once sent; a reliable one stays for resends until it is acknowledged.
+            if (!message.Reliability.IsReliable())
+                ReleaseMessage(message);
         }
 
         _datagramHistory.Add(nowUs, messageNumbers);
-        SendDatagram(writer.Written, nowUs);
+        SendDatagram(room, writer.BytesWritten, nowUs);
     }
 
-    // SendBitStream, ReliabilityLayer.cpp:2247-2340.
-    private void SendDatagram(ReadOnlySpan<byte> written, long nowUs)
+    // SendBitStream, ReliabilityLayer.cpp:2247-2340: queues the datagram just written into the reserved room. With
+    // security, Encrypt appends the overhead in place (ReliabilityLayer.cpp:2304-2315); the datagram budget leaves room.
+    private void SendDatagram(Span<byte> room, int length, long nowUs)
     {
-        // ReliabilityLayer.cpp:2304-2315: Encrypt appends the overhead, in the one array the datagram is copied to.
-        var datagram = new byte[written.Length + SecurityOverhead];
-        written.CopyTo(datagram);
         if (_useSecurity)
-            Encryption.Encrypt(datagram, written.Length, out _);
-        _metrics[(int)SessionMetric.ActualBytesSent].Push(nowUs, (ulong)datagram.Length);
-        _datagrams.Enqueue(datagram);
+            Encryption.Encrypt(room, length, out length);
+        _metrics[(int)SessionMetric.ActualBytesSent].Push(nowUs, (ulong)length);
+        _datagrams.Commit(length, default);
+    }
+
+    private OutgoingMessage RentMessage() => _freeMessages.TryPop(out var message) ? message : new OutgoingMessage();
+
+    // InternalPacket back to the pool (ReleaseToInternalPacketPool): its data is dropped and its state cleared.
+    private void ReleaseMessage(OutgoingMessage message)
+    {
+        message.Clear();
+        if (_freeMessages.Count < MaxPooled)
+            _freeMessages.Push(message);
     }
 
     // OnInternalPacket for a message just pushed into the datagram being filled, which goes out as the next datagram
@@ -1119,21 +1253,32 @@ internal sealed class ReliabilityLayer
 
     private readonly record struct UnreliableReceipt(UInt24 DatagramNumber, uint Receipt, long DeadlineUs);
 
-    /// <summary>The send-side InternalPacket.</summary>
-    private sealed class OutgoingMessage(ReadOnlyMemory<byte> data, int bitLength, Reliability reliability, Priority priority, uint receipt, long creationTimeUs)
+    /// <summary>
+    /// The send-side InternalPacket. Instances are pooled (<see cref="RentMessage"/>, <see cref="ReleaseMessage"/>), and
+    /// each keeps the buffer it copies unsplit messages into and its list nodes from one use to the next.
+    /// </summary>
+    private sealed class OutgoingMessage
     {
+        private byte[] _buffer = [];
+
+        public OutgoingMessage()
+        {
+            ResendNode = new LinkedListNode<OutgoingMessage>(this);
+            UnreliableNode = new LinkedListNode<OutgoingMessage>(this);
+        }
+
         /// <summary>The message, or for a split part its slice of the whole message's copy.</summary>
-        public ReadOnlyMemory<byte> Data { get; } = data;
+        public ReadOnlyMemory<byte> Data { get; private set; }
 
-        public int BitLength { get; } = bitLength;
+        public int BitLength { get; private set; }
 
-        public Reliability Reliability { get; } = reliability;
+        public Reliability Reliability { get; private set; }
 
-        public Priority Priority { get; } = priority;
+        public Priority Priority { get; private set; }
 
-        public uint Receipt { get; } = receipt;
+        public uint Receipt { get; private set; }
 
-        public long CreationTimeUs { get; } = creationTimeUs;
+        public long CreationTimeUs { get; private set; }
 
         public byte OrderingChannel { get; set; }
 
@@ -1143,15 +1288,17 @@ internal sealed class ReliabilityLayer
 
         public UInt24 ReliableMessageNumber { get; set; } = UnassignedMessageNumber;
 
-        public SplitHeader? Split { get; init; }
+        public SplitHeader? Split { get; set; }
 
         public long NextActionTimeUs { get; set; }
 
         public int TimesSent { get; set; }
 
-        public LinkedListNode<OutgoingMessage>? ResendNode { get; set; }
+        /// <summary>This message's node in the resend list; in it while sent and not yet acknowledged.</summary>
+        public LinkedListNode<OutgoingMessage> ResendNode { get; }
 
-        public LinkedListNode<OutgoingMessage>? UnreliableNode { get; set; }
+        /// <summary>This message's node in the unreliable list; in it while queued and not yet sent or culled.</summary>
+        public LinkedListNode<OutgoingMessage> UnreliableNode { get; }
 
         /// <summary>Culled by the unreliable timeout: the C++ frees its data and sets it to 0 (line 1764-1765).</summary>
         public bool IsDiscarded { get; set; }
@@ -1169,16 +1316,43 @@ internal sealed class ReliabilityLayer
         /// <summary>Header and data rounded up together (AddToListTail and RemoveFromList, ReliabilityLayer.cpp:3573, 3585).</summary>
         public int UnacknowledgedBytes => BitsToBytes(HeaderBits + BitLength);
 
-        public EncapsulatedMessage ToEncapsulated() =>
-            new(
-                Reliability,
-                Data,
-                BitLength,
-                ReliableMessageNumber,
-                SequencingIndex,
-                OrderingIndex,
-                OrderingChannel,
-                Split
-            );
+        /// <summary>Copies <paramref name="data"/> into this message's own buffer.</summary>
+        public void CopyFrom(ReadOnlySpan<byte> data)
+        {
+            if (_buffer.Length < data.Length)
+                _buffer = new byte[Math.Max(data.Length, 64)];
+            data.CopyTo(_buffer);
+            Data = _buffer.AsMemory(0, data.Length);
+        }
+
+        /// <summary>Sends <paramref name="data"/> as it is: memory this message does not own.</summary>
+        public void Reference(ReadOnlyMemory<byte> data) => Data = data;
+
+        public void Set(int bitLength, Reliability reliability, Priority priority, uint receipt, long creationTimeUs)
+        {
+            BitLength = bitLength;
+            Reliability = reliability;
+            Priority = priority;
+            Receipt = receipt;
+            CreationTimeUs = creationTimeUs;
+        }
+
+        public void Clear()
+        {
+            Data = default;
+            BitLength = 0;
+            Reliability = default;
+            Priority = default;
+            Receipt = 0;
+            CreationTimeUs = 0;
+            OrderingChannel = 0;
+            OrderingIndex = default;
+            SequencingIndex = default;
+            ReliableMessageNumber = UnassignedMessageNumber;
+            Split = null;
+            NextActionTimeUs = 0;
+            TimesSent = 0;
+            IsDiscarded = false;
+        }
     }
 }

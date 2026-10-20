@@ -7,10 +7,47 @@ namespace RakDotNet.Protocol.Session;
 internal abstract record SessionEvent;
 
 /// <summary>A message arrived and its ordering and sequencing allow it through.</summary>
+/// <remarks>
+/// The session reuses its instances: one handed back through <see cref="ReliabilityLayer.Recycle(MessageDelivered)"/> may be delivered
+/// again with another payload, so a consumer that recycles an event must be done with it and its payload. One that is
+/// never recycled keeps its payload.
+/// </remarks>
 /// <param name="Payload">The message, including its message ID byte. The session owns a copy.</param>
 /// <param name="BitLength">The payload length in bits, as sent.</param>
 internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLength) : SessionEvent
 {
+    private byte[] _buffer = [];
+
+    public ReadOnlyMemory<byte> Payload { get; private set; } = Payload;
+
+    public int BitLength { get; private set; } = BitLength;
+
+    /// <summary>
+    /// True when <see cref="Payload"/> is in this event's own buffer, which a later delivery reuses once the event is
+    /// recycled. False when it is memory nothing writes to again, such as a reassembled split message, which a consumer
+    /// may keep after recycling the event.
+    /// </summary>
+    public bool OwnsPayload { get; private set; }
+
+    /// <summary>Delivers <paramref name="payload"/>, copied into this event's own buffer.</summary>
+    internal void CopyFrom(ReadOnlySpan<byte> payload, int bitLength)
+    {
+        if (_buffer.Length < payload.Length)
+            _buffer = new byte[Math.Max(payload.Length, 64)];
+        payload.CopyTo(_buffer);
+        Payload = _buffer.AsMemory(0, payload.Length);
+        BitLength = bitLength;
+        OwnsPayload = true;
+    }
+
+    /// <summary>Delivers <paramref name="payload"/> as it is, for memory nothing else will write to.</summary>
+    internal void Reference(ReadOnlyMemory<byte> payload, int bitLength)
+    {
+        Payload = payload;
+        BitLength = bitLength;
+        OwnsPayload = false;
+    }
+
     public bool Equals(MessageDelivered? other) =>
         other is not null && BitLength == other.BitLength && Payload.Span.SequenceEqual(other.Payload.Span);
 
@@ -21,7 +58,13 @@ internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLen
 /// The remote system acknowledged a message sent with an ack-receipt reliability: ID_SND_RECEIPT_ACKED
 /// (ReliabilityLayer.cpp:757-762, 2486-2496).
 /// </summary>
-internal sealed record ReceiptAcknowledged(uint Receipt) : SessionEvent;
+/// <remarks>Reused like <see cref="MessageDelivered"/> once handed back through <see cref="ReliabilityLayer.Recycle(ReceiptAcknowledged)"/>.</remarks>
+internal sealed record ReceiptAcknowledged(uint Receipt) : SessionEvent
+{
+    public uint Receipt { get; private set; } = Receipt;
+
+    internal void Set(uint receipt) => Receipt = receipt;
+}
 
 /// <summary>
 /// An UNRELIABLE_WITH_ACK_RECEIPT message was not acknowledged within the retransmission timeout:
