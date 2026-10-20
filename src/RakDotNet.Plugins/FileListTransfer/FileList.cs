@@ -240,7 +240,7 @@ public sealed class FileList
         ArgumentNullException.ThrowIfNull(output);
         var bound = 8;
         foreach (var node in _files)
-            bound += 32 + MaxEncodedNameBytes(node.Filename) + (int)Math.Min(node.DataLengthBytes, int.MaxValue / 4);
+            bound = checked(bound + 32 + MaxEncodedNameBytes(node.Filename) + (int)Math.Min(node.DataLengthBytes, int.MaxValue / 4));
         var writer = output.BeginWrite(bound);
         writer.WriteCompressed((uint)_files.Count);
         foreach (var node in _files)
