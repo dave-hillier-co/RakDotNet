@@ -2,7 +2,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <memory>
 #include <string>
 
 namespace RakNet
@@ -11,7 +10,6 @@ namespace RakNet
     class NatPunchthroughServer;
     class NatTypeDetectionClient;
     class RakPeerInterface;
-    struct NatPunchthroughDebugInterface;
 }
 
 namespace interop
@@ -45,6 +43,5 @@ namespace interop
         ObservableNatTypeDetectionServer* typeDetectionServer_ = nullptr;
         RakNet::NatPunchthroughClient* punchthroughClient_ = nullptr;
         RakNet::NatPunchthroughServer* punchthroughServer_ = nullptr;
-        std::unique_ptr<RakNet::NatPunchthroughDebugInterface> debug_;
     };
 }

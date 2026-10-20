@@ -111,6 +111,31 @@ Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFi
 
 TwoWayAuthentication's results reach the driver as `packet` events.
 
+### NAT commands
+
+The NAT commands live in `tools/interop-peer/src/NatCommands.cpp`. `natGateway` puts the process behind a NAT router of
+the harness (see [NAT gateway](#nat-gateway)); the others attach and drive RakNet's NAT plugins, and every one but its
+plugin's attach command fails with `ok:false` until that plugin is attached. Addresses are `host` ("127.0.0.1") and
+`port` fields.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `natGateway` | `host` ("127.0.0.1"), `port` (0 leaves the router) | | puts the process behind the router whose gateway is at the address |
+| `natTypeDetectionClientAttach` | | | `AttachPlugin` of a `NatTypeDetectionClient`; again is a no-op |
+| `natTypeDetectionClientDetect` | `host`, `port` (the connected server) | | `DetectNATType` |
+| `natTypeDetectionServerAttach` | | | `AttachPlugin` of a `NatTypeDetectionServer`; again is a no-op |
+| `natTypeDetectionServerStartup` | `ip2`, `ip3`, `ip4` (each "127.0.0.1") | `addresses`: where S1P2, S2P3, S3P4 and S4P5 are bound, in that order | `Startup`, then the plugin's protected sockets' `GetBoundAddress` |
+| `natPunchthroughServerAttach` | | | `AttachPlugin` of a `NatPunchthroughServer`; again is a no-op |
+| `natPunchthroughClientAttach` | | | `AttachPlugin` of a `NatPunchthroughClient`; again is a no-op |
+| `natPunchthroughClientConfigure` | any of `timeBetweenPunchAttemptsInternal`, `timeBetweenPunchAttemptsExternal`, `udpSendsPerPortInternal`, `udpSendsPerPortExternal`, `internalIpWaitAfterAttempts`, `maxPredictivePortRange`, `externalIpWaitBetweenPorts`, `externalIpWaitAfterFirstTtl`, `externalIpWaitAfterAllAttempts`, `maximumNumberOfInternalIdsToCheck` (milliseconds or counts), `retryOnFailure` (bool) | | sets those fields of `GetPunchthroughConfiguration()` |
+| `natPunchthroughOpen` | `target` (guid), `host`, `port` (the facilitator) | `result` (bool) | `OpenNAT` |
+| `natPunchthroughFindPortStride` | `host`, `port` (the facilitator) | | `FindRouterPortStride` |
+
+The plugins' results reach the driver as `packet` events. The peer sets no `NatPunchthroughDebugInterface`:
+`NatPunchthroughClient` formats some of its messages with `%I64d`, which only Windows' `printf` takes, and elsewhere
+they read the wrong arguments. A `NatTypeDetectionServer` or `NatTypeDetectionClient` is never freed, because
+`NatTypeDetectionServer::Shutdown` deletes sockets whose receive threads still run.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
@@ -130,6 +155,29 @@ Other events:
 |---|---|---|
 | `ready` | `raknetVersion`, `protocolVersion` | process start |
 | `log` | `message` | optional diagnostics the driver may display |
+
+## NAT gateway
+
+`tests/RakDotNet.Interop.Tests/Harness/NatEmulator.cs` runs NAT routers on 127.0.0.1. A host behind one sends every
+datagram to the router's gateway address, prefixed with a 7-byte header, and receives from the gateway datagrams with
+the same header:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | The IP time-to-live the datagram was sent with, or 0 for the default. Host to router only; 0 from the router. |
+| 1 | 4 | Host to router: the destination's IPv4 address. Router to host: the source's. Network order. |
+| 5 | 2 | The destination's or source's port, big-endian. |
+| 7 | | The datagram. |
+
+The host reports a datagram from the gateway as coming from the header's address and drops everything else it
+receives, as nothing outside routes to a private address; a socket's datagrams to its own address pass untouched,
+because RakNet sends to itself to test a socket and to unblock its receive thread. The router maps the destination,
+dropping a datagram with a time-to-live of 1 and mapping without forwarding one of 2, as `SendTTL` intends.
+
+After `natGateway`, `interop-peer` does this for every UDP socket in the process: `src/NatGateway.cpp` replaces
+`sendto` and `recvfrom`, which RakNet calls through `sendto__` and `recvfrom__`, and reads the time-to-live with
+`getsockopt(IP_TTL)`. A RakDotNet peer does it through `NatGatewayTransportFactory`, given as its transport; the
+`RakDotNetPeerDriver` takes `natGateway` only before `startup`, as the transport is chosen when the peer starts.
 
 ## Secure build
 

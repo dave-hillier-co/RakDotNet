@@ -41,15 +41,6 @@ namespace interop
 
     namespace
     {
-        // NatPunchthroughDebugInterface_Printf writes to stdout, which carries the protocol; this writes to stderr.
-        struct StandardErrorDebug : RakNet::NatPunchthroughDebugInterface
-        {
-            void OnClientMessage(const char* msg) override
-            {
-                std::fprintf(stderr, "NatPunchthroughClient: %s\n", msg);
-            }
-        };
-
         template <typename T>
         T Optional(const json& command, const char* field, T fallback)
         {
@@ -196,12 +187,9 @@ namespace interop
         {
             if (punchthroughClient_ == nullptr)
             {
+                // No debug interface: NatPunchthroughClient formats some messages with %I64d, which only Windows'
+                // printf takes; elsewhere they read the wrong arguments and crash the peer.
                 punchthroughClient_ = RakNet::NatPunchthroughClient::GetInstance();
-                if (Optional<bool>(command, "debug", false))
-                {
-                    debug_ = std::make_unique<StandardErrorDebug>();
-                    punchthroughClient_->SetDebugInterface(debug_.get());
-                }
                 peer_->AttachPlugin(punchthroughClient_);
             }
         }
