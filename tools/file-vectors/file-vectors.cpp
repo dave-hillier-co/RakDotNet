@@ -1,5 +1,5 @@
-// Prints what native RakNet's SuperFastHash and FileList code produce, for the known-answer tests in
-// tests/RakDotNet.Plugins.Tests/FileListTransfer. Build and run with build.sh.
+// Prints what native RakNet's SuperFastHash, FileList and CloudCommon code produce, for the known-answer tests in
+// tests/RakDotNet.Plugins.Tests/FileListTransfer and tests/RakDotNet.Plugins.Tests/Cloud. Build and run with build.sh.
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -7,6 +7,7 @@
 #include "FileList.h"
 #include "BitStream.h"
 #include "StringCompressor.h"
+#include "CloudCommon.h"
 
 using namespace RakNet;
 
@@ -20,6 +21,86 @@ static void dump(const char* name, BitStream& bs)
     printf("%s bits=%u hex=", name, (unsigned)bs.GetNumberOfBitsUsed());
     for (unsigned i = 0; i < bs.GetNumberOfBytesUsed(); i++) printf("%02x", bs.GetData()[i]);
     printf("\n");
+}
+
+static CloudQueryRow row(const char* primaryKey, uint32_t secondaryKey, const char* data, uint32_t length, const char* server,
+                         const char* client, uint64_t serverGuid, uint64_t clientGuid)
+{
+    CloudQueryRow r;
+    r.key = CloudKey(primaryKey, secondaryKey);
+    r.data = (unsigned char*)data;
+    r.length = length;
+    r.serverSystemAddress.FromString(server);
+    r.clientSystemAddress.FromString(client);
+    r.serverGUID = RakNetGUID(serverGuid);
+    r.clientGUID = RakNetGUID(clientGuid);
+    return r;
+}
+
+// CloudCommon.cpp's Serialize functions, as CloudClient and CloudServer write them.
+static void cloud()
+{
+    BitStream key;
+    CloudKey("ApplicationName", 1).Serialize(true, &key);
+    dump("cloud_key", key);
+
+    BitStream emptyKey;
+    CloudKey("", 0x01020304).Serialize(true, &emptyKey);
+    dump("cloud_key_empty", emptyKey);
+
+    CloudQuery all;
+    all.keys.Push(CloudKey("ApplicationName", 1), _FILE_AND_LINE_);
+    all.keys.Push(CloudKey("ApplicationName", 2), _FILE_AND_LINE_);
+    BitStream allBs;
+    all.Serialize(true, &allBs);
+    dump("cloud_query_all", allBs);
+
+    CloudQuery paged;
+    paged.keys.Push(CloudKey("k", 0x01020304), _FILE_AND_LINE_);
+    paged.startingRowIndex = 3;
+    paged.maxRowsToReturn = 7;
+    paged.subscribeToResults = true;
+    BitStream pagedBs;
+    paged.Serialize(true, &pagedBs);
+    dump("cloud_query_paged", pagedBs);
+
+    CloudQuery maxOnly;
+    maxOnly.keys.Push(CloudKey("k", 9), _FILE_AND_LINE_);
+    maxOnly.maxRowsToReturn = 2;
+    BitStream maxOnlyBs;
+    maxOnly.Serialize(true, &maxOnlyBs);
+    dump("cloud_query_max_only", maxOnlyBs);
+
+    const char ds[] = "DS1C1S1";
+    CloudQueryRow withData = row("ApplicationName", 1, ds, sizeof(ds), "10.0.0.1|60002", "127.0.0.1|61000", 0x1122334455667788ULL, 0x99aabbccddeeff00ULL);
+    BitStream rowBs;
+    withData.Serialize(true, &rowBs, 0);
+    dump("cloud_row", rowBs);
+
+    CloudQueryRow placeholder = row("ApplicationName", 2, 0, 0, "0.0.0.0|0", "0.0.0.0|0", 5, 6);
+    placeholder.serverSystemAddress = UNASSIGNED_SYSTEM_ADDRESS;
+    placeholder.clientSystemAddress = UNASSIGNED_SYSTEM_ADDRESS;
+    BitStream placeholderBs;
+    placeholder.Serialize(true, &placeholderBs, 0);
+    dump("cloud_row_unassigned", placeholderBs);
+
+    // ID_CLOUD_SUBSCRIPTION_NOTIFICATION as CloudServer::NotifyClientSubscribersOfDataChange writes it.
+    BitStream notification;
+    notification.Write((MessageID)121);
+    notification.Write(true);
+    withData.Serialize(true, &notification, 0);
+    dump("cloud_notification", notification);
+
+    CloudQueryResult result;
+    result.cloudQuery = all;
+    result.subscribeToResults = false;
+    result.rowsReturned.Push(&withData, _FILE_AND_LINE_);
+    result.rowsReturned.Push(&placeholder, _FILE_AND_LINE_);
+    BitStream resultBs;
+    resultBs.Write((MessageID)118);
+    result.Serialize(true, &resultBs, 0);
+    dump("cloud_get_response", resultBs);
+    result.rowsReturned.Clear(true, _FILE_AND_LINE_);
 }
 
 int main()
@@ -72,5 +153,7 @@ int main()
     BitStream emptySerialized;
     empty.Serialize(&emptySerialized);
     dump("filelist_empty", emptySerialized);
+
+    cloud();
     return 0;
 }
