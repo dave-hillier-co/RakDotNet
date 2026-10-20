@@ -149,6 +149,16 @@ public sealed class TcpInterfaceTests : IDisposable
     }
 
     [Fact]
+    public void A_connection_attempt_to_an_empty_host_name_fails()
+    {
+        // SocketConnect's gethostbyname("") finds nothing (TCPInterface.cpp:798-801); .NET's resolver would give
+        // this machine's own addresses.
+        Assert.Equal(SystemAddress.Unassigned, _client.Connect("", ServerAddress.Port, block: true));
+        Assert.Equal(0, _client.ConnectionCount);
+        Poll.Never(() => _server.HasNewIncomingConnection() != SystemAddress.Unassigned, "a connection");
+    }
+
+    [Fact]
     public void A_connection_beyond_the_maximum_is_accepted_but_never_serviced()
     {
         // TCPInterface.cpp:1066-1109: with every slot taken the accepted socket is kept but never read, and no event is

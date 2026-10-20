@@ -189,7 +189,11 @@ public class TcpInterface : IPluginHost, IDisposable
     /// <see cref="HasFailedConnectionAttempt"/> (TCPInterface.cpp:336-418). Unassigned with nothing queued when not
     /// started or every slot is taken.
     /// </summary>
-    /// <remarks>RakNet's bindAddress argument is written into the destination and then overwritten, so it is not taken.</remarks>
+    /// <remarks>
+    /// RakNet's bindAddress argument is written into the destination and then overwritten, so it is not taken. With every
+    /// slot taken RakNet's check for no free slot compares the index with -1, which it never is, and connects using the
+    /// slot one past the end of its array (TCPInterface.cpp:341-354); that is undefined behaviour, so here it fails.
+    /// </remarks>
     public SystemAddress Connect(string host, ushort remotePort, bool block = true)
     {
         ArgumentNullException.ThrowIfNull(host);
@@ -522,6 +526,9 @@ public class TcpInterface : IPluginHost, IDisposable
     /// <summary>SystemAddress::FromString's resolution: a dotted address, or the first IPv4 address of a host name.</summary>
     internal static IPAddress? Resolve(string host)
     {
+        // gethostbyname("") finds nothing, where Dns.GetHostAddresses("") lists this machine's addresses.
+        if (host.Length == 0)
+            return null;
         if (IPAddress.TryParse(host, out var address))
             return address.AddressFamily == AddressFamily.InterNetwork ? address : null;
         try

@@ -253,10 +253,10 @@ This page maps every unit of RakNet 4.081 `Source/` (a `.h`/`.cpp` pair, a lone 
 
 | C++ unit (files) | C# location | Milestone | Note |
 |---|---|---|---|
-| `DynDNS` (`DynDNS.cpp`, `DynDNS.h`) | per milestone 8.7 | M8.7 | Dynamic DNS updater over `TCPInterface`. |
-| `EmailSender` (`EmailSender.cpp`, `EmailSender.h`) | per milestone 8.7 | M8.7 | SMTP client over `TCPInterface`. |
-| `Rackspace` (`Rackspace.cpp`, `Rackspace.h`) | per milestone 8.7 | M8.7 | Rackspace Cloud Files client over `HTTPConnection`. |
-| `Base64Encoder` (`Base64Encoder.cpp`, `Base64Encoder.h`) | `System.Convert.ToBase64String` | M8.7 | Base64 with CRLF line layout, used by `EmailSender`. |
+| `DynDNS` (`DynDNS.cpp`, `DynDNS.h`) | [`DynDns.cs`](../src/RakDotNet.Plugins/DynDns/DynDns.cs), [`DynDnsResultCode.cs`](../src/RakDotNet.Plugins/DynDns/DynDnsResultCode.cs) | M8.7 | Dynamic DNS updater over a `TcpInterface` of its own, moved on by `Update`: the check-IP request, the update request and RakNet's result table and one-second phase timeouts. `CheckIpServer` and `UpdateServer` are where it connects and `ResolveHost` is DomainNameToIP. |
+| `EmailSender` (`EmailSender.cpp`, `EmailSender.h`) | [`EmailSender.cs`](../src/RakDotNet.Plugins/EmailSender/EmailSender.cs), [`EmailAttachment.cs`](../src/RakDotNet.Plugins/EmailSender/EmailAttachment.cs) | M8.7 | SMTP client over a `TcpInterface` of its own, `SendAsync` returning null or RakNet's error text: reply matching by the first known code, RakNet's dot-stuffing and multipart layout with a random base64-alphabet boundary. Attachments are `EmailAttachment`s in place of a `FileList`; `UseSsl` is the `OPEN_SSL_CLIENT_SUPPORT` build with STARTTLS and AUTH PLAIN. |
+| `Rackspace` (`Rackspace.cpp`, `Rackspace.h`) | [`Rackspace.cs`](../src/RakDotNet.Plugins/Rackspace/Rackspace.cs), [`IRackspaceEventCallback.cs`](../src/RakDotNet.Plugins/Rackspace/IRackspaceEventCallback.cs), [`RackspaceEventType.cs`](../src/RakDotNet.Plugins/Rackspace/RackspaceEventType.cs), [`RackspaceOperationType.cs`](../src/RakDotNet.Plugins/Rackspace/RackspaceOperationType.cs) | M8.7 | Rackspace Cloud Servers API v1.0 over an application's `TcpInterface`: a connection per operation, the result read from the status when it closes, operations waiting for authentication. `Rackspace2EventCallback` and `RackspaceEventCallback_Default` are one interface with default methods; `ServerEndPoint` is where a host's port-443 connections go. |
+| `Base64Encoder` (`Base64Encoder.cpp`, `Base64Encoder.h`) | [`Base64Encoder.cs`](../src/RakDotNet.Plugins/Base64Encoder/Base64Encoder.cs) | M8.7 | Base64 with RakNet's layout: a CRLF after every 76th character written, padding not counted, and a closing CRLF; used by `EmailSender` and `DynDns`. |
 
 ## Units used only by DependentExtensions
 
