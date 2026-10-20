@@ -7,6 +7,7 @@
 #include "KeyGeneration.h"
 #include "NatCommands.h"
 #include "PluginCommands.h"
+#include "RelayCommands.h"
 #include "SecurityCommands.h"
 
 #include "GetTime.h"
@@ -155,7 +156,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), nat_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), nat_(peer_), relay_(peer_) {}
 
         ~InteropPeer()
         {
@@ -324,6 +325,9 @@ namespace
             {
             }
             else if (nat_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (relay_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -612,6 +616,7 @@ namespace
         std::atomic<bool> stop_{false};
         interop::PluginCommands plugins_;
         interop::NatCommands nat_;
+        interop::RelayCommands relay_;
     };
 }
 

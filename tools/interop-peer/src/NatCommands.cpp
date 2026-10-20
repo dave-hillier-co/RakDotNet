@@ -1,5 +1,6 @@
 #include "NatCommands.h"
 
+#include "NatFields.h"
 #include "NatGateway.h"
 #include "PluginCommands.h"
 
@@ -12,9 +13,7 @@
 
 #include <arpa/inet.h>
 
-#include <cerrno>
 #include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -39,80 +38,7 @@ namespace interop
         }
     };
 
-    namespace
-    {
-        template <typename T>
-        T Optional(const json& command, const char* field, T fallback)
-        {
-            auto it = command.find(field);
-            if (it == command.end() || it->is_null())
-                return fallback;
-            return it->get<T>();
-        }
-
-        template <typename T>
-        T Required(const json& command, const char* field)
-        {
-            auto it = command.find(field);
-            if (it == command.end() || it->is_null())
-                throw PluginCommandError(std::string("missing field '") + field + "'");
-            return it->get<T>();
-        }
-
-        long long Ranged(long long value, const char* field, long long minimum, long long maximum)
-        {
-            if (value < minimum || value > maximum)
-                throw PluginCommandError(std::string("field '") + field + "' is out of range");
-            return value;
-        }
-
-        unsigned short PortField(const json& command, const char* field)
-        {
-            return static_cast<unsigned short>(Ranged(Required<long long>(command, field), field, 0, 65535));
-        }
-
-        RakNet::SystemAddress AddressFields(const json& command)
-        {
-            std::string host = Optional<std::string>(command, "host", "127.0.0.1");
-            unsigned short port = PortField(command, "port");
-            RakNet::SystemAddress address;
-            if (!address.FromStringExplicitPort(host.c_str(), port))
-                throw PluginCommandError("field 'host' is not an address");
-            return address;
-        }
-
-        RakNet::RakNetGUID GuidField(const json& command, const char* field)
-        {
-            const json value = Required<json>(command, field);
-            if (value.is_number_unsigned())
-                return RakNet::RakNetGUID(value.get<std::uint64_t>());
-            if (!value.is_string())
-                throw PluginCommandError(std::string("field '") + field + "' must be a decimal GUID string");
-            const std::string text = value.get<std::string>();
-            if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
-                throw PluginCommandError(std::string("field '") + field + "' must be a decimal GUID string");
-            errno = 0;
-            unsigned long long g = std::strtoull(text.c_str(), nullptr, 10);
-            if (errno == ERANGE)
-                throw PluginCommandError(std::string("field '") + field + "' is out of range");
-            return RakNet::RakNetGUID(static_cast<std::uint64_t>(g));
-        }
-
-        std::string AddressText(const RakNet::SystemAddress& address)
-        {
-            char buffer[128];
-            address.ToString(true, buffer, ':');
-            return buffer;
-        }
-
-        template <typename T>
-        void SetIfPresent(const json& command, const char* field, T& target, long long minimum, long long maximum)
-        {
-            auto it = command.find(field);
-            if (it != command.end() && !it->is_null())
-                target = static_cast<T>(Ranged(it->get<long long>(), field, minimum, maximum));
-        }
-    }
+    using namespace natfields;
 
     NatCommands::NatCommands(RakNet::RakPeerInterface* peer) : peer_(peer) {}
 

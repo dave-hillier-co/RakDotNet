@@ -136,6 +136,42 @@ The plugins' results reach the driver as `packet` events. The peer sets no `NatP
 they read the wrong arguments. A `NatTypeDetectionServer` or `NatTypeDetectionClient` is never freed, because
 `NatTypeDetectionServer::Shutdown` deletes sockets whose receive threads still run.
 
+### Relaying commands
+
+The relaying commands live in `tools/interop-peer/src/RelayCommands.cpp`. `udpForwarder*` drive a `UDPForwarder` of
+the process's own; the others attach and drive RakNet's relaying plugins, and every one but its plugin's attach command
+fails with `ok:false` until that plugin is attached. Addresses are `"a.b.c.d:port"` fields here.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `udpForwarderStartup` | `maxEntries` (absent keeps it) | | creates the process's `UDPForwarder` once, `SetMaxForwardEntries`, `Startup` |
+| `udpForwarderStart` | `source`, `destination`, `timeoutMs`, `forceHost` ("" binds every address) | `result` (`UDPForwarderResult` name, e.g. `UDPFORWARDER_SUCCESS`), `port` | `StartForwarding` |
+| `udpForwarderStop` | `source`, `destination` | | `StopForwarding` |
+| `udpForwarderInfo` | | `maxEntries`, `usedEntries` | `GetMaxForwardEntries`, `GetUsedForwardEntries` |
+| `udpForwarderShutdown` | | | `Shutdown` |
+| `udpProxyCoordinatorAttach` | `password` ("") | | `AttachPlugin` of a `UDPProxyCoordinator` once, then `SetRemoteLoginPassword` |
+| `udpProxyServerAttach` | `publicIp` (""), `maxForwardEntries` (absent keeps it) | | `AttachPlugin` of a `UDPProxyServer` once with the result handler, then `SetServerPublicIP` and its forwarder's `SetMaxForwardEntries` |
+| `udpProxyServerLogin` | `password`, `coordinator` (absent is `GetInternalID(UNASSIGNED_SYSTEM_ADDRESS, 0)`, this peer, as NATCompleteServer logs in) | `result` (bool) | `LoginToCoordinator` |
+| `udpProxyClientAttach` | | | `AttachPlugin` of a `UDPProxyClient` with the result handler; again is a no-op |
+| `udpProxyClientRequest` | `coordinator`, `target` (guid) or `targetAddress`, `timeoutMs`, `source` (absent is `UNASSIGNED_SYSTEM_ADDRESS`), `serverSelection` (hex, "") | `result` (bool) | `RequestForwarding` by GUID or by address |
+| `udpProxyCallbacks` | | `callbacks`: every result handler call so far, in order, as `{name, proxyIp, proxyPort, coordinator, source, target, targetGuid}` for the client's and `{name, password}` for the server's | `UDPProxyClientResultHandler`, `UDPProxyServerResultHandler` |
+| `router2Attach` | `maxForwardingRequests` (absent keeps it) | | `AttachPlugin` of a `Router2` once, then `SetMaximumForwardingRequests` |
+| `router2EstablishRouting` | `target` (guid) | | `EstablishRouting` |
+| `relayAttach` | `acceptAddParticipantRequests` (false) | | `AttachPlugin` of a `RelayPlugin` once, then `SetAcceptAddParticipantRequests` |
+| `relayAddParticipantOnServer` | `key`, `target` (guid) | `result` (`RelayPluginEnums` name, e.g. `RPE_ADD_CLIENT_SUCCESS`) | `AddParticipantOnServer` |
+| `relayRemoveParticipantOnServer` | `target` (guid) | | `RemoveParticipantOnServer` |
+| `relayAddParticipantRequest` | `key`, `server` (guid) | | `AddParticipantRequestFromClient` |
+| `relayRemoveParticipantRequest` | `server` (guid) | | `RemoveParticipantRequestFromClient` |
+| `relaySendToParticipant` | `server` (guid), `key`, `data` (hex), `bits` (all of `data`), `priority` (`HIGH_PRIORITY`), `reliability` (`RELIABLE_ORDERED`), `channel` (0) | | `SendToParticipant` of the first `bits` of `data`, most significant bit first |
+| `relaySendGroupMessage` | `server` (guid), `data`, `bits`, `priority`, `reliability`, `channel` as above | | `SendGroupMessage` |
+| `relayJoinGroup` | `server` (guid), `group` | | `JoinGroupRequest` |
+| `relayLeaveGroup` | `server` (guid) | | `LeaveGroup` |
+| `relayGetGroupList` | `server` (guid) | | `GetGroupList` |
+
+An unassigned address in a callback is `"UNASSIGNED_SYSTEM_ADDRESS"`, as `SystemAddress::ToString` writes it. Router2's
+and RelayPlugin's results reach the driver as `packet` events. The peer sets no `Router2DebugInterface`: Router2 formats
+its messages with `%I64d`, as `NatPunchthroughClient` does.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

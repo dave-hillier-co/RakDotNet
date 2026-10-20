@@ -180,11 +180,20 @@ public sealed class Router2 : IRakPlugin
         forwarder?.Dispose();
     }
 
-    /// <summary>OnRakPeerShutdown: forgets every request, punch and forwarded connection.</summary>
+    /// <summary>
+    /// OnRakPeerShutdown: forgets every request, punch and forwarded connection, and stops the forwarder, which RakNet
+    /// keeps for a restart that a <see cref="RakPeer"/> never makes (docs/api-design.md decision 11.10).
+    /// </summary>
     void IRakPlugin.OnShutdown()
     {
+        UdpForwarder? forwarder;
         lock (_gate)
+        {
             ClearAll();
+            forwarder = _udpForwarder;
+            _udpForwarder = null;
+        }
+        forwarder?.Dispose();
     }
 
     /// <summary>Update (Router2.cpp:345-418).</summary>

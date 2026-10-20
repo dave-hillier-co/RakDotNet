@@ -109,6 +109,10 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
 | NATCompleteClient, NATCompleteServer: NAT type detection | A client behind no router and behind each kind of router is told its kind; a client that never runs the test is asked twice, then told symmetric |
 | NATCompleteClient, NATCompleteServer: NAT punchthrough | Punchthrough between routers of each kind that allow it, then a connection through both; failure where they do not, with and without a retry; an unknown recipient, an unresponsive one, one that leaves the facilitator |
+| NATCompleteClient, NATCompleteServer: UDP proxy | Clients behind symmetric routers, after punchthrough fails, connect through a proxy server that logs into a coordinator on the same peer; logins without, with the wrong and with the right password; no servers, an unknown recipient, a request in progress, every server busy |
+| NATCompleteClient: Router2, Router2 | Routing through a router both systems are connected to, then a connection through it; rerouting through another when the router drops; no router connected to the endpoint |
+| UDPForwarder | A connection through the forwarder's port; RakNet's results for invalid, existing and excess entries; an entry removed after its timeout |
+| RelayPluginTest | Participants added on request when the server accepts them; a message to a participant by name; groups joined, messaged, listed and left, and left on disconnection |
 
 ## Milestones
 

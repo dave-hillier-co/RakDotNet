@@ -75,6 +75,7 @@ add_library(interop_logic STATIC
   src/Names.cpp
   src/NatCommands.cpp
   src/NatGateway.cpp
+  src/RelayCommands.cpp
   src/PacketEvent.cpp
   src/PluginCommands.cpp
   src/SecurityCommands.cpp)

@@ -382,6 +382,7 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
             return;
         }
         await ShutdownAsync(100, CancellationToken.None).ConfigureAwait(false);
+        _udpForwarder?.Dispose();
     }
 
     /// <summary>
