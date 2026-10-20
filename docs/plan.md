@@ -109,6 +109,8 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | ConnectionGraph2, as the FullyConnectedMesh2 samples attach it | A star of four: new connections announced to the others and listed to the newcomer, a disconnect and a lost connection announced, participants added by hand |
 | Fully Connected Mesh, FCMHost, FCMHostSimultaneous | A chain and a star becoming a full mesh with the oldest system as host, host migration when the host shuts down, systems all connecting to each other at once agreeing on one host |
 | FCMVerifiedJoinSimultaneous | A verified join accepted, rejected and failed on an unreachable participant, with user data; verified joins started for three clients at once ending in one mesh |
+| TeamManager | Static teams and each user serialised to every system of a mesh; requests for any team filling the emptiest, a full team refusing and keeping the request until a place frees, a cancelled request; a team switch, a lowered member limit and balancing moving members; the next host resolving requests after the host leaves; a client-server host relaying each client's changes |
+| TeamBalancer (no sample; derived from its header) | Any-team requests by smallest team and in order, a switch to a full team waiting for a swap, locked teams refusing a switch until unlocked, asking for no team, a waiting member moving in when a member disconnects, a new host told each system's members |
 
 ## Milestones
 
