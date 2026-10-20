@@ -55,6 +55,24 @@ public sealed class HttpScenarios
     }
 
     [Theory]
+    [InlineData(PeerKind.Native)]
+    [InlineData(PeerKind.RakDotNet)]
+    public async Task A_request_over_511_bytes_is_cut_by_POSIX_RakNet_and_formatted_whole_by_RakDotNet(PeerKind kind)
+    {
+        // RakString::Assign checks the length of the format, not of its output, so on POSIX the output is cut at 511
+        // bytes (RakString.cpp:1376-1386) and Content-Length no longer matches the body; on Windows it is whole.
+        // RakDotNet formats the request whole on every platform.
+        await using var peer = await TcpPeer.LaunchAsync(kind, "client", Token);
+        var body = new string('b', 600);
+
+        var request = await peer.Tcp.FormatHttpRequestAsync(new HttpRequestSpec("POST", "http://example.com/p", "text/plain", body), Token);
+
+        var whole = $"POST /p HTTP/1.1\r\nHost: example.com\r\nContent-Type: text/plain\r\nContent-Length: 600\r\n\r\n{body}";
+        var expected = kind == PeerKind.Native && !OperatingSystem.IsWindows() ? whole[..511] : whole;
+        Assert.Equal(expected, Encoding.ASCII.GetString(request));
+    }
+
+    [Theory]
     [MemberData(nameof(PeerMatrix.ClientServer), MemberType = typeof(PeerMatrix))]
     public async Task HttpConnection2_keeps_the_connection_for_the_next_request_and_joins_a_chunked_response(PeerKind client, PeerKind server)
     {

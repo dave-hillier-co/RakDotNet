@@ -7,7 +7,15 @@ namespace RakDotNet.Plugins;
 /// <see cref="HttpConnection2.TransmitRequest"/>, the SplitURI they use, and the URLDecode
 /// <see cref="HttpConnection"/> applies to what it receives (RakString.cpp:890-1164).
 /// </summary>
-/// <remarks>Lengths are bytes, as RakString's strlen counts them; strings are written as UTF-8.</remarks>
+/// <remarks>
+/// <para>Lengths are bytes, as RakString's strlen counts them; strings are written as UTF-8.</para>
+/// <para>
+/// Requests are formatted whole, as RakNet formats them on Windows. On POSIX RakString's printf-style Set checks the
+/// length of the format rather than of its output and cuts the output at 511 bytes (RakString.cpp:1376-1386), so a
+/// longer request goes out short of its Content-Length; that cut is not reproduced here, nor in the requests
+/// <see cref="HttpConnection"/> and <see cref="Rackspace"/> build.
+/// </para>
+/// </remarks>
 public static class HttpFormat
 {
     /// <summary>FormatForGET; empty when the URI has no host or no path (RakString.cpp:1091-1126).</summary>

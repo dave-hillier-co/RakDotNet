@@ -124,6 +124,9 @@ nothing, then `Receive` until it returns nothing, then `HasFailedConnectionAttem
 `httpConnectionStart` has run, each poll instead passes every packet to `HTTPConnection::ProcessTCPPacket` and then calls
 its `Update`, which takes the connection events itself, as Samples/PHPDirectoryServer2 does.
 
+A native peer built for POSIX returns `httpFormat` requests cut at 511 bytes, as RakString's printf-style `Set` cuts its
+output there (`RakString.cpp:1376-1386`); RakDotNet, like RakNet on Windows, returns them whole.
+
 | `cmd` | Fields (defaults) | Reply fields | RakNet call |
 |---|---|---|---|
 | `tcpStart` | `packetized` (false), `port` (0), `maxIncoming` (0), `maxConnections` (0), `host` (bind address; absent binds every address) | `started` (bool), `port` (the listening port, 0 when not listening) | `GetInstance` of `TCPInterface` or `PacketizedTCP` on first use, then `Start`; the port is read from the listening socket |
