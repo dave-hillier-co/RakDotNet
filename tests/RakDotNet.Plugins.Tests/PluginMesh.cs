@@ -6,11 +6,11 @@ using RakDotNet.Testing;
 namespace RakDotNet.Plugins.Tests;
 
 /// <summary>What a test keeps of a borrowed <see cref="PeerEvent"/>.</summary>
-internal sealed record SeenEvent(PeerEventKind Kind, byte[] Data, RakNetGuid RakNetGuid, SystemAddress Address, RakConnection? Connection)
+internal sealed record SeenEvent(PeerEventKind Kind, byte[] Data, RakNetGuid RakNetGuid, SystemAddress Address, RakConnection? Connection, bool IsLocal)
 {
     public byte Id => Data.Length > 0 ? Data[0] : (byte)0;
 
-    public static SeenEvent From(in PeerEvent e) => new(e.Kind, e.ToArray(), e.RakNetGuid, e.Address, e.Connection);
+    public static SeenEvent From(in PeerEvent e) => new(e.Kind, e.ToArray(), e.RakNetGuid, e.Address, e.Connection, e.IsLocal);
 }
 
 /// <summary>Manual-mode peers on one <see cref="InMemoryNetwork"/> sharing a fake clock.</summary>
