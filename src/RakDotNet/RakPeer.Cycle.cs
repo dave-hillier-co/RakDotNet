@@ -213,6 +213,8 @@ public sealed partial class RakPeer
                 observer.OnUpdateCycle();
             foreach (var observer in _plugins.Observers)
                 observer.OnUpdateCycle();
+            if (_core.TakeUpdateRequest())
+                Wake();
         }
     }
 

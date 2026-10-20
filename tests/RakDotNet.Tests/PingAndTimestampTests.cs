@@ -42,6 +42,89 @@ public class PingAndTimestampTests
     }
 
     [Fact]
+    public void A_background_peer_answers_a_connected_ping_without_waiting_for_its_next_update_tick()
+    {
+        // RakPeer.cpp:6086-6091: after queuing ID_CONNECTED_PONG RakNet sets quitAndDataEvents, "so the ping goes out right
+        // away" rather than on the next update tick. Here the clock runs but the update ticks come only from the test:
+        // every 50 ms while connecting, so the handshake's round trip spans ticks, and none once connected, so only that
+        // wake can send the pong.
+        var time = new HandTickedTimeProvider();
+        using var server = RakPeer.Start(Options(time, maxIncoming: 4) with { Threading = PeerThreading.Background });
+        using var client = RakPeer.Start(Options(time, maxIncoming: 0) with { Threading = PeerThreading.Background });
+        RakConnection? connection = null;
+        client.Connect(server.Sockets[0].LocalAddress);
+        for (var i = 0; i < 100 && connection is null; i++)
+        {
+            Thread.Sleep(50);
+            time.Tick();
+            while (client.Events.TryRead(out var e))
+            {
+                if (e.Kind == PeerEventKind.Connected)
+                    connection = e.Connection;
+            }
+        }
+        Assert.NotNull(connection);
+        Thread.Sleep(100);
+        var handshake = connection.LowestPing!.Value;
+        Assert.True(handshake >= TimeSpan.FromMilliseconds(40), $"The handshake took {handshake.TotalMilliseconds} ms.");
+
+        connection.Ping();
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (connection.LowestPing == handshake && DateTime.UtcNow < deadline)
+            Thread.Sleep(5);
+
+        Assert.True(connection.LowestPing < handshake, "No pong arrived.");
+    }
+
+    // The system clock, with periodic timers that fire only when Tick is called; one-shot timers never fire.
+    private sealed class HandTickedTimeProvider : TimeProvider
+    {
+        private readonly List<HandTickedTimer> _timers = [];
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new HandTickedTimer(callback, state, period != Timeout.InfiniteTimeSpan);
+            lock (_timers)
+                _timers.Add(timer);
+            return timer;
+        }
+
+        public void Tick()
+        {
+            HandTickedTimer[] timers;
+            lock (_timers)
+                timers = [.. _timers];
+            foreach (var timer in timers)
+                timer.Fire();
+        }
+    }
+
+    private sealed class HandTickedTimer(TimerCallback callback, object? state, bool periodic) : ITimer
+    {
+        private volatile bool _stopped = !periodic;
+
+        public void Fire()
+        {
+            if (!_stopped)
+                callback(state);
+        }
+
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            _stopped = period == Timeout.InfiniteTimeSpan;
+            return true;
+        }
+
+        public void Dispose() => _stopped = true;
+
+        public ValueTask DisposeAsync()
+        {
+            _stopped = true;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    [Fact]
     public void An_ID_TIMESTAMP_message_arrives_in_the_receivers_clock()
     {
         var time = new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero));

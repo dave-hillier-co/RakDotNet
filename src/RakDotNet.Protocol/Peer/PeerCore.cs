@@ -61,6 +61,7 @@ internal sealed class PeerCore
     private readonly List<ConnectionAttempt> _attempts = [];
     private readonly Queue<OutgoingDatagram> _datagrams = new();
     private readonly Queue<PeerEvent> _events = new();
+    private bool _updateRequested;
     private readonly BanTable _bans = new();
     private byte[] _offlinePingResponse = [];
     private long _defaultTimeoutMs;
@@ -280,6 +281,17 @@ internal sealed class PeerCore
     }
 
     public bool TryDequeueDatagram(out OutgoingDatagram datagram) => _datagrams.TryDequeue(out datagram);
+
+    /// <summary>
+    /// Whether an update asked for another straight after it, as RakNet sets quitAndDataEvents once it has queued an
+    /// ID_CONNECTED_PONG (RakPeer.cpp:6090-6091); reading it clears it.
+    /// </summary>
+    public bool TakeUpdateRequest()
+    {
+        var requested = _updateRequested;
+        _updateRequested = false;
+        return requested;
+    }
 
     /// <summary>
     /// The next event, as RakPeer::Receive returns it: a message starting with ID_TIMESTAMP and long enough to hold a
@@ -777,6 +789,8 @@ internal sealed class PeerCore
                 {
                     var reply = Encode(new ConnectedPong(ping.SendPingTime, (ulong)nowMs));
                     SendImmediate(system, reply, Reliability.Unreliable, Priority.Immediate, 0, 0, nowUs);
+                    // RakPeer.cpp:6090-6091: update again straight after this one so the pong goes out right away.
+                    _updateRequested = true;
                 }
                 break;
 
