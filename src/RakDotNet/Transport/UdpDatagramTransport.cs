@@ -21,6 +21,13 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
     // Larger than any datagram, so an oversized one is read whole and then ignored rather than truncated.
     private const int SlotSize = 64 * 1024;
 
+    // Linux <netinet/in.h>: IP_MTU_DISCOVER at IPPROTO_IP and IPV6_MTU_DISCOVER at IPPROTO_IPV6, which
+    // Socket.DontFragment sets on Linux.
+    private const int IpProtocolIp = 0;
+    private const int IpMtuDiscover = 10;
+    private const int IpProtocolIpv6 = 41;
+    private const int Ipv6MtuDiscover = 23;
+
     private readonly Socket _socket;
     private readonly SocketAddress _receiveAddress;
     private readonly SocketAddress _slotAddress;
@@ -53,6 +60,21 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
     internal int ReceiveBufferSize => _socket.ReceiveBufferSize;
 
     internal int SendBufferSize => _socket.SendBufferSize;
+
+    /// <summary>The raw IP_MTU_DISCOVER (or IPV6_MTU_DISCOVER) value. Linux only.</summary>
+    internal int PathMtuDiscovery
+    {
+        get
+        {
+            Span<byte> value = stackalloc byte[sizeof(int)];
+            var (level, name) = MtuDiscoverOption;
+            _socket.GetRawSocketOption(level, name, value);
+            return BitConverter.ToInt32(value);
+        }
+    }
+
+    private (int Level, int Name) MtuDiscoverOption =>
+        _socket.AddressFamily == AddressFamily.InterNetworkV6 ? (IpProtocolIpv6, Ipv6MtuDiscover) : (IpProtocolIp, IpMtuDiscover);
 
     /// <summary>
     /// Binds a UDP socket as RakNet's RNS2_Berkley::BindShared does (RakNetSocket2_Berkley.cpp:160-263,
@@ -202,7 +224,7 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         }
         lock (_sendGate)
         {
-            var dontFragment = SetDontFragment(true);
+            var restore = SetDontFragment();
             try
             {
                 remote.CopyTo(_sendAddress);
@@ -220,8 +242,8 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
             }
             finally
             {
-                if (dontFragment)
-                    SetDontFragment(false);
+                if (restore is { } previous)
+                    RestoreDontFragment(previous);
             }
         }
     }
@@ -232,23 +254,48 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         _socket.Dispose();
     }
 
-    private bool SetDontFragment(bool value)
+    /// <summary>
+    /// Sets don't-fragment and returns what puts the socket back: on Linux the raw path MTU discovery mode it had (a new
+    /// socket's IP_PMTUDISC_WANT, which Socket.DontFragment = false would turn into IP_PMTUDISC_DONT), elsewhere 0. Null
+    /// when the option could not be set.
+    /// </summary>
+    private int? SetDontFragment()
     {
         if (!_dontFragmentSupported)
-            return false;
+            return null;
         try
         {
-            _socket.DontFragment = value;
-            return true;
+            var previous = OperatingSystem.IsLinux() ? PathMtuDiscovery : 0;
+            _socket.DontFragment = true;
+            return previous;
         }
         catch (Exception exception) when (exception is SocketException or NotSupportedException)
         {
             _dontFragmentSupported = false;
-            return false;
+            return null;
         }
         catch (ObjectDisposedException)
         {
-            return false;
+            return null;
+        }
+    }
+
+    private void RestoreDontFragment(int previous)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                var (level, name) = MtuDiscoverOption;
+                _socket.SetRawSocketOption(level, name, BitConverter.GetBytes(previous));
+            }
+            else
+            {
+                _socket.DontFragment = false;
+            }
+        }
+        catch (Exception exception) when (exception is SocketException or NotSupportedException or ObjectDisposedException)
+        {
         }
     }
 

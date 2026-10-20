@@ -84,6 +84,20 @@ public sealed class UdpDatagramTransportTests : IDisposable
     }
 
     [Fact]
+    public void A_dont_fragment_send_leaves_linux_path_mtu_discovery_as_it_found_it()
+    {
+        // Socket.DontFragment on Linux is IP_MTU_DISCOVER: true is IP_PMTUDISC_DO and false IP_PMTUDISC_DONT, while a new
+        // socket starts at IP_PMTUDISC_WANT. Native RakNet never touches the option there (IP_DONTFRAGMENT is not
+        // defined, RakNetSocket2_Berkley.cpp:71-80), so later sends must go out as they did before the probe.
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "IP_MTU_DISCOVER is Linux only.");
+        var before = _transport.PathMtuDiscovery;
+
+        Assert.True(_transport.TrySendDoNotFragment([1, 2, 3], new SystemAddress(IPAddress.Loopback, ((IPEndPoint)_sender.LocalEndPoint!).Port), out _));
+
+        Assert.Equal(before, _transport.PathMtuDiscovery);
+    }
+
+    [Fact]
     public void Socket_buffers_default_to_raknets_256_KiB_receive_and_16_KiB_send()
     {
         // RNS2_Berkley::SetSocketOptions (RakNetSocket2_Berkley.cpp:25-53) always sets SO_RCVBUF 262144 and SO_SNDBUF

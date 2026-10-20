@@ -57,6 +57,24 @@ public sealed class MtuProbeSendTests
         Assert.Equal([1492, 576], path.DoNotFragmentSends.Select(d => d.Length + RakNetConstants.UdpHeaderSize));
     }
 
+    [Fact]
+    public void Probes_bypass_the_network_simulator()
+    {
+        // RakNet applies the simulator in ReliabilityLayer only (ReliabilityLayer.cpp:2257-2296), so the probes sent by
+        // RakPeer.cpp:5779-5821 keep don't-fragment and the too-large report while the simulator delays connected traffic.
+        using var path = new PathTransport { MaxDoNotFragmentLength = 1200 - RakNetConstants.UdpHeaderSize };
+        using var peers = new ManualPeers(client: o => o with
+        {
+            Bindings = [path.Binding],
+            NetworkSimulator = new NetworkSimulatorOptions(0f, TimeSpan.FromMilliseconds(50), TimeSpan.Zero),
+        });
+
+        var connection = peers.Connect();
+
+        Assert.Equal(1200, connection.Mtu);
+        Assert.Equal([1492, 1200], path.DoNotFragmentSends.Select(d => d.Length + RakNetConstants.UdpHeaderSize));
+    }
+
     /// <summary>A loopback UDP transport standing in for a path whose MTU is <see cref="MaxDoNotFragmentLength"/>.</summary>
     private sealed class PathTransport : IDatagramTransport
     {

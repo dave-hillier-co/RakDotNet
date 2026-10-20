@@ -158,9 +158,11 @@ public sealed partial class RakPeer
         while (true)
         {
             wake.Wait();
+            // Reset before the stop check: Stop sets the flag and then the event, so a Set that a Reset here clears was
+            // preceded by the flag, and one landing after the Reset leaves the event set for the next Wait.
+            wake.Reset();
             if (_loopStopping)
                 return;
-            wake.Reset();
             Interlocked.Exchange(ref _wakePending, 0);
             try
             {
