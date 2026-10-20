@@ -129,6 +129,8 @@ internal sealed class PeerCore : IDisposable
     /// </summary>
     public void Dispose()
     {
+        foreach (var slot in _slots)
+            slot?.Session.ClearKeys();
         _serverHandshake?.Dispose();
         foreach (var attempt in _attempts)
             attempt.Security?.Dispose();
@@ -1258,11 +1260,16 @@ internal sealed class PeerCore : IDisposable
             return;
         }
 
-        // A cross connection may already have made this system (RakPeer.cpp:4941-4954).
+        // A cross connection may already have made this system (RakPeer.cpp:4941-4954). A secure attempt always takes a
+        // secure slot and never completes on an insecure one: the C++ assigns the slot with the reply's
+        // requiresSecurity and reuses it whatever its useSecurity, so a forged insecure reply followed by the genuine
+        // one keys an auth_enc that is never used and sends the request, proof included, in the clear.
         var system = FindActive(from);
         var connectedRecently = false;
         if (system is null)
-            system = Assign(from, ConnectMode.UnverifiedSender, reply.MtuSize, reply.ServerGuid, nowUs, out connectedRecently, reply.RequiresSecurity);
+            system = Assign(from, ConnectMode.UnverifiedSender, reply.MtuSize, reply.ServerGuid, nowUs, out connectedRecently, reply.RequiresSecurity || security is not null);
+        if (security is not null && system is { Session.UsesSecurity: false })
+            return;
         if (connectedRecently)
         {
             // RakPeer.cpp:4958 skips the request and the failure alike; the attempt is dropped without an event.
@@ -1275,8 +1282,7 @@ internal sealed class PeerCore : IDisposable
         {
             // RakPeer.cpp:4964-4998: a request made with a client handshake always processes the server's answer, which
             // keys this system's encryption. An invalid or missing answer (an insecure reply has none) returns before
-            // ID_CONNECTION_REQUEST, with the slot assigned and the request still queued, so a forged insecure reply
-            // cannot downgrade a secure connect.
+            // ID_CONNECTION_REQUEST, with the slot assigned and the request still queued.
             byte[]? identity = null;
             if (security is not null)
             {
@@ -1486,6 +1492,7 @@ internal sealed class PeerCore : IDisposable
             SplitMessageProgressInterval = _splitMessageProgressInterval,
         };
         var system = new RemoteSystem(index, address, guid, session, mode, nowMs) { Mtu = mtu };
+        _slots[index]?.Session.ClearKeys();
         _slots[index] = system;
         _active.Add(system);
         SlotsVersion++;
@@ -1520,6 +1527,7 @@ internal sealed class PeerCore : IDisposable
         if (!system.IsActive)
             return;
         system.IsActive = false;
+        system.Session.ClearKeys();
         system.Guid = RakNetConstants.UnassignedGuid;
         // RemoveFromActiveSystemList, RakPeer.cpp:3945-3958: the last entry fills the hole.
         var index = _active.IndexOf(system);

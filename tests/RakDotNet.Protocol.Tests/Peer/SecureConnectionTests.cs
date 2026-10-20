@@ -396,6 +396,77 @@ public sealed class SecureConnectionTests : IDisposable
     }
 
     [Fact]
+    public void A_forged_insecure_reply_2_cannot_downgrade_a_secure_connect()
+    {
+        // Native RakPeer.cpp:4941-4998 reuses the slot the forged reply assigned without security, keys an auth_enc it
+        // never uses, and sends the request with its proof in the clear. A secure attempt always takes a secure slot.
+        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs, ServerKeys.Known());
+        _client.Receive(ServerAddress, Encode(new OpenConnectionReply2(ServerGuid, ClientAddress, 1492)), _link.NowUs);
+
+        // The genuine offline handshake runs, but everything else the client sends goes to a man in the middle. An
+        // encrypted datagram's first byte is ciphertext, so only the offline magic tells the two apart.
+        var captured = new List<byte[]>();
+        _link.Drop = (from, _, data) =>
+        {
+            if (!from.Equals(ClientAddress) || OfflineMagic.Matches(data.AsSpan(1)))
+                return false;
+            captured.Add(data);
+            return true;
+        };
+        _link.RunUntil(() => captured.Count > 0, TimeSpan.FromSeconds(5));
+
+        Assert.True(Slot(_client, ServerAddress).Session.UsesSecurity);
+        // ID_CONNECTION_REQUEST carries the client's GUID; in the clear it would be there to read.
+        var guid = new byte[sizeof(ulong)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(guid, ClientGuid);
+        Assert.DoesNotContain(captured, d => d.AsSpan().IndexOf(guid) >= 0);
+
+        // The man in the middle accepts in the clear.
+        var mitm = new ReliabilityLayer(1492, _link.NowUs);
+        mitm.Send(Encode(new ConnectionRequestAccepted(ClientAddress, 0, InternalAddressList.Pad([ServerAddress]), 1, 2)), Reliability.Reliable, Priority.Immediate, 0, 0, _link.NowUs);
+        mitm.Update(_link.NowUs + 1_000);
+        while (mitm.TryDequeueDatagram(out var datagram))
+            _client.Receive(ServerAddress, datagram, _link.NowUs);
+        _link.Step();
+        Assert.DoesNotContain(ClientEvents, e => e is OutgoingConnectionCompleted);
+
+        // The genuine server, once reachable, completes the secure connection.
+        _link.Drop = null;
+        _link.RunUntil(() => ClientEvents.OfType<OutgoingConnectionCompleted>().Any(), TimeSpan.FromSeconds(5));
+        Assert.True(Slot(_client, ServerAddress).Session.UsesSecurity);
+    }
+
+    [Fact]
+    public void Shutting_down_zeroes_every_connections_keys()
+    {
+        ConnectAndWait(ServerKeys.Known());
+        var clientKeys = Slot(_client, ServerAddress).Session.Encryption;
+        var serverKeys = Slot(_server, ClientAddress).Session.Encryption;
+        Assert.False(IsZero(clientKeys.ExportKeyState()));
+
+        _client.Dispose();
+        _server.Dispose();
+
+        Assert.True(IsZero(clientKeys.ExportKeyState()));
+        Assert.True(IsZero(serverKeys.ExportKeyState()));
+    }
+
+    [Fact]
+    public void Closing_a_connection_zeroes_its_keys()
+    {
+        ConnectAndWait(ServerKeys.Known());
+        var keys = Slot(_client, ServerAddress).Session.Encryption;
+
+        _client.CloseConnection(ServerAddress, false, 0, Priority.Low, _link.NowUs);
+
+        Assert.True(IsZero(keys.ExportKeyState()));
+    }
+
+    private static bool IsZero(KeyState state) =>
+        new[] { state.LocalCipherWords, state.RemoteCipherWords, state.LocalMacInitial, state.LocalMacFinal, state.RemoteMacInitial, state.RemoteMacFinal }
+            .All(bytes => bytes.All(b => b == 0));
+
+    [Fact]
     public void A_bad_server_key_is_refused_when_connecting()
     {
         // GenerateConnectionRequestChallenge fails, which Connect reports as SECURITY_INITIALIZATION_FAILED.

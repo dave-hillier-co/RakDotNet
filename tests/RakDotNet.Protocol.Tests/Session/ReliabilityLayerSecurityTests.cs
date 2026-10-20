@@ -42,6 +42,34 @@ public class ReliabilityLayerSecurityTests
         Assert.Equal(Assert.Single(Take(plain)).Length + AuthenticatedEncryption.OverheadBytes, Assert.Single(Take(secure)).Length);
     }
 
+    [Fact]
+    public void Encrypting_a_datagram_allocates_no_more_than_its_overhead_beyond_a_plain_send()
+    {
+        // The datagram is encrypted where it is written, so a secure send makes the same arrays as a plain one.
+        var (secure, _) = SecurePair(1492);
+        var plain = new ReliabilityLayer(1492, Start);
+        var allocated = new Dictionary<ReliabilityLayer, long>();
+        foreach (var layer in new[] { secure, plain })
+        {
+            var nowUs = Start;
+            for (var i = 0; i < 4; i++)
+                SendOne(layer, ref nowUs);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            SendOne(layer, ref nowUs);
+            allocated[layer] = GC.GetAllocatedBytesForCurrentThread() - before;
+        }
+
+        Assert.InRange(allocated[secure] - allocated[plain], 0, 2 * AuthenticatedEncryption.OverheadBytes);
+
+        static void SendOne(ReliabilityLayer layer, ref long nowUs)
+        {
+            nowUs += 1_000;
+            layer.Send(new byte[400], Reliability.Unreliable, Priority.High, 0, 0, nowUs);
+            layer.Update(nowUs);
+            Take(layer);
+        }
+    }
+
     [Theory]
     [InlineData(576)]
     [InlineData(1200)]

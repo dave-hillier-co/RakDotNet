@@ -205,6 +205,12 @@ internal sealed class ReliabilityLayer
     /// </summary>
     public AuthenticatedEncryption Encryption => _encryption ??= new AuthenticatedEncryption();
 
+    /// <summary>
+    /// Zeroes the keys <see cref="Encryption"/> holds, as deleting the RemoteSystem runs ~Skein, ~HMAC_MD5 and
+    /// ~ChaChaKey (Skein.cpp:33-37, HMAC_MD5.cpp:178-182, ChaCha.cpp:37-40).
+    /// </summary>
+    public void ClearKeys() => _encryption?.Clear();
+
     private int SecurityOverhead => _useSecurity ? AuthenticatedEncryption.OverheadBytes : 0;
 
     /// <summary>IsDeadConnection.</summary>
@@ -754,7 +760,7 @@ internal sealed class ReliabilityLayer
             // Sliding window never sends B and AS (CCRakNetSlidingWindow.cpp:264-271).
             DatagramHeader.ForAck().Write(ref writer);
             _acknowledgements.Write(ref writer, MaxPayloadBits);
-            SendDatagram(writer.Written.ToArray(), nowUs);
+            SendDatagram(writer.Written, nowUs);
             _window.OnSendAck();
         }
     }
@@ -765,7 +771,7 @@ internal sealed class ReliabilityLayer
         var writer = new BitStreamWriter(new byte[_mtu]);
         DatagramHeader.ForNak().Write(ref writer);
         _naks.Write(ref writer, MaxPayloadBits);
-        SendDatagram(writer.Written.ToArray(), nowUs);
+        SendDatagram(writer.Written, nowUs);
     }
 
     // ReliabilityLayer.cpp:1860-1881.
@@ -978,20 +984,17 @@ internal sealed class ReliabilityLayer
         }
 
         _datagramHistory.Add(nowUs, messageNumbers);
-        SendDatagram(writer.Written.ToArray(), nowUs);
+        SendDatagram(writer.Written, nowUs);
     }
 
     // SendBitStream, ReliabilityLayer.cpp:2247-2340.
-    private void SendDatagram(byte[] datagram, long nowUs)
+    private void SendDatagram(ReadOnlySpan<byte> written, long nowUs)
     {
-        // ReliabilityLayer.cpp:2304-2315: Encrypt appends the overhead.
+        // ReliabilityLayer.cpp:2304-2315: Encrypt appends the overhead, in the one array the datagram is copied to.
+        var datagram = new byte[written.Length + SecurityOverhead];
+        written.CopyTo(datagram);
         if (_useSecurity)
-        {
-            var encrypted = new byte[datagram.Length + AuthenticatedEncryption.OverheadBytes];
-            datagram.CopyTo(encrypted, 0);
-            Encryption.Encrypt(encrypted, datagram.Length, out _);
-            datagram = encrypted;
-        }
+            Encryption.Encrypt(datagram, written.Length, out _);
         _metrics[(int)SessionMetric.ActualBytesSent].Push(nowUs, (ulong)datagram.Length);
         _datagrams.Enqueue(datagram);
     }
