@@ -1,6 +1,7 @@
 // interop-peer: one RakNet RakPeerInterface driven by JSON Lines on stdin and stdout.
 // The protocol is specified in docs/interop-protocol.md.
 
+#include "ConsoleCommands.h"
 #include "Hex.h"
 #include "Names.h"
 #include "PacketEvent.h"
@@ -155,7 +156,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), console_(peer_) {}
 
         ~InteropPeer()
         {
@@ -324,6 +325,9 @@ namespace
             {
             }
             else if (tcp_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (console_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -612,6 +616,7 @@ namespace
         std::atomic<bool> stop_{false};
         interop::PluginCommands plugins_;
         interop::TcpCommands tcp_;
+        interop::ConsoleCommands console_;
     };
 }
 

@@ -149,6 +149,27 @@ without one frees the slot at that index, out of range (`TCPInterface.cpp:593-60
 slot, and a slot never used has socket 0 (`TCPInterface.cpp:298-304`), so `tcpStop` saves the peer's stdin, descriptor
 0, around the call and restores it.
 
+### Console commands
+
+Console commands put a `ConsoleServer` on the peer, set up as `Samples/CommandConsoleServer` sets one up, with
+`RakNetTransport2` attached to the peer or a `TelnetTransport` of its own. They live in
+`tools/interop-peer/src/ConsoleCommands.cpp`. `consoleStart` needs a started peer, and the other commands fail with
+`ok:false` until it has created a `LogCommandParser`. The console is updated by a plugin attached after it, so
+`ConsoleServer::Update` runs each time `RakPeer::Receive` updates its plugins, under the lock every command holds. A
+console client over `RakNetTransport2` is any peer: it connects, sends `ID_TRANSPORT_STRING`, the line and a zero byte,
+and receives each reply as an `ID_TRANSPORT_STRING` packet. A telnet client is a `tcpStart` and `tcpConnect` to the
+reported port.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `consoleStart` | `transport` (`raknet` or `telnet`), `port` (0, for telnet), `prompt` ("", none), `channels` (array of names, []), `rakNetParser` (true), `logParser` (true) | `port` (the telnet listening port, 0 for `raknet`) | `AddCommandParser` of a `RakNetCommandParser` and a `LogCommandParser`, `AttachPlugin` of a `RakNetTransport2` for `raknet`, `SetTransportProvider`, `SetPrompt`, `SetRakPeerInterface`, `AddChannel` for each channel |
+| `consoleLog` | `channel`, `text` | | `LogCommandParser::WriteLog(channel, "%s", text)` |
+| `packetConsoleLoggerAttach` | | | `AttachPlugin` of a `PacketConsoleLogger` after `SetLogCommandParser`; again is a no-op |
+
+`TelnetTransport` keeps its `TCPInterface` protected, and `TCPInterface` its listening socket, so the port is read
+through a subclass and a pointer to the protected member. `LogCommandParser` keeps the channel name pointers it is given, so the
+peer keeps every name it passes alive.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

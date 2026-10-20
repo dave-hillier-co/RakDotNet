@@ -71,6 +71,7 @@ set_target_properties(interop_keys PROPERTIES CXX_STANDARD 98 CXX_STANDARD_REQUI
 
 # Translation logic (hex, enum names, packet events, plugin and security commands), shared by the peer and its tests.
 add_library(interop_logic STATIC
+  src/ConsoleCommands.cpp
   src/Hex.cpp
   src/Names.cpp
   src/PacketEvent.cpp
