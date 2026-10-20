@@ -384,14 +384,15 @@ public sealed class RakPeerInterface : IDisposable
 
     /// <summary>
     /// GetAveragePing (RakPeer.cpp:2149-2170): -1 for an unknown system or one with no sample yet. As in RakNet, a
-    /// system that has gone answers from its slot until another connection takes it.
+    /// system that has gone answers by address from its slot until another connection takes it.
     /// </summary>
     public int GetAveragePing(AddressOrGuid systemIdentifier) =>
         SlotOf(systemIdentifier, out _)?.AveragePing is { } ping ? (int)ping.TotalMilliseconds : -1;
 
     /// <summary>
     /// GetLastPing (RakPeer.cpp:2178-2190): -1 for an unknown system, 65535 for a known one with no pong yet, which
-    /// includes a system still connecting. A system that has gone answers from its slot until another connection takes it.
+    /// includes a system still connecting. A system that has gone answers by address from its slot until another connection
+    /// takes it, and by GUID not at all, as closing a slot clears its guid (RakPeer.cpp:4159-4161).
     /// </summary>
     public int GetLastPing(AddressOrGuid systemIdentifier) => SlotPing(systemIdentifier, c => c.LastPing);
 
@@ -443,6 +444,8 @@ public sealed class RakPeerInterface : IDisposable
             return SystemAddress.Unassigned;
         if (!target.IsAssigned)
             return _peer.ExternalAddress;
+        if (!_peer.IsActive)
+            return SystemAddress.Unassigned;
         if (_peer.TryGetConnection(target, out var connection))
             return connection.ExternalAddress;
         // The last inactive slot with the address and an assigned external address wins, as RakNet's loop leaves it.
@@ -586,19 +589,24 @@ public sealed class RakPeerInterface : IDisposable
     }
 
     /// <summary>
-    /// Consumes <paramref name="packet"/>; it must not be used or deallocated afterwards. A received packet whose
-    /// address and GUID are unchanged travels without a copy; any other is copied with its address and GUID.
+    /// Consumes <paramref name="packet"/>; it must not be used or deallocated afterwards. A received packet travels
+    /// without a copy, keeping its bitSize and wasGeneratedLocally as RakNet's queued pointer does (RakPeer.cpp:2826-2843);
+    /// an allocated one is copied with its address and GUID.
     /// </summary>
     public void PushBackPacket(Packet packet, bool pushAtHead)
     {
         ArgumentNullException.ThrowIfNull(packet);
         var peer = RequirePeer();
-        if (packet.TryTake(out var owned))
+        var (address, guid) = (packet.SystemAddress, packet.RakNetGuid);
+        if (packet.TryTake(out var owned, out var edited))
         {
-            peer.Inject(owned, pushAtHead);
+            if (edited)
+                peer.Inject(owned, address, guid, pushAtHead);
+            else
+                peer.Inject(owned, pushAtHead);
             return;
         }
-        peer.Inject(packet.Data.Span, packet.SystemAddress, packet.RakNetGuid, pushAtHead);
+        peer.Inject(packet.Data.Span, address, guid, pushAtHead);
         packet.Dispose();
     }
 
@@ -814,15 +822,15 @@ public sealed class RakPeerInterface : IDisposable
         connecting = false;
         if (ConnectionOf(target) is { } live)
             return live;
-        if (_peer is null || target.IsUndefined)
+        // A closed slot's guid is cleared (RakPeer.cpp:4159-4161), so a GUID query never matches one (RakPeer.cpp:3428-3440).
+        if (_peer is not { IsActive: true } || target.IsUndefined || target.RakNetGuid.IsAssigned)
             return null;
         for (var index = 0; index < _slots.Length; index++)
         {
-            if (DeadSlot(index) is { } gone
-                && (target.RakNetGuid.IsAssigned ? gone.RakNetGuid == target.RakNetGuid : gone.Address == target.Address))
+            if (DeadSlot(index) is { } gone && gone.Address == target.Address)
                 return gone;
         }
-        connecting = !target.RakNetGuid.IsAssigned && _peer.GetConnectionState(target) == ConnectionState.Connecting;
+        connecting = _peer.GetConnectionState(target) == ConnectionState.Connecting;
         return null;
     }
 
@@ -834,9 +842,10 @@ public sealed class RakPeerInterface : IDisposable
         return connecting ? ushort.MaxValue : -1;
     }
 
+    // After Shutdown maximumNumberOfPeers is 0 (RakPeer.cpp:1150-1167), so no lookup finds a system.
     private RakConnection? ConnectionOf(AddressOrGuid target)
     {
-        if (_peer is null || target.IsUndefined)
+        if (_peer is not { IsActive: true } || target.IsUndefined)
             return null;
         if (target.RakNetGuid.IsAssigned)
             return _peer.TryGetConnection(target.RakNetGuid, out var byGuid) ? byGuid : null;

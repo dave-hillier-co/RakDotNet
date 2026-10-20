@@ -111,14 +111,14 @@ public sealed class Packet : IDisposable
     }
 
     /// <summary>
-    /// Hands the owned event over (PushBackPacket) when it can travel as it is: a received packet whose address and
-    /// GUID are unchanged. Otherwise returns false and the caller copies <see cref="Data"/> and then disposes the packet.
+    /// Hands the owned event of a received packet over (PushBackPacket), with <paramref name="edited"/> set when its
+    /// address or GUID changed. Otherwise returns false and the caller copies <see cref="Data"/> and then disposes the packet.
     /// </summary>
-    internal bool TryTake(out OwnedPeerEvent owned)
+    internal bool TryTake(out OwnedPeerEvent owned, out bool edited)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _released) != 0, this);
-        if (!_owned.IsValid || _systemAddress != _receivedAddress || _rakNetGuid != _receivedGuid
-            || Interlocked.Exchange(ref _released, 1) != 0)
+        edited = _systemAddress != _receivedAddress || _rakNetGuid != _receivedGuid;
+        if (!_owned.IsValid || Interlocked.Exchange(ref _released, 1) != 0)
         {
             owned = default;
             return false;

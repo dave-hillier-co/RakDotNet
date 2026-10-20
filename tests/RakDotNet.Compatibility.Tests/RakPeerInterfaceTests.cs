@@ -391,10 +391,33 @@ public sealed class RakPeerInterfaceTests : IDisposable
 
         // The slot goes inactive but keeps its values until it is reassigned: GetExternalID falls back to an inactive
         // slot's myExternalSystemAddress (RakPeer.cpp:2351-2376), and the ping queries look up slots with onlyActive
-        // false (RakPeer.cpp:2178-2208, 3381-3443).
+        // false (RakPeer.cpp:2178-2208, 3381-3443). Closing the slot clears its guid (RakPeer.cpp:4159-4161), so a
+        // GUID query finds nothing (RakPeer.cpp:3428-3440).
         Assert.Equal(external, client.GetExternalID(serverAddress));
-        Assert.Equal(lastPing, client.GetLastPing(serverGuid));
+        Assert.Equal(lastPing, client.GetLastPing(serverAddress));
         Assert.Equal(lowestPing, client.GetLowestPing(serverAddress));
+        Assert.Equal(-1, client.GetLastPing(serverGuid));
+        Assert.Equal(-1, client.GetLowestPing(serverGuid));
+        Assert.Equal(-1, client.GetAveragePing(serverGuid));
+    }
+
+    [Fact]
+    public void After_Shutdown_slot_queries_find_nothing_as_in_RakNet()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        Connect(client, server);
+        var serverGuid = server.GetMyGUID();
+        var serverAddress = client.GetSystemAddressFromGuid(serverGuid);
+        Assert.NotEqual(SystemAddress.Unassigned, client.GetExternalID(serverAddress));
+
+        client.Shutdown(100);
+
+        // Shutdown sets maximumNumberOfPeers to 0 (RakPeer.cpp:1150-1167), so every slot loop is empty.
+        Assert.Equal(SystemAddress.Unassigned, client.GetExternalID(serverAddress));
+        Assert.Equal(-1, client.GetLastPing(serverAddress));
+        Assert.Equal(-1, client.GetLowestPing(serverAddress));
+        Assert.Equal(-1, client.GetAveragePing(serverAddress));
     }
 
     [Fact]
@@ -498,6 +521,47 @@ public sealed class RakPeerInterfaceTests : IDisposable
         using var again = ReceiveUntil(peer, MessageId.UserPacketEnum);
         Assert.Equal([(byte)MessageId.UserPacketEnum, 2], again.Data.ToArray());
         Assert.Equal(source, again.SystemAddress);
+    }
+
+    [Fact]
+    public void A_locally_generated_packet_pushed_back_with_a_new_address_stays_local()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        Connect(client, server);
+        var source = new SystemAddress(IPAddress.Parse("10.0.0.3"), 999);
+        client.CloseConnection(server.GetMyGUID(), sendDisconnectionNotification: false);
+        var lost = ReceiveUntil(client, MessageId.ConnectionLost, server);
+        Assert.True(lost.WasGeneratedLocally);
+
+        lost.SystemAddress = source;
+        client.PushBackPacket(lost, pushAtHead: true);
+
+        // PushBackPacket queues the same Packet (RakPeer.cpp:2826-2843), so wasGeneratedLocally survives.
+        using var again = ReceiveUntil(client, MessageId.ConnectionLost);
+        Assert.Equal(source, again.SystemAddress);
+        Assert.True(again.WasGeneratedLocally);
+    }
+
+    [Fact]
+    public void A_received_packet_pushed_back_with_a_new_GUID_keeps_its_bit_size()
+    {
+        var server = Started(4, maxIncoming: 4);
+        var client = Started(1);
+        Connect(client, server);
+        using var stream = new BitStream();
+        stream.WriteByte((byte)MessageId.UserPacketEnum);
+        stream.WriteBits(0b101, 3);
+        Assert.NotEqual(0u, client.Send(stream, Priority.High, Reliability.ReliableOrdered, 0, server.GetMyGUID(), broadcast: false));
+        var message = ReceiveUntil(server, MessageId.UserPacketEnum, client);
+        Assert.Equal(11, message.BitSize);
+
+        message.RakNetGuid = new RakNetGuid(78);
+        server.PushBackPacket(message, pushAtHead: true);
+
+        using var again = ReceiveUntil(server, MessageId.UserPacketEnum);
+        Assert.Equal(new RakNetGuid(78), again.RakNetGuid);
+        Assert.Equal(11, again.BitSize);
     }
 
     [Fact]

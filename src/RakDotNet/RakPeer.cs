@@ -606,12 +606,27 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
     }
 
     /// <summary>PushBackPacket, consuming <paramref name="owned"/> without a copy.</summary>
-    public void Inject(OwnedPeerEvent owned, bool atHead = false)
+    public void Inject(OwnedPeerEvent owned, bool atHead = false) => Inject(owned, null, atHead);
+
+    /// <summary>
+    /// PushBackPacket of a received packet whose address and GUID were changed (RakPeer.cpp:2826-2843): consumes
+    /// <paramref name="owned"/> without a copy, keeping its bytes, bit length and <see cref="PeerEvent.IsLocal"/>.
+    /// </summary>
+    public void Inject(OwnedPeerEvent owned, SystemAddress source, RakNetGuid sourceGuid, bool atHead = false) =>
+        Inject(owned, (source, sourceGuid), atHead);
+
+    private void Inject(OwnedPeerEvent owned, (SystemAddress Address, RakNetGuid Guid)? source, bool atHead)
     {
         ThrowIfStopped();
         var segment = owned.Handle;
         if (segment is null || !segment.TryTake(owned.HandleGeneration))
             throw new ObjectDisposedException(nameof(OwnedPeerEvent), "The owned event was disposed or already consumed.");
+        if (source is { } from)
+        {
+            segment.Address = from.Address;
+            segment.RakNetGuid = from.Guid;
+            segment.Connection = from.Guid.IsAssigned && TryGetConnection(from.Guid, out var connection) ? connection : null;
+        }
         if (!ReferenceEquals(segment.Pool, _pool))
         {
             var copy = _pool.Rent();
