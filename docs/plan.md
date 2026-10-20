@@ -80,7 +80,7 @@ RakNet's own tests (`Samples/Tests`) run both peers in one process against RakNe
 
 - `tools/interop-peer`: a small C++ program linking RakNet's static library, controlled by JSON Lines on stdin and stdout as specified in [interop-protocol.md](interop-protocol.md). Every received packet is reported as an event.
 - `IPeerDriver`: one C# interface with `NativePeerDriver` (spawns `interop-peer`) and `RakDotNetPeerDriver`.
-- Every scenario runs as a matrix: native-native (validates the harness and gives the baseline), C#-native, native-C#, C#-C#.
+- Every scenario runs as a matrix: native-native (validates the harness and gives the baseline), C#-native, native-C#, C#-C#. A scenario with three or more peers makes the first peer one kind and the rest the other, so across the four combinations every pair of kinds talks in both roles; peer-to-peer topologies connect the peers to each other directly, without the proxy, because each connects to addresses the others report.
 - A C# UDP proxy sits between the peers. It records datagrams (golden vectors, see [golden-vectors.md](golden-vectors.md)) and injects seeded loss, reordering, duplication and delay.
 - RakNet is fetched by CMake `FetchContent` pinned to upstream commit `1a169895a900c9fc4841c556e16514182b75faf8`, since `reference/` is not committed. Our own CMake compiles `Source/*.cpp` directly; RakNet's CMake files are never configured.
 - RakNet needs two compiler workarounds under modern clang, applied as flags without patching its sources: it is compiled as `gnu++98`, and with `-fno-strict-float-cast-overflow` because `CCRakNetSlidingWindow` casts `-1.0` to an unsigned integer as an "RTT unknown" sentinel, which clang otherwise compiles to a trap.
@@ -106,6 +106,9 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | MessageFilter | Filter sets on the server: allowed IDs, a change of set, kick and ban on a disallowed message, time limits, timestamped and RPC4 messages |
 | ReadyEvent | Two and three systems waiting on each other: set, unset, forced completion, status by query, a disconnect leaving the wait list |
 | TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
+| ConnectionGraph2, as the FullyConnectedMesh2 samples attach it | A star of four: new connections announced to the others and listed to the newcomer, a disconnect and a lost connection announced, participants added by hand |
+| Fully Connected Mesh, FCMHost, FCMHostSimultaneous | A chain and a star becoming a full mesh with the oldest system as host, host migration when the host shuts down, systems all connecting to each other at once agreeing on one host |
+| FCMVerifiedJoinSimultaneous | A verified join accepted, rejected and failed on an unreachable participant, with user data; verified joins started for three clients at once ending in one mesh |
 
 ## Milestones
 
@@ -126,7 +129,7 @@ Each milestone has an exit criterion that is a passing test. Milestones build a 
 8. **Plugins and utilities.** Each is ported on the public API, and `interop-peer` gains commands to drive the native counterpart. Exit for each: its sample-derived scenarios pass in all four matrix combinations. Order follows dependencies:
    1. Diagnostics, small plugins and utilities: PacketLogger, MessageFilter, StatisticsHistory, ReadyEvent, TwoWayAuthentication, RandSync.
    2. Object replication and RPC: NetworkIDManager, ReplicaManager3, RPC4Plugin.
-   3. Topology and teams: ConnectionGraph2, FullyConnectedMesh, FullyConnectedMesh2, TeamManager, TeamBalancer.
+   3. Topology and teams: ConnectionGraph2, FullyConnectedMesh2, TeamManager, TeamBalancer. RakNet 4.081 has no FullyConnectedMesh source, only a stale feature switch; its sample uses FullyConnectedMesh2.
    4. NAT traversal and relaying: NatPunchthroughClient/Server, NatTypeDetectionClient/Server, UDPProxyClient/Server/Coordinator, UDPForwarder, Router2, RelayPlugin.
    5. Files and cloud: FileOperations, FileListTransfer, DirectoryDeltaTransfer, CloudClient, CloudServer.
    6. TCP, HTTP and console: TCPInterface, PacketizedTCP, HTTPConnection, HTTPConnection2, ConsoleServer, RakNetTransport, TelnetTransport, LogCommandParser, RakNetCommandParser.

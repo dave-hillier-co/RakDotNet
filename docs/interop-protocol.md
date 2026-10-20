@@ -111,6 +111,29 @@ Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFi
 
 TwoWayAuthentication's results reach the driver as `packet` events.
 
+#### Topology commands
+
+ConnectionGraph2 and FullyConnectedMesh2 commands live in `tools/interop-peer/src/TopologyCommands.cpp`, with the same rules: every command of a plugin except its attach command fails until it is attached. Commands that take a packet rebuild it from the fields of the `packet` event the driver received: `data` (hex), `guid` and `address`.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `cg2Attach` | `autoProcess` (true) | | `AttachPlugin` of a `ConnectionGraph2` after `SetAutoProcessNewConnections`; again is a no-op |
+| `cg2SetAutoProcess` | `enabled` | | `SetAutoProcessNewConnections` |
+| `cg2AddParticipant` | `target` (guid) | | `AddParticipant` with `GetSystemAddressFromGuid(target)` |
+| `cg2Info` | | `participants` (array of `{guid,connections}` in `GetParticipantList` order, `connections` an array of `{guid,address,ping}`), `lowestAveragePingSystem` | `GetParticipantList`, `GetConnectionListForRemoteSystem` (up to 64 per participant), `GetPingBetweenSystems`, `GetLowestAveragePingSystem` |
+| `fcm2Attach` | `autoParticipate` (true), `connectOnNewRemote` (true), `password` (hex, ""), `vjsUserData` (hex, ""), `vjcUserData` (hex, "") | | `AttachPlugin` of a `FullyConnectedMesh2` subclass whose `WriteVJSUserData` and `WriteVJCUserData` write the given bytes (nothing when empty), after `SetAutoparticipateConnections` and `SetConnectOnNewRemoteConnection`; again is a no-op |
+| `fcm2AddParticipant` | `target` (guid) | | `AddParticipant` |
+| `fcm2ResetHostCalculation` | | | `ResetHostCalculation` |
+| `fcm2Clear` | | | `Clear` |
+| `fcm2Info` | | `hostSystem`, `isHostSystem`, `connectedHost` (`UNASSIGNED_RAKNET_GUID` as `"18446744073709551615"`), `isConnectedHost`, `connectedHostAddress` (empty when unassigned), `participants`, `hostOrder`, `totalConnectionCount` | `GetHostSystem`, `IsHostSystem`, `GetConnectedHost`, `IsConnectedHost`, `GetConnectedHostAddr`, `GetParticipantList`, `GetHostOrder`, `GetTotalConnectionCount` |
+| `fcm2StartVerifiedJoin` | `target` (guid) | | `StartVerifiedJoin` |
+| `fcm2RespondOnVerifiedJoinCapable` | `data`, `guid`, `address`, `accept`, `additionalData` (hex, ""; none when empty) | | `RespondOnVerifiedJoinCapable` |
+| `fcm2VerifiedJoinRequired` | `host` (guid) | `systems` (array of `{guid,address,userData,userDataBits}`, `userData` the hex of the user data bytes) | `GetVerifiedJoinRequiredProcessingList` |
+| `fcm2VerifiedJoinAccepted` | `data`, `guid`, `address` | `thisSystemAccepted`, `systemsAccepted`, `additionalData` (hex) | `GetVerifiedJoinAcceptedAdditionalData` |
+| `fcm2ConnectToRemoteNewIncomingConnections` | `data`, `guid`, `address` | | `ConnectToRemoteNewIncomingConnections` |
+
+The plugins' messages, ID_FCM2_NEW_HOST and the verified join messages that reach the application included, reach the driver as `packet` events.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
