@@ -159,10 +159,10 @@ public sealed class TcpInterfaceTests : IDisposable
     }
 
     [Fact]
-    public void A_connection_beyond_the_maximum_is_accepted_but_never_serviced()
+    public void A_connection_beyond_the_maximum_is_closed_without_being_serviced()
     {
-        // TCPInterface.cpp:1066-1109: with every slot taken the accepted socket is kept but never read, and no event is
-        // queued for it; the check meant to close the listener compares with -1 and never fires.
+        // TCPInterface.cpp:1066-1109: with every slot taken the accepted socket is never read and no event is queued for
+        // it; RakNet keeps it open until Stop, here it is closed, so a remote host cannot pile up open sockets.
         using var full = new Plugins.TcpInterface();
         full.Start(0, maxIncomingConnections: 1, bindAddress: "127.0.0.1");
         var port = (ushort)full.ListenEndPoint!.Port;
@@ -172,6 +172,7 @@ public sealed class TcpInterfaceTests : IDisposable
         var extra = _secondClient.Connect("127.0.0.1", port, block: true);
         _secondClient.Send([1], extra, broadcast: false);
 
+        Assert.Equal(extra, Poll.Address(_secondClient.HasLostConnection, "the extra connection to be closed"));
         Poll.Never(() => full.HasNewIncomingConnection() != SystemAddress.Unassigned || full.ReceiveHasPackets(), "the second connection");
         Assert.Equal([first], full.GetConnectionList());
     }

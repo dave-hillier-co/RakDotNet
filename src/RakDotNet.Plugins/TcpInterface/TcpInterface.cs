@@ -23,7 +23,8 @@ namespace RakDotNet.Plugins;
 /// Slots follow RakNet's remoteClients: a slot is taken when a connection is accepted or an outgoing attempt starts,
 /// and freed when the connection is lost or closed. A slot taken by a connection attempt counts as a connection, with
 /// the address it last had, until the attempt completes (TCPInterface.cpp:342-352). Addresses are IPv4, as RakNet's
-/// default build has no IPv6 (RAKNET_SUPPORT_IPV6 is 0).
+/// default build has no IPv6 (RAKNET_SUPPORT_IPV6 is 0). A connection accepted while every slot is taken is closed at
+/// once; RakNet keeps it open and unread until Stop (TCPInterface.cpp:1066-1101).
 /// </para>
 /// <para>
 /// TLS (OPEN_SSL_CLIENT_SUPPORT in RakNet) is <see cref="StartSslClient"/> over <see cref="SslStream"/>. RakNet's
@@ -53,7 +54,6 @@ public class TcpInterface : IPluginHost, IDisposable
     private readonly ConcurrentQueue<SystemAddress> _failedConnectionAttempts = new();
     private readonly List<SystemAddress> _activeSslConnections = [];
     private readonly List<Socket> _connectingSockets = [];
-    private readonly List<Socket> _unservicedSockets = [];
     private readonly long _clockOrigin;
     private volatile ITcpPlugin[] _plugins = [];
     private RemoteClient[] _remoteClients = [];
@@ -161,9 +161,6 @@ public class TcpInterface : IPluginHost, IDisposable
             foreach (var socket in _connectingSockets)
                 socket.Dispose();
             _connectingSockets.Clear();
-            foreach (var socket in _unservicedSockets)
-                socket.Dispose();
-            _unservicedSockets.Clear();
             foreach (var client in _remoteClients)
             {
                 client.SetActive(false);
@@ -642,7 +639,9 @@ public class TcpInterface : IPluginHost, IDisposable
                 var client = Array.Find(_remoteClients, c => !c.IsActive);
                 if (client is null)
                 {
-                    _unservicedSockets.Add(socket);
+                    // RakNet keeps such a socket open, unread, until Stop (TCPInterface.cpp:1066-1101); closing it gives
+                    // the remote host the same service without letting it pile up open sockets.
+                    socket.Dispose();
                     continue;
                 }
                 client.SetActive(true);
