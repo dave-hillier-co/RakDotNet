@@ -83,8 +83,8 @@ A consumer that never recycles keeps what it was given: an event that is not han
 `.github/workflows/ci.yml` runs on `ubuntu-latest` and `macos-latest`:
 
 1. Sets up .NET from `global.json`.
-2. Fetches RakNet at the commit pinned in [plan.md](plan.md), builds `tools/interop-peer` (the peer, its logic tests and `loopback-bench`) and caches both.
-3. Builds the solution and runs every test, with `RAKDOTNET_INTEROP_PEER` pointing at the native peer so the interop matrix runs.
+2. Fetches RakNet at the commit pinned in [plan.md](plan.md), builds `tools/interop-peer` (the peer, its `LIBCAT_SECURITY` twin `interop-peer-secure`, its logic tests and `loopback-bench`) and caches both.
+3. Builds the solution and runs every test, with `RAKDOTNET_INTEROP_PEER` and `RAKDOTNET_INTEROP_PEER_SECURE` pointing at the native peers so the interop matrix, security scenarios included, runs.
 4. Runs every benchmark with `--job short` and the loopback comparison with a small burst. These fail the build only when something errors; times are not checked.
 5. Publishes `samples/RakDotNet.Samples.Loopback` with NativeAOT and runs it: the binary connects a client to a server over loopback, sends a message, echoes it and exits 0 once the echo arrives ([api-design.md](api-design.md) principle 9).
 

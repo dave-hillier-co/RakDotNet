@@ -690,6 +690,8 @@ public sealed partial class RakPeer
         if (!ExternalAddress.IsAssigned && external.IsAssigned)
             _externalAddress = new SystemAddressBox(external);
 
+        // A query made on reading the event finds the connection connected.
+        PublishTable(syncSlots: false);
         var segment = NewSegment(data, guid, address, connection);
         EnqueueEvent(segment);
 
@@ -738,9 +740,14 @@ public sealed partial class RakPeer
         segment.ClosedLocally = closedLocally;
         // RakPeer.cpp:1667-1678: the ID_CONNECTION_LOST of a silent local close is generated locally.
         segment.IsLocal = closedLocally && silently && reason == DisconnectReason.ConnectionLost;
-        EnqueueEvent(segment);
+        // The slot is closed before Receive returns the packet (RakPeer.cpp:5800-5818), so a query made on reading it
+        // must find the connection gone: end it and publish the table before the event can be read.
         if (connection is not null)
+        {
             EndConnection(connection);
+            PublishTable(syncSlots: false);
+        }
+        EnqueueEvent(segment);
     }
 
     /// <summary>
@@ -886,8 +893,12 @@ public sealed partial class RakPeer
         return false;
     }
 
-    /// <summary>Publishes the slots and the connection of each active one, in activeSystemList order.</summary>
-    private void PublishTable()
+    /// <summary>
+    /// Publishes the slots and the connection of each active one, in activeSystemList order. Published from within event
+    /// handling (<paramref name="syncSlots"/> false), slots assigned this cycle still get their connections in
+    /// <see cref="PollConnections"/>.
+    /// </summary>
+    private void PublishTable(bool syncSlots = true)
     {
         var active = _core.ActiveSystems;
         var all = new List<RakConnection>(active.Count);
@@ -906,7 +917,8 @@ public sealed partial class RakPeer
                 views[index] = new SlotView(SystemAddress.Unassigned, RakNetGuid.Unassigned);
         }
         _table = new ConnectionTable([.. all], views);
-        _syncedSlotsVersion = _core.SlotsVersion;
+        if (syncSlots)
+            _syncedSlotsVersion = _core.SlotsVersion;
         _tableDirty = false;
     }
 

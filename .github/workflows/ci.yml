@@ -32,6 +32,7 @@ jobs:
     env:
       RAKNET_SOURCE_DIR: ${{ github.workspace }}/.raknet
       RAKDOTNET_INTEROP_PEER: ${{ github.workspace }}/tools/interop-peer/build/interop-peer
+      RAKDOTNET_INTEROP_PEER_SECURE: ${{ github.workspace }}/tools/interop-peer/build/interop-peer-secure
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +65,7 @@ jobs:
           path: tools/interop-peer/build
           key: ${{ steps.native-key.outputs.key }}
 
-      - name: Build the native interop peer
+      - name: Build the native interop peers
         run: tools/interop-peer/build.sh
 
       - name: Test the native interop peer's logic
