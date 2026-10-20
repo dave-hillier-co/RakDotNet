@@ -23,14 +23,14 @@ public sealed class HotPathAllocationTests : IDisposable
     /// <summary>The allocation budget of the RakPeer hot path: bytes per non-split message, after warm-up.</summary>
     public const long BudgetBytesPerMessage = 0;
 
-    /// <summary>The allocations that keep the budget from being met.</summary>
-    public const string SkipReason =
-        "Everything ReliabilityLayerAllocationTests lists, plus in PeerCore the MessageReceived event per message, the "
-        + "Predicate closures of FindActive in Send and Receive, and the List copy of the connection attempts that "
-        + "UpdateConnectionAttempts makes on every Update.";
-
     private const int WarmUpMessages = 2_000;
     private const int MeasuredMessages = 2_000;
+
+    // On the real clock how many messages are unacknowledged at once (ACKs wait up to 10 ms) varies with thread
+    // scheduling, and the session pools grow to the highest count seen; that takes thousands of messages to settle. The
+    // longer measurement keeps the budget at 0 B per message.
+    private const int BackgroundWarmUpMessages = 20_000;
+    private const int BackgroundMeasuredMessages = 20_000;
     private static readonly TimeSpan MessageTimeout = TimeSpan.FromSeconds(10);
 
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero));
@@ -42,7 +42,7 @@ public sealed class HotPathAllocationTests : IDisposable
 
     public HotPathAllocationTests() => _message[0] = (byte)MessageId.UserPacketEnum;
 
-    [Fact(Skip = SkipReason)]
+    [Fact]
     public void Manual_mode_send_and_receive_of_a_non_split_message_allocates_nothing_in_steady_state()
     {
         Start(PeerThreading.Manual);
@@ -52,20 +52,20 @@ public sealed class HotPathAllocationTests : IDisposable
         Transfer(MeasuredMessages);
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        AssertWithinBudget(allocated, "RakPeer in Manual mode (Send, Update on both peers, Events.TryRead)");
+        AssertWithinBudget(allocated, MeasuredMessages, "RakPeer in Manual mode (Send, Update on both peers, Events.TryRead)");
     }
 
-    [Fact(Skip = SkipReason)]
+    [Fact]
     public void Background_mode_send_and_receive_of_a_non_split_message_allocates_nothing_in_steady_state()
     {
         Start(PeerThreading.Background);
-        Transfer(WarmUpMessages);
+        Transfer(BackgroundWarmUpMessages);
 
         var before = GC.GetTotalAllocatedBytes(precise: true);
-        Transfer(MeasuredMessages);
+        Transfer(BackgroundMeasuredMessages);
         var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
 
-        AssertWithinBudget(allocated, "RakPeer in Background mode (Send, both I/O loop threads, Events.TryRead)");
+        AssertWithinBudget(allocated, BackgroundMeasuredMessages, "RakPeer in Background mode (Send, both I/O loop threads, Events.TryRead)");
     }
 
     public void Dispose()
@@ -74,10 +74,10 @@ public sealed class HotPathAllocationTests : IDisposable
         _server?.Dispose();
     }
 
-    private static void AssertWithinBudget(long allocated, string path) =>
+    private static void AssertWithinBudget(long allocated, int messages, string path) =>
         Assert.True(
-            allocated / MeasuredMessages <= BudgetBytesPerMessage,
-            $"{path} allocated {allocated} B for {MeasuredMessages} messages ({allocated / MeasuredMessages} B per message); "
+            allocated / messages <= BudgetBytesPerMessage,
+            $"{path} allocated {allocated} B for {messages} messages ({allocated / messages} B per message); "
             + $"the budget is {BudgetBytesPerMessage} B per message."
         );
 

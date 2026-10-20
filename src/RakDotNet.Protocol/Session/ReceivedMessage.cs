@@ -13,7 +13,7 @@ namespace RakDotNet.Protocol.Session;
 /// <param name="SequencingIndex">For sequenced reliabilities.</param>
 /// <param name="OrderingIndex">For ordered and sequenced reliabilities.</param>
 /// <param name="OrderingChannel">For ordered and sequenced reliabilities, 0 to 31.</param>
-internal sealed record ReceivedMessage(
+internal readonly record struct ReceivedMessage(
     Reliability Reliability,
     ReadOnlyMemory<byte> Payload,
     int BitLength,
@@ -34,4 +34,8 @@ internal sealed record ReceivedMessage(
             message.OrderingChannel
         );
     }
+
+    /// <summary>A message read by <see cref="EncapsulatedMessageReader"/> without making an <see cref="EncapsulatedMessage"/>.</summary>
+    public static ReceivedMessage From(in EncapsulatedMessage.Header header, ReadOnlyMemory<byte> payload) =>
+        new(header.Reliability, payload, header.BitLength, header.SequencingIndex, header.OrderingIndex, header.OrderingChannel);
 }

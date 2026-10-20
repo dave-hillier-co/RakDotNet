@@ -57,7 +57,6 @@ internal sealed class OrderingChannels
     /// </summary>
     public OrderingResult Receive(ReceivedMessage message, ICollection<ReceivedMessage> delivered, long availableBytes = long.MaxValue)
     {
-        ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(delivered);
 
         if (!message.Reliability.HasOrderingChannel())

@@ -107,31 +107,48 @@ public sealed record EncapsulatedMessage
     }
 
     /// <summary>WriteToBitStreamFromInternalPacket, ReliabilityLayer.cpp:2610-2677.</summary>
-    public void Write(ref BitStreamWriter writer)
+    public void Write(ref BitStreamWriter writer) =>
+        Write(ref writer, Reliability, Payload.Span, PayloadBitLength, ReliableMessageNumber, SequencingIndex, OrderingIndex, OrderingChannel, Split);
+
+    /// <summary>
+    /// Writes a message from its fields without making an <see cref="EncapsulatedMessage"/>, for the send path. The
+    /// arguments are not validated: the caller passes what the constructor would accept.
+    /// </summary>
+    internal static void Write(
+        ref BitStreamWriter writer,
+        Reliability reliability,
+        ReadOnlySpan<byte> payload,
+        int payloadBitLength,
+        UInt24 reliableMessageNumber,
+        UInt24 sequencingIndex,
+        UInt24 orderingIndex,
+        byte orderingChannel,
+        SplitHeader? split
+    )
     {
-        var wire = Reliability.ToWireReliability(); // ReliabilityLayer.cpp:2619-2626
+        var wire = reliability.ToWireReliability(); // ReliabilityLayer.cpp:2619-2626
         writer.AlignToByte(); // ReliabilityLayer.cpp:2618
         writer.WriteBits((byte)wire, 3);
-        writer.WriteBit(Split is not null);
+        writer.WriteBit(split is not null);
         writer.AlignToByte();
-        writer.WriteUInt16((ushort)PayloadBitLength);
+        writer.WriteUInt16((ushort)payloadBitLength);
         if (wire.IsReliable())
-            writer.WriteUInt24(ReliableMessageNumber);
+            writer.WriteUInt24(reliableMessageNumber);
         writer.AlignToByte(); // ReliabilityLayer.cpp:2641
         if (wire.IsSequenced())
-            writer.WriteUInt24(SequencingIndex);
+            writer.WriteUInt24(sequencingIndex);
         if (wire.HasOrderingChannel())
         {
-            writer.WriteUInt24(OrderingIndex);
-            writer.WriteByte(OrderingChannel);
+            writer.WriteUInt24(orderingIndex);
+            writer.WriteByte(orderingChannel);
         }
-        if (Split is { } split)
+        if (split is { } header)
         {
-            writer.WriteUInt32(split.Count);
-            writer.WriteUInt16(split.Id);
-            writer.WriteUInt32(split.Index);
+            writer.WriteUInt32(header.Count);
+            writer.WriteUInt16(header.Id);
+            writer.WriteUInt32(header.Index);
         }
-        writer.WriteAlignedBytes(Payload.Span); // ReliabilityLayer.cpp:2674
+        writer.WriteAlignedBytes(payload); // ReliabilityLayer.cpp:2674
     }
 
     /// <summary>
@@ -159,14 +176,27 @@ public sealed record EncapsulatedMessage
     )
     {
         value = null;
+        if (!TryRead(buffer, out Header header, out var payload, out bytesRead))
+            return false;
+        value = header.ToMessage(payload);
+        return true;
+    }
+
+    /// <summary>
+    /// Reads one message whose bytes start at the start of <paramref name="buffer"/> into its header fields and a slice
+    /// of <paramref name="buffer"/>, without making an <see cref="EncapsulatedMessage"/>.
+    /// </summary>
+    internal static bool TryRead(ReadOnlyMemory<byte> buffer, out Header header, out ReadOnlyMemory<byte> payload, out int bytesRead)
+    {
+        payload = default;
         bytesRead = 0;
         var reader = new BitStreamReader(buffer.Span);
-        if (!TryReadHeader(ref reader, out var header))
+        if (!TryReadHeader(ref reader, out header))
             return false;
         var payloadStart = (reader.BitPosition + 7) >> 3;
         if (!reader.TryReadAlignedBytes(header.PayloadByteLength, out _))
             return false;
-        value = header.ToMessage(buffer.Slice(payloadStart, header.PayloadByteLength));
+        payload = buffer.Slice(payloadStart, header.PayloadByteLength);
         bytesRead = payloadStart + header.PayloadByteLength;
         return true;
     }
@@ -234,7 +264,8 @@ public sealed record EncapsulatedMessage
     public override int GetHashCode() =>
         HashCode.Combine(Reliability, PayloadBitLength, ReliableMessageNumber, SequencingIndex, OrderingIndex, OrderingChannel, Split);
 
-    private readonly record struct Header(
+    /// <summary>The fields before the payload, as read by <see cref="TryRead(ReadOnlyMemory{byte}, out Header, out ReadOnlyMemory{byte}, out int)"/>.</summary>
+    internal readonly record struct Header(
         Reliability Reliability,
         ushort BitLength,
         UInt24 ReliableMessageNumber,

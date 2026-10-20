@@ -28,7 +28,7 @@ namespace RakDotNet.Protocol.Peer;
 /// the next <see cref="Update"/>, as RakPeer's do.
 /// </para>
 /// <para>
-/// Outputs: <see cref="TryDequeueDatagram"/> and <see cref="TryDequeueEvent"/>.
+/// Outputs: <see cref="TryDequeueDatagram(out IPEndPoint, out ReadOnlySpan{byte}, out bool)"/> and <see cref="TryDequeueEvent"/>.
 /// </para>
 /// <para>
 /// The client discovers the MTU as RakPeer does: OPEN_CONNECTION_REQUEST_1 probes step down through
@@ -56,12 +56,19 @@ internal sealed class PeerCore
     // RakPeer.cpp:3611-3612: with the frequency limit, an IP may take a new slot once per 100 ms.
     private const long ConnectionFrequencyWindowMs = 100;
 
+    // The most free message events kept for reuse; beyond it they are left to the collector.
+    private const int MaxPooledMessages = 1024;
+
+    // Larger than any connected ping or pong.
+    private const int PingBufferBytes = 64;
+
     private readonly PeerOptions _options;
     private readonly RemoteSystem?[] _slots;
     private readonly List<RemoteSystem> _active = [];
     private readonly List<ConnectionAttempt> _attempts = [];
-    private readonly Queue<OutgoingDatagram> _datagrams = new();
+    private readonly DatagramQueue<(IPEndPoint Remote, bool DoNotFragment)> _datagrams = new();
     private readonly Queue<PeerEvent> _events = new();
+    private readonly Stack<MessageReceived> _freeMessages = new();
     private readonly BanTable _bans = new();
     private byte[] _offlinePingResponse = [];
     private long _defaultTimeoutMs;
@@ -283,7 +290,39 @@ internal sealed class PeerCore
         _offlinePingResponse = data.ToArray();
     }
 
-    public bool TryDequeueDatagram(out OutgoingDatagram datagram) => _datagrams.TryDequeue(out datagram);
+    /// <summary>The next datagram to send, with its bytes in a new array.</summary>
+    public bool TryDequeueDatagram(out OutgoingDatagram datagram)
+    {
+        if (!_datagrams.TryDequeue(out var bytes, out var tag))
+        {
+            datagram = default;
+            return false;
+        }
+        datagram = new OutgoingDatagram(tag.Remote, bytes.ToArray()) { DoNotFragment = tag.DoNotFragment };
+        return true;
+    }
+
+    /// <summary>
+    /// The next datagram to send, without a copy: <paramref name="datagram"/> is valid until the next call into the core
+    /// that can queue a datagram. <paramref name="doNotFragment"/> is <see cref="OutgoingDatagram.DoNotFragment"/>.
+    /// </summary>
+    public bool TryDequeueDatagram([NotNullWhen(true)] out IPEndPoint? remote, out ReadOnlySpan<byte> datagram, out bool doNotFragment)
+    {
+        var dequeued = _datagrams.TryDequeue(out datagram, out var tag);
+        (remote, doNotFragment) = tag;
+        return dequeued;
+    }
+
+    /// <summary>
+    /// Hands back a message event the caller is done with, data included, so a later message can reuse it instead of
+    /// allocating.
+    /// </summary>
+    public void Recycle(MessageReceived message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (_freeMessages.Count < MaxPooledMessages)
+            _freeMessages.Push(message);
+    }
 
     /// <summary>
     /// The next event, in the order RakPeer adds packets to packetReturnQueue. An ID_TIMESTAMP message is not shifted
@@ -659,8 +698,8 @@ internal sealed class PeerCore
             }
 
             system.Session.Update(nowUs, OutgoingBandwidthLimit);
-            while (system.Session.TryDequeueDatagram(out var datagram))
-                _datagrams.Enqueue(new OutgoingDatagram(system.Address, datagram));
+            while (system.Session.TryDequeueDatagram(_datagrams.Reserve(system.Session.Mtu), out var length))
+                _datagrams.Commit(length, (system.Address, false));
 
             if (HasFailed(system, nowMs))
             {
@@ -686,6 +725,8 @@ internal sealed class PeerCore
     // RakPeer.cpp:5691-5829.
     private void UpdateConnectionAttempts(long nowMs)
     {
+        if (_attempts.Count == 0)
+            return;
         foreach (var attempt in _attempts.ToList())
         {
             if (attempt.NextRequestTimeMs >= nowMs)
@@ -701,8 +742,7 @@ internal sealed class PeerCore
             attempt.RequestsMade++;
             attempt.NextRequestTimeMs = nowMs + attempt.IntervalMs;
             var mtu = RakNetConstants.MtuSizes[mtuIndex];
-            var probe = Encode(new OpenConnectionRequest1(RakNetConstants.ProtocolVersion, mtu), mtu);
-            _datagrams.Enqueue(new OutgoingDatagram(attempt.Address, probe) { DoNotFragment = true });
+            SendOffline(attempt.Address, new OpenConnectionRequest1(RakNetConstants.ProtocolVersion, mtu), mtu, doNotFragment: true);
         }
     }
 
@@ -754,6 +794,8 @@ internal sealed class PeerCore
         {
             case MessageDelivered delivered:
                 ProcessMessage(system, delivered.Payload, delivered.BitLength, nowUs);
+                // Nothing keeps the payload: whatever ProcessMessage queued has its own copy.
+                system.Session.Recycle(delivered);
                 break;
             case ReceiptAcknowledged acknowledged:
                 _events.Enqueue(new SendReceiptAcked(system.Address, system.Guid, acknowledged.Receipt));
@@ -816,7 +858,7 @@ internal sealed class PeerCore
                     OnConnectedPong(system, incoming.SendPingTime, incoming.SendPongTime, nowMs);
                     system.MyExternalAddress = incoming.ServerAddress;
                     SetFirstExternalAddress(incoming.ServerAddress);
-                    _events.Enqueue(new IncomingConnectionCompleted(system.Address, system.Guid, payload));
+                    _events.Enqueue(new IncomingConnectionCompleted(system.Address, system.Guid, payload.ToArray()));
                 }
                 break;
 
@@ -828,7 +870,8 @@ internal sealed class PeerCore
             case MessageId.ConnectedPing:
                 if (TryDecode<ConnectedPing>(data, out var ping))
                 {
-                    var reply = Encode(new ConnectedPong(ping.SendPingTime, (ulong)nowMs));
+                    Span<byte> buffer = stackalloc byte[PingBufferBytes];
+                    var reply = Encode(new ConnectedPong(ping.SendPingTime, (ulong)nowMs), buffer);
                     SendImmediate(system, reply, Reliability.Unreliable, Priority.Immediate, 0, 0, nowUs);
                     // RakPeer.cpp:6090-6091: update again straight after this one so the pong goes out right away.
                     UpdateRequested = true;
@@ -846,7 +889,7 @@ internal sealed class PeerCore
             case MessageId.InvalidPassword:
                 if (system.Mode == ConnectMode.RequestedConnection)
                 {
-                    _events.Enqueue(new ConnectionAttemptFailed(system.Address, system.Guid, payload));
+                    _events.Enqueue(new ConnectionAttemptFailed(system.Address, system.Guid, payload.ToArray()));
                     system.Mode = ConnectMode.DisconnectAsapSilently;
                 }
                 break;
@@ -858,7 +901,11 @@ internal sealed class PeerCore
             default:
                 // RakPeer.cpp:6226-6241: application messages and receipts; other internal IDs are dropped.
                 if (data[0] >= (byte)MessageId.Timestamp || id is MessageId.SndReceiptAcked or MessageId.SndReceiptLoss)
-                    _events.Enqueue(new MessageReceived(system.Address, system.Guid, payload) { BitLength = bitLength });
+                {
+                    var message = _freeMessages.TryPop(out var free) ? free : new MessageReceived(system.Address, system.Guid, default);
+                    message.CopyFrom(system.Address, system.Guid, data, bitLength);
+                    _events.Enqueue(message);
+                }
                 break;
         }
     }
@@ -881,7 +928,7 @@ internal sealed class PeerCore
         system.MyExternalAddress = accepted.ClientAddress;
         system.Mode = ConnectMode.Connected;
         SetFirstExternalAddress(accepted.ClientAddress);
-        _events.Enqueue(new OutgoingConnectionCompleted(system.Address, system.Guid, payload, accepted.ClientAddress));
+        _events.Enqueue(new OutgoingConnectionCompleted(system.Address, system.Guid, payload.ToArray(), accepted.ClientAddress));
 
         var reply = new NewIncomingConnection(system.Address, _options.LocalAddresses, accepted.ReplyTime, (ulong)nowMs);
         SendImmediate(system, Encode(reply), Reliability.ReliableOrdered, Priority.Immediate, 0, 0, nowUs);
@@ -925,8 +972,11 @@ internal sealed class PeerCore
     }
 
     // PingInternal, RakPeer.cpp:4103-4115.
-    private static void PingInternal(RemoteSystem system, Reliability reliability, long nowUs, uint receipt = 0) =>
-        SendImmediate(system, Encode(new ConnectedPing((ulong)(nowUs / 1000))), reliability, Priority.Immediate, 0, receipt, nowUs);
+    private static void PingInternal(RemoteSystem system, Reliability reliability, long nowUs, uint receipt = 0)
+    {
+        Span<byte> buffer = stackalloc byte[PingBufferBytes];
+        SendImmediate(system, Encode(new ConnectedPing((ulong)(nowUs / 1000)), buffer), reliability, Priority.Immediate, 0, receipt, nowUs);
+    }
 
     // SendImmediate for one system, RakPeer.cpp:4286-4384.
     private static void SendImmediate(RemoteSystem system, ReadOnlySpan<byte> data, Reliability reliability, Priority priority, byte channel, uint receipt, long nowUs) =>
@@ -1308,7 +1358,16 @@ internal sealed class PeerCore
             },
         };
 
-    private RemoteSystem? FindActive(IPEndPoint address) => _active.Find(s => s.Address.Equals(address));
+    // A loop rather than List.Find, whose predicate would capture the address and allocate on every datagram and send.
+    private RemoteSystem? FindActive(IPEndPoint address)
+    {
+        foreach (var system in _active)
+        {
+            if (system.Address.Equals(address))
+                return system;
+        }
+        return null;
+    }
 
     // GetRemoteSystemFromSystemAddress(address, false, false), RakPeer.cpp:3407-3424: an active slot, else the first
     // slot the address used before.
@@ -1318,14 +1377,27 @@ internal sealed class PeerCore
         return FindActive(address) ?? Array.Find(_slots, s => s is not null && s.Address.Equals(address));
     }
 
-    private RemoteSystem? FindActive(ulong guid) =>
-        guid == RakNetConstants.UnassignedGuid ? null : _active.Find(s => s.Guid == guid);
+    private RemoteSystem? FindActive(ulong guid)
+    {
+        if (guid == RakNetConstants.UnassignedGuid)
+            return null;
+        foreach (var system in _active)
+        {
+            if (system.Guid == guid)
+                return system;
+        }
+        return null;
+    }
 
     private ConnectionAttempt? FindAttempt(IPEndPoint address) => _attempts.Find(a => a.Address.Equals(address));
 
-    private void SendOffline<T>(IPEndPoint to, T message, int capacity = 512)
-        where T : IWireMessage<T> =>
-        _datagrams.Enqueue(new OutgoingDatagram(to, Encode(message, capacity)));
+    private void SendOffline<T>(IPEndPoint to, T message, int capacity = 512, bool doNotFragment = false)
+        where T : IWireMessage<T>
+    {
+        var writer = new BitStreamWriter(_datagrams.Reserve(capacity));
+        message.Write(ref writer);
+        _datagrams.Commit(writer.BytesWritten, (to, doNotFragment));
+    }
 
     private static byte[] Encode<T>(T message, int capacity = 512)
         where T : IWireMessage<T>
@@ -1333,6 +1405,14 @@ internal sealed class PeerCore
         var writer = new BitStreamWriter(new byte[capacity]);
         message.Write(ref writer);
         return writer.Written.ToArray();
+    }
+
+    private static ReadOnlySpan<byte> Encode<T>(T message, Span<byte> buffer)
+        where T : IWireMessage<T>
+    {
+        var writer = new BitStreamWriter(buffer);
+        message.Write(ref writer);
+        return buffer[..writer.BytesWritten];
     }
 
     private static bool TryDecode<T>(ReadOnlySpan<byte> data, [MaybeNullWhen(false)] out T value)

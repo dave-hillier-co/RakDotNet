@@ -510,22 +510,22 @@ public sealed partial class RakPeer
             SendDatagram(delayed.Data, delayed.Socket, delayed.Remote, ttl: 0);
             NetworkSimulator.Release(delayed);
         }
-        while (_core.TryDequeueDatagram(out var datagram))
+        while (_core.TryDequeueDatagram(out var endPoint, out var datagram, out var doNotFragment))
         {
-            SystemAddress remote = datagram.Remote;
+            SystemAddress remote = endPoint;
             var socket = SocketOf(remote);
-            if (!_simulator.PassesNow(datagram.Data, socket, remote, nowUs))
+            if (!_simulator.PassesNow(datagram, socket, remote, nowUs))
                 continue;
-            if (datagram.DoNotFragment)
-                SendProbe(datagram.Data, socket, datagram.Remote, nowUs);
+            if (doNotFragment)
+                SendProbe(datagram, socket, endPoint, nowUs);
             else
-                SendDatagram(datagram.Data, socket, remote, ttl: 0);
+                SendDatagram(datagram, socket, remote, ttl: 0);
         }
     }
 
     // RakPeer.cpp:5768-5821: an MTU probe goes out with don't-fragment set. One too large for the path skips the rest of
     // its MTU's attempts; one whose send took more than 100 ms drops the attempt to the smallest MTU.
-    private void SendProbe(byte[] probe, int socket, IPEndPoint remote, long nowUs)
+    private void SendProbe(ReadOnlySpan<byte> probe, int socket, IPEndPoint remote, long nowUs)
     {
         SystemAddress to = remote;
         NotifySent(probe, to);
@@ -689,6 +689,7 @@ public sealed partial class RakPeer
         _byGuid.TryGetValue(message.Guid, out var connection);
         var segment = NewSegment(message.Data.Span, message.Guid, message.Remote, connection);
         segment.BitLength = message.BitLength;
+        _core.Recycle(message);
         EnqueueEvent(segment);
     }
 

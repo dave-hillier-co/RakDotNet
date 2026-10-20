@@ -16,6 +16,10 @@ namespace RakDotNet.Protocol.Peer;
 /// <param name="Guid">The remote system's GUID, or <see cref="Wire.Messages.RakNetConstants.UnassignedGuid"/> (Packet::guid).</param>
 internal abstract record PeerEvent(IPEndPoint Remote, ulong Guid)
 {
+    public IPEndPoint Remote { get; private protected set; } = Remote;
+
+    public ulong Guid { get; private protected set; } = Guid;
+
     /// <summary>The packet data RakPeer would return, starting with its message ID.</summary>
     public abstract ReadOnlyMemory<byte> Packet { get; }
 
@@ -99,15 +103,36 @@ internal sealed record IncomingConnectionCompleted(IPEndPoint Remote, ulong Guid
 }
 
 /// <summary>An application message arrived (RakPeer.cpp:6226-6237).</summary>
+/// <remarks>
+/// The core reuses its instances: one handed back through <see cref="PeerCore.Recycle"/> may be delivered again for
+/// another message, so a consumer that recycles an event must be done with it and its data. One that is never
+/// recycled keeps its data.
+/// </remarks>
 /// <param name="Remote">The sender.</param>
 /// <param name="Guid">The sender's GUID.</param>
 /// <param name="Data">The message, starting with its ID byte.</param>
 internal sealed record MessageReceived(IPEndPoint Remote, ulong Guid, ReadOnlyMemory<byte> Data) : PeerEvent(Remote, Guid)
 {
+    private byte[] _buffer = [];
+
+    public ReadOnlyMemory<byte> Data { get; private set; } = Data;
+
     public override ReadOnlyMemory<byte> Packet => Data;
 
     /// <summary>The length in bits the reliability layer delivered (Packet::bitSize, RakPeer.cpp:6231); whole bytes unless set.</summary>
-    public int BitLength { get; init; } = Data.Length * 8;
+    public int BitLength { get; internal set; } = Data.Length * 8;
+
+    /// <summary>Makes this the event for another message, copied into its own buffer.</summary>
+    internal void CopyFrom(IPEndPoint remote, ulong guid, ReadOnlySpan<byte> data, int bitLength)
+    {
+        if (_buffer.Length < data.Length)
+            _buffer = new byte[Math.Max(data.Length, 64)];
+        data.CopyTo(_buffer);
+        Remote = remote;
+        Guid = guid;
+        Data = _buffer.AsMemory(0, data.Length);
+        BitLength = bitLength;
+    }
 }
 
 /// <summary>

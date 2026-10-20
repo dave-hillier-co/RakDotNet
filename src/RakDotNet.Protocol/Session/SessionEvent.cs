@@ -7,10 +7,38 @@ namespace RakDotNet.Protocol.Session;
 internal abstract record SessionEvent;
 
 /// <summary>A message arrived and its ordering and sequencing allow it through.</summary>
+/// <remarks>
+/// The session reuses its instances: one handed back through <see cref="ReliabilityLayer.Recycle"/> may be delivered
+/// again with another payload, so a consumer that recycles an event must be done with it and its payload. One that is
+/// never recycled keeps its payload.
+/// </remarks>
 /// <param name="Payload">The message, including its message ID byte. The session owns a copy.</param>
 /// <param name="BitLength">The payload length in bits, as sent.</param>
 internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLength) : SessionEvent
 {
+    private byte[] _buffer = [];
+
+    public ReadOnlyMemory<byte> Payload { get; private set; } = Payload;
+
+    public int BitLength { get; private set; } = BitLength;
+
+    /// <summary>Delivers <paramref name="payload"/>, copied into this event's own buffer.</summary>
+    internal void CopyFrom(ReadOnlySpan<byte> payload, int bitLength)
+    {
+        if (_buffer.Length < payload.Length)
+            _buffer = new byte[Math.Max(payload.Length, 64)];
+        payload.CopyTo(_buffer);
+        Payload = _buffer.AsMemory(0, payload.Length);
+        BitLength = bitLength;
+    }
+
+    /// <summary>Delivers <paramref name="payload"/> as it is, for memory nothing else will write to.</summary>
+    internal void Reference(ReadOnlyMemory<byte> payload, int bitLength)
+    {
+        Payload = payload;
+        BitLength = bitLength;
+    }
+
     public bool Equals(MessageDelivered? other) =>
         other is not null && BitLength == other.BitLength && Payload.Span.SequenceEqual(other.Payload.Span);
 
