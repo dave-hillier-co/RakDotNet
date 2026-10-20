@@ -44,6 +44,8 @@ public sealed partial class RakPeer
     private volatile int _activeSystemCount;
     private int _syncedSlotsVersion;
     private bool _tableDirty;
+    // Connections ended since the table was last published; their Closed completes when it is.
+    private readonly List<RakConnection> _endedUnpublished = [];
 
     private bool InDispatchOnThisThread => Volatile.Read(ref _dispatchThread) == Environment.CurrentManagedThreadId;
 
@@ -863,7 +865,8 @@ public sealed partial class RakPeer
     private void EndConnection(RakConnection connection)
     {
         var guid = connection.RakNetGuid.Value;
-        connection.MarkClosed();
+        connection.MarkEnded();
+        _endedUnpublished.Add(connection);
         if (_byGuid.TryGetValue(guid, out var byGuid) && ReferenceEquals(byGuid, connection))
             _byGuid.Remove(guid);
         if (_byAddress.TryGetValue(connection.Address, out var byAddress) && ReferenceEquals(byAddress, connection))
@@ -920,6 +923,11 @@ public sealed partial class RakPeer
         if (syncSlots)
             _syncedSlotsVersion = _core.SlotsVersion;
         _tableDirty = false;
+        // Closed completes only once the table without the connection is published, so a Connect or query made on its
+        // completion finds the slot closed.
+        foreach (var ended in _endedUnpublished)
+            ended.CompleteClosed();
+        _endedUnpublished.Clear();
     }
 
     private RakConnection? Find(AddressOrGuid target)
@@ -1250,6 +1258,9 @@ public sealed partial class RakPeer
             _receipts.Clear();
             foreach (var connection in _byGuid.Values)
                 connection.MarkClosed();
+            foreach (var ended in _endedUnpublished)
+                ended.CompleteClosed();
+            _endedUnpublished.Clear();
         }
 
         _plugins.ReleaseAll();

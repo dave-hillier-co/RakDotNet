@@ -124,7 +124,10 @@ public sealed class RakConnection
     /// <summary>Application state; never read by the library.</summary>
     public object? UserState { get; set; }
 
-    /// <summary>Completes when <see cref="State"/> reaches Disconnected, when the cycle produces it rather than when it is read.</summary>
+    /// <summary>
+    /// Completes when <see cref="State"/> reaches Disconnected and queries and Connect no longer find the connection, when
+    /// the cycle produces it rather than when it is read.
+    /// </summary>
     public Task Closed => _closed.Task;
 
     internal ConnectionCounters Counters { get; }
@@ -228,9 +231,15 @@ public sealed class RakConnection
     /// <summary>The connection ended; it stays readable with its last values.</summary>
     internal void MarkClosed()
     {
-        _state = (int)ConnectionState.Disconnected;
-        _closed.TrySetResult();
+        MarkEnded();
+        CompleteClosed();
     }
+
+    /// <summary>The connection ended; <see cref="Closed"/> completes once queries no longer find it.</summary>
+    internal void MarkEnded() => _state = (int)ConnectionState.Disconnected;
+
+    /// <summary>Completes <see cref="Closed"/>.</summary>
+    internal void CompleteClosed() => _closed.TrySetResult();
 
     private static TimeSpan? PingOrNull(int ping) => ping == ushort.MaxValue ? null : TimeSpan.FromMilliseconds(ping);
 

@@ -318,7 +318,13 @@ public sealed class NativePeerDriverTests
     {
         await using var driver = await LaunchFakeAsync();
 
-        await driver.SendCommandAsync("delayed", new JsonObject { ["ms"] = 0 }, TestContext.Current.CancellationToken);
+        var token = TestContext.Current.CancellationToken;
+        await driver.SendCommandAsync("delayed", new JsonObject { ["ms"] = 0 }, token);
+
+        // stderr is its own pipe, read by its own loop, so a reply on stdout does not imply stderr has been read yet.
+        var deadline = DateTime.UtcNow + Timeout;
+        while (!driver.StandardError.Contains("fake peer ready", StringComparison.Ordinal) && DateTime.UtcNow < deadline)
+            await Task.Delay(10, token);
 
         Assert.Contains("fake peer ready", driver.StandardError);
     }

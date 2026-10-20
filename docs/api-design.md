@@ -284,7 +284,7 @@ RakNet runs every hook on its non-reliability-layer plugins before its reliabili
 
 ### 11.8 Async completions resolve when the outcome is produced
 
-`ConnectAsync`, `CloseAsync`, `Closed` and `SendAndTrackAsync` complete when the I/O cycle produces the outcome, not when the consumer reads the matching event. Reason: a task that depends on the consumer turns a missing or slow reader into a deadlock. The consequence is that `await ConnectAsync` may resume before plugins have run `OnConnected` for that connection; an application that must send only after plugin setup sends from its handler for the `Connected` event instead. The event still appears on the stream at its ordered position.
+`ConnectAsync`, `CloseAsync`, `Closed` and `SendAndTrackAsync` complete when the I/O cycle produces the outcome, not when the consumer reads the matching event. Reason: a task that depends on the consumer turns a missing or slow reader into a deadlock. The consequence is that `await ConnectAsync` may resume before plugins have run `OnConnected` for that connection; an application that must send only after plugin setup sends from its handler for the `Connected` event instead. The event still appears on the stream at its ordered position. A connect or close completes only after the connection table that queries and `Connect` read reflects it, so a query or `Connect` made on completion agrees with the outcome.
 
 ### 11.9 Received bit length is preserved
 
