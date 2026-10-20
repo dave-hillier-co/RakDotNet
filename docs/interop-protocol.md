@@ -111,6 +111,44 @@ Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFi
 
 TwoWayAuthentication's results reach the driver as `packet` events.
 
+### TCP commands
+
+TCP commands drive a `TCPInterface` or `PacketizedTCP` next to the peer, independent of `startup`, and `HTTPConnection` and
+`HTTPConnection2` on it. They live in `tools/interop-peer/src/TcpCommands.cpp`. Every command but `tcpStart` and
+`httpFormat` fails with `ok:false` until `tcpStart` has created the interface. Addresses are `"a.b.c.d:port"`, and an empty
+or absent address is `UNASSIGNED_SYSTEM_ADDRESS`.
+
+A thread polls the interface every millisecond as RakNet's samples do and records what it reports, in order, until
+`tcpPoll` collects it. Each poll calls `HasNewIncomingConnection` and `HasCompletedConnectionAttempt` until they report
+nothing, then `Receive` until it returns nothing, then `HasFailedConnectionAttempt` and `HasLostConnection`. Once
+`httpConnectionStart` has run, each poll instead passes every packet to `HTTPConnection::ProcessTCPPacket` and then calls
+its `Update`, which takes the connection events itself, as Samples/PHPDirectoryServer2 does.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `tcpStart` | `packetized` (false), `port` (0), `maxIncoming` (0), `maxConnections` (0), `host` (bind address; absent binds every address) | `started` (bool), `port` (the listening port, 0 when not listening) | `GetInstance` of `TCPInterface` or `PacketizedTCP` on first use, then `Start`; the port is read from the listening socket |
+| `tcpStop` | | | `Stop` |
+| `tcpConnect` | `host`, `port`, `block` (false) | `address` (empty for `UNASSIGNED_SYSTEM_ADDRESS`) | `Connect` |
+| `tcpSend` | `address`, `data` (hex), `broadcast` (false) | | `Send` |
+| `tcpSendList` | `address`, `parts` (array of hex strings), `broadcast` (false) | `result` (bool) | `SendList` |
+| `tcpClose` | `address` | | `CloseConnection` |
+| `tcpInfo` | `address` (optional) | `started`, `connections` (addresses), `connectionCount`, and with `address` `outgoingBytes` | `WasStarted`, `GetConnectionList`, `GetConnectionCount`, `GetOutgoingDataBufferSize` |
+| `tcpPoll` | | `events`: array of `{kind,address}`, with `data` (hex) when `kind` is `packet`; `kind` is `newIncomingConnection`, `completedConnectionAttempt`, `failedConnectionAttempt`, `lostConnection` or `packet` | what the polling recorded since the last `tcpPoll` |
+| `httpFormat` | `method` (`GET`, `POST`, `PUT` or `DELETE`), `uri`, `contentType` (""), `body` (""), `extraHeaders` ("") | `request` (hex) | `RakString::FormatForGET`, `FormatForPOST`, `FormatForPUT`, `FormatForDELETE` |
+| `httpConnectionStart` | `host`, `port` (80) | | `HTTPConnection::Init` on the interface |
+| `httpConnectionGet` | `path` | | `Get` |
+| `httpConnectionPost` | `path`, `data`, `contentType` (`application/x-www-form-urlencoded`) | | `Post` |
+| `httpConnectionPoll` | | `busy`, `state` (`GetState`), `serverAddress`, `results` (hex of each `Read`), `badResponses` (array of `{code,data}`, `data` hex) | `IsBusy`, `GetState`, `GetServerAddress`, `HasRead` and `Read`, `HasBadResponse` |
+| `http2Attach` | | | `AttachPlugin` of an `HTTPConnection2` to the interface; again is a no-op |
+| `http2Transmit` | `request` (hex, sent as a C string), `host`, `port` (80), `useAddress` (absent) | `result` (bool) | `TransmitRequest` |
+| `http2Poll` | | `busy`, `responses` (array of `{stringTransmitted,hostTransmitted,response,hostReceived,contentOffset}`, `stringTransmitted` and `response` hex) | `IsBusy`, `GetResponse` until it returns false |
+
+An address given to `tcpSend`, `tcpSendList`, `tcpClose` or `tcpInfo` is replaced by the matching entry of
+`GetConnectionList`, which carries the slot index RakNet keeps in a `SystemAddress`: `CloseConnection` of an address
+without one frees the slot at that index, out of range (`TCPInterface.cpp:593-605`). `Stop` closes the socket of every
+slot, and a slot never used has socket 0 (`TCPInterface.cpp:298-304`), so `tcpStop` saves the peer's stdin, descriptor
+0, around the call and restores it.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

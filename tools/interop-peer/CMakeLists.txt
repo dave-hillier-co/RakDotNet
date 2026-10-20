@@ -75,7 +75,8 @@ add_library(interop_logic STATIC
   src/Names.cpp
   src/PacketEvent.cpp
   src/PluginCommands.cpp
-  src/SecurityCommands.cpp)
+  src/SecurityCommands.cpp
+  src/TcpCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)
 target_link_libraries(interop_logic PUBLIC raknet_static interop_keys nlohmann_json::nlohmann_json)
 interop_peer_settings(interop_logic)

@@ -7,6 +7,7 @@
 #include "KeyGeneration.h"
 #include "PluginCommands.h"
 #include "SecurityCommands.h"
+#include "TcpCommands.h"
 
 #include "GetTime.h"
 #include "MessageIdentifiers.h"
@@ -322,6 +323,9 @@ namespace
             else if (plugins_.Dispatch(cmd, command, result))
             {
             }
+            else if (tcp_.Dispatch(cmd, command, result))
+            {
+            }
             else if (cmd == "shutdown")
             {
                 Shutdown(command);
@@ -607,6 +611,7 @@ namespace
         std::thread receiver_;
         std::atomic<bool> stop_{false};
         interop::PluginCommands plugins_;
+        interop::TcpCommands tcp_;
     };
 }
 
