@@ -18,10 +18,11 @@ namespace RakDotNet.Protocol.Wire;
 /// release build gives a defined result.
 /// </para>
 /// <para>
-/// Strings are UTF-8, since RakNet's are C strings of bytes. The length limits count bytes.
+/// Strings are bytes, as RakNet's are C strings; each string encoding has a byte form and a <see cref="string"/> form
+/// that encodes and decodes UTF-8. The length limits count bytes.
 /// </para>
 /// </remarks>
-public static class BitStreamEncodings
+public static partial class BitStreamEncodings
 {
     /// <summary>
     /// BitStream::WriteCompressed for an integer (BitStream.h:1275-1300, BitStream.cpp:489-548). RakNet reverses the
@@ -104,6 +105,25 @@ public static class BitStreamEncodings
     {
         if (maximum < minimum)
             throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        writer.WriteBitsFromIntegerRange(value, minimum, maximum, RequiredBits(minimum, maximum), allowOutsideRange);
+    }
+
+    /// <summary>
+    /// BitStream::WriteBitsFromIntegerRange with the bit count given by the caller (BitStream.h:1758-1784): the offset
+    /// from <paramref name="minimum"/> in <paramref name="requiredBits"/> bits, laid out as the other overload lays it out.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="maximum"/> is less than <paramref name="minimum"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The value is outside the range and that is not allowed, or <paramref name="requiredBits"/> is negative or wider
+    /// than <typeparamref name="T"/>.
+    /// </exception>
+    public static void WriteBitsFromIntegerRange<T>(this ref BitStreamWriter writer, T value, T minimum, T maximum, int requiredBits, bool allowOutsideRange = false)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        if (maximum < minimum)
+            throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        ArgumentOutOfRangeException.ThrowIfNegative(requiredBits);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(requiredBits, Unsafe.SizeOf<T>() * 8);
         var outside = value < minimum || value > maximum;
         if (allowOutsideRange)
         {
@@ -121,7 +141,7 @@ public static class BitStreamEncodings
 
         Span<byte> bytes = stackalloc byte[Unsafe.SizeOf<T>()];
         (value - minimum).WriteLittleEndian(bytes);
-        writer.WriteBits(bytes, RequiredBits(minimum, maximum));
+        writer.WriteBits(bytes, requiredBits);
     }
 
     /// <summary>
@@ -131,9 +151,23 @@ public static class BitStreamEncodings
     public static bool TryReadBitsFromIntegerRange<T>(this ref BitStreamReader reader, T minimum, T maximum, out T value, bool allowOutsideRange = false)
         where T : unmanaged, IBinaryInteger<T>
     {
+        if (maximum < minimum)
+            throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        return reader.TryReadBitsFromIntegerRange(minimum, maximum, RequiredBits(minimum, maximum), out value, allowOutsideRange);
+    }
+
+    /// <summary>
+    /// BitStream::ReadBitsFromIntegerRange with the bit count given by the caller (BitStream.h:1886-1904); the range, bit
+    /// count and flag must match the writer's. A bit count of 0 reads as <paramref name="minimum"/>.
+    /// </summary>
+    public static bool TryReadBitsFromIntegerRange<T>(this ref BitStreamReader reader, T minimum, T maximum, int requiredBits, out T value, bool allowOutsideRange = false)
+        where T : unmanaged, IBinaryInteger<T>
+    {
         value = default;
         if (maximum < minimum)
             throw new ArgumentException("The maximum is less than the minimum.", nameof(maximum));
+        ArgumentOutOfRangeException.ThrowIfNegative(requiredBits);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(requiredBits, Unsafe.SizeOf<T>() * 8);
         var r = reader;
         if (allowOutsideRange)
         {
@@ -150,9 +184,44 @@ public static class BitStreamEncodings
 
         Span<byte> bytes = stackalloc byte[Unsafe.SizeOf<T>()];
         bytes.Clear();
-        if (!r.TryReadBits(bytes, RequiredBits(minimum, maximum)))
+        if (!r.TryReadBits(bytes, requiredBits))
             return false;
         value = FromBytes<T>(bytes, bigEndian: false) + minimum;
+        reader = r;
+        return true;
+    }
+
+    /// <summary>
+    /// BitStream::WriteAlignedBytesSafe (BitStream.cpp:355-365): the whole length of <paramref name="source"/> as a
+    /// compressed u32, then at most <paramref name="maxBytes"/> of its bytes aligned to a byte. An empty source writes the
+    /// compressed 0 only.
+    /// </summary>
+    public static void WriteAlignedBytesSafe(this ref BitStreamWriter writer, scoped ReadOnlySpan<byte> source, int maxBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        if (source.IsEmpty)
+        {
+            writer.WriteCompressed(0u);
+            return;
+        }
+        writer.WriteCompressed((uint)source.Length);
+        writer.WriteAlignedBytes(source[..Math.Min(source.Length, maxBytes)]);
+    }
+
+    /// <summary>
+    /// BitStream::ReadAlignedBytesSafe (BitStream.cpp:395-404): a compressed u32 length capped at
+    /// <paramref name="maxBytes"/>, then that many aligned bytes as a slice of the input. A length of 0 does not align.
+    /// </summary>
+    public static bool TryReadAlignedBytesSafe(this ref BitStreamReader reader, int maxBytes, out ReadOnlySpan<byte> value)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        value = default;
+        var r = reader;
+        if (!r.TryReadCompressed(out uint length))
+            return false;
+        var count = (int)Math.Min(length, (uint)maxBytes);
+        if (count > 0 && !r.TryReadAlignedBytes(count, out value))
+            return false;
         reader = r;
         return true;
     }
@@ -220,9 +289,9 @@ public static class BitStreamEncodings
         writer.WriteSingle(magnitude);
         if (magnitude > 0.00001f)
         {
-            WriteCompressedFloat(ref writer, value.X / magnitude);
-            WriteCompressedFloat(ref writer, value.Y / magnitude);
-            WriteCompressedFloat(ref writer, value.Z / magnitude);
+            writer.WriteCompressed(value.X / magnitude);
+            writer.WriteCompressed(value.Y / magnitude);
+            writer.WriteCompressed(value.Z / magnitude);
         }
     }
 
@@ -235,7 +304,7 @@ public static class BitStreamEncodings
             return false;
         if (magnitude > 0.00001f)
         {
-            if (!TryReadCompressedFloat(ref r, out var x) || !TryReadCompressedFloat(ref r, out var y) || !TryReadCompressedFloat(ref r, out var z))
+            if (!r.TryReadCompressed(out float x) || !r.TryReadCompressed(out float y) || !r.TryReadCompressed(out float z))
                 return false;
             value = new Vector3(x * magnitude, y * magnitude, z * magnitude);
         }
@@ -333,36 +402,6 @@ public static class BitStreamEncodings
         return true;
     }
 
-    /// <summary>BitStream::WriteDelta: one bit if <paramref name="value"/> equals <paramref name="last"/>, else a bit then the value.</summary>
-    public static void WriteDelta<T>(this ref BitStreamWriter writer, T value, T last)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        if (value == last)
-        {
-            writer.WriteBit(false);
-            return;
-        }
-        writer.WriteBit(true);
-        WriteRaw(ref writer, value);
-    }
-
-    /// <summary>BitStream::ReadDelta: leaves <paramref name="value"/> unchanged when the sender wrote the same value.</summary>
-    public static bool TryReadDelta<T>(this ref BitStreamReader reader, ref T value)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        var r = reader;
-        if (!r.TryReadBit(out var changed))
-            return false;
-        if (changed)
-        {
-            if (!TryReadRaw(ref r, out T read))
-                return false;
-            value = read;
-        }
-        reader = r;
-        return true;
-    }
-
     /// <summary>
     /// BitStream::WriteCasted: <paramref name="value"/> written as the smaller <typeparamref name="TWire"/>, truncated
     /// as RakNet's C cast truncates it.
@@ -380,70 +419,6 @@ public static class BitStreamEncodings
         if (!TryReadRaw(ref reader, out TWire wire))
             return false;
         value = TValue.CreateTruncating(wire);
-        return true;
-    }
-
-    /// <summary>
-    /// RakString::Serialize (RakString.cpp:1218-1223): a u16 byte length, then the UTF-8 bytes aligned to a byte.
-    /// </summary>
-    /// <exception cref="ArgumentException">The string is more than 65535 bytes of UTF-8.</exception>
-    public static void WriteRakString(this ref BitStreamWriter writer, ReadOnlySpan<char> value)
-    {
-        var length = Encoding.UTF8.GetByteCount(value);
-        if (length > ushort.MaxValue)
-            throw new ArgumentException("A RakString holds at most 65535 bytes.", nameof(value));
-        var bytes = length <= 256 ? stackalloc byte[length] : new byte[length];
-        Encoding.UTF8.GetBytes(value, bytes);
-        writer.WriteUInt16((ushort)length);
-        writer.WriteAlignedBytes(bytes);
-    }
-
-    /// <summary>RakString::Deserialize (RakString.cpp:1234-1253): an empty string still aligns the read.</summary>
-    public static bool TryReadRakString(this ref BitStreamReader reader, [NotNullWhen(true)] out string? value)
-    {
-        value = null;
-        var r = reader;
-        if (!r.TryReadUInt16(out var length))
-            return false;
-        if (length == 0)
-        {
-            r.AlignToByte();
-            value = string.Empty;
-        }
-        else
-        {
-            if (!r.TryReadAlignedBytes(length, out var bytes))
-                return false;
-            value = Encoding.UTF8.GetString(bytes);
-        }
-        reader = r;
-        return true;
-    }
-
-    /// <summary>
-    /// StringCompressor::EncodeString with RakNet's default English Huffman table (StringCompressor.cpp:366-397): at most
-    /// <paramref name="maxCharCount"/> - 1 bytes of UTF-8 are written, or all of them when the limit is 0 or more than
-    /// their count. RakString::SerializeCompressed passes 0xFFFF.
-    /// </summary>
-    public static void WriteCompressedString(this ref BitStreamWriter writer, ReadOnlySpan<char> value, int maxCharCount)
-    {
-        var length = Encoding.UTF8.GetByteCount(value);
-        var bytes = length <= 256 ? stackalloc byte[length] : new byte[length];
-        Encoding.UTF8.GetBytes(value, bytes);
-        StringCompressor.English.Write(ref writer, bytes, maxCharCount);
-    }
-
-    /// <summary>
-    /// StringCompressor::DecodeString (StringCompressor.cpp:399-427): false for a limit that is not positive or a
-    /// truncated stream; a string of <paramref name="maxCharCount"/> bytes or more keeps its first
-    /// <paramref name="maxCharCount"/> - 1.
-    /// </summary>
-    public static bool TryReadCompressedString(this ref BitStreamReader reader, int maxCharCount, [NotNullWhen(true)] out string? value)
-    {
-        value = null;
-        if (!StringCompressor.English.TryRead(ref reader, maxCharCount, out var bytes))
-            return false;
-        value = Encoding.UTF8.GetString(bytes);
         return true;
     }
 
@@ -496,101 +471,5 @@ public static class BitStreamEncodings
         writer.WriteUInt16((ushort)(Math.Abs(x) * 65535.0));
         writer.WriteUInt16((ushort)(Math.Abs(y) * 65535.0));
         writer.WriteUInt16((ushort)(Math.Abs(z) * 65535.0));
-    }
-
-    // BitStream::WriteCompressed(float) (BitStream.h:1327-1338): clamped to -1..1, then a u16.
-    private static void WriteCompressedFloat(ref BitStreamWriter writer, float value)
-    {
-        if (value < -1.0f)
-            value = -1.0f;
-        if (value > 1.0f)
-            value = 1.0f;
-        writer.WriteUInt16((ushort)((value + 1.0f) * 32767.5f));
-    }
-
-    // BitStream::ReadCompressed(float) (BitStream.h:1665-1676).
-    private static bool TryReadCompressedFloat(ref BitStreamReader reader, out float value)
-    {
-        value = default;
-        if (!reader.TryReadUInt16(out var compressed))
-            return false;
-        value = (compressed / 32767.5f) - 1.0f;
-        return true;
-    }
-}
-
-/// <summary>
-/// RakNet's <c>Serialize(bool writeToBitstream, ...)</c> idiom: one method body that either writes or reads.
-/// </summary>
-/// <remarks>
-/// A ref struct cannot hold a <c>ref</c> to another ref struct, so the serializer owns its writer or reader by value;
-/// <see cref="Writer"/> and <see cref="Reader"/> return the advanced copy.
-/// </remarks>
-public ref struct BitSerializer
-{
-    private BitStreamWriter _writer;
-    private BitStreamReader _reader;
-
-    public BitSerializer(BitStreamWriter writer)
-    {
-        _writer = writer;
-        IsWriting = true;
-    }
-
-    public BitSerializer(BitStreamReader reader) => _reader = reader;
-
-    public readonly bool IsWriting { get; }
-
-    /// <summary>The writer after the calls so far. Throws when reading.</summary>
-    public readonly BitStreamWriter Writer =>
-        IsWriting ? _writer : throw new InvalidOperationException("The serializer is reading.");
-
-    /// <summary>The reader after the calls so far. Throws when writing.</summary>
-    public readonly BitStreamReader Reader =>
-        IsWriting ? throw new InvalidOperationException("The serializer is writing.") : _reader;
-
-    /// <summary>Writes <paramref name="value"/>, or reads into it; false when a read fails.</summary>
-    /// <remarks>BitStream::Serialize: the value's bytes big-endian (BitStream.h:1080-1102).</remarks>
-    public bool Serialize<T>(ref T value)
-        where T : unmanaged, INumber<T>
-    {
-        if (IsWriting)
-        {
-            BitStreamEncodings.WriteRaw(ref _writer, value);
-            return true;
-        }
-        if (!BitStreamEncodings.TryReadRaw(ref _reader, out T read))
-            return false;
-        value = read;
-        return true;
-    }
-
-    /// <summary>BitStream::Serialize of a bool: one bit.</summary>
-    public bool Serialize(ref bool value)
-    {
-        if (IsWriting)
-        {
-            _writer.WriteBit(value);
-            return true;
-        }
-        if (!_reader.TryReadBit(out var read))
-            return false;
-        value = read;
-        return true;
-    }
-
-    /// <summary>BitStream::SerializeCompressed.</summary>
-    public bool SerializeCompressed<T>(ref T value)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        if (IsWriting)
-        {
-            _writer.WriteCompressed(value);
-            return true;
-        }
-        if (!_reader.TryReadCompressed(out T read))
-            return false;
-        value = read;
-        return true;
     }
 }

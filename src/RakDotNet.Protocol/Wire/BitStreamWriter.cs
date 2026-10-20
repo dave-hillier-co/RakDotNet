@@ -73,18 +73,90 @@ public ref struct BitStreamWriter
     }
 
     /// <summary>
-    /// Writes <paramref name="bitCount"/> bits from <paramref name="source"/>: whole bytes in order, then the low
-    /// bits of the final partial byte. Matches BitStream::WriteBits with rightAlignedBits=true.
+    /// Writes <paramref name="bitCount"/> bits from <paramref name="source"/>: whole bytes in order, then the final
+    /// partial byte's low bits, or with <paramref name="rightAlignedBits"/> false its high bits. Matches
+    /// BitStream::WriteBits (BitStream.cpp:424-480).
     /// </summary>
-    public void WriteBits(scoped ReadOnlySpan<byte> source, int bitCount)
+    /// <remarks>
+    /// Left-aligned, RakNet copies the whole final byte unshifted (BitStream.cpp:448-460), so bits of it past
+    /// <paramref name="bitCount"/> land in the stream and later writes OR into them; this writer does the same. RakNet's
+    /// own left-aligned callers pass bytes whose unused bits are zero.
+    /// </remarks>
+    public void WriteBits(scoped ReadOnlySpan<byte> source, int bitCount, bool rightAlignedBits = true)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(bitCount);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(bitCount, source.Length * 8);
         var wholeBytes = bitCount >> 3;
         WriteBytes(source[..wholeBytes]);
         var remainder = bitCount & 7;
-        if (remainder > 0)
+        if (remainder == 0)
+            return;
+        if (rightAlignedBits)
+        {
             WriteBits(source[wholeBytes], remainder);
+            return;
+        }
+
+        EnsureCapacity(remainder);
+        var dataByte = source[wholeBytes];
+        var byteIndex = _bitPosition >> 3;
+        var bitInByte = _bitPosition & 7;
+        if (bitInByte == 0)
+            _buffer[byteIndex] = dataByte;
+        else
+        {
+            _buffer[byteIndex] |= (byte)(dataByte >> bitInByte);
+            if (8 - bitInByte < remainder)
+                _buffer[byteIndex + 1] = (byte)(dataByte << (8 - bitInByte));
+        }
+        _bitPosition += remainder;
+    }
+
+    /// <summary>
+    /// Copies up to <paramref name="bitCount"/> bits from <paramref name="source"/>'s position, stopping early when the
+    /// source runs out, and returns how many were copied. BitStream::Write(BitStream*, numberOfBits)
+    /// (BitStream.cpp:193-237) without the advance of the source: the reader is taken by value so that a writer over a
+    /// stack buffer can copy from a reader over any memory. <see cref="BitStream.Write(ref BitStreamReader, int)"/>
+    /// advances its source.
+    /// </summary>
+    public int Write(scoped BitStreamReader source, int bitCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bitCount);
+        var copied = Math.Min(bitCount, source.BitsRemaining);
+        EnsureCapacity(copied);
+        var remaining = copied;
+        for (; remaining >= 8; remaining -= 8)
+        {
+            source.TryReadByte(out var b);
+            WriteByte(b);
+        }
+        if (remaining > 0)
+        {
+            source.TryReadBits(remaining, out var bits);
+            WriteBits(bits, remaining);
+        }
+        return copied;
+    }
+
+    /// <summary>
+    /// Copies every unread bit of <paramref name="source"/> and returns how many. BitStream::Write(BitStream*)
+    /// (BitStream.cpp:189-192) without the advance of the source.
+    /// </summary>
+    public int Write(scoped BitStreamReader source) => Write(source, source.BitsRemaining);
+
+    /// <summary>
+    /// Aligns to a byte, then writes zero bytes until <paramref name="byteLength"/> bytes are written; nothing when the
+    /// writer already holds that many. Matches BitStream::PadWithZeroToByteLength (BitStream.cpp:744-754).
+    /// </summary>
+    public void PadWithZeroToByteLength(int byteLength)
+    {
+        if (BytesWritten >= byteLength)
+            return;
+        AlignToByte();
+        var count = byteLength - BytesWritten;
+        EnsureCapacity(count * 8);
+        _buffer.Slice(_bitPosition >> 3, count).Clear();
+        _bitPosition += count * 8;
     }
 
     /// <summary>Writes bytes at the current bit position without aligning first.</summary>
@@ -163,6 +235,9 @@ public ref struct BitStreamWriter
         bytes[2] = (byte)(value.Value >> 16);
         WriteBytes(bytes);
     }
+
+    /// <summary>Writes the GUID's u64 big-endian. Matches BitStream::Write(RakNetGUID) (BitStream.h:1187-1190).</summary>
+    public void WriteRakNetGuid(RakNetGuid value) => WriteUInt64(value.Value);
 
     /// <summary>
     /// Writes an IPv4 SystemAddress: version byte 4, the bitwise-NOT of each address byte in network order,

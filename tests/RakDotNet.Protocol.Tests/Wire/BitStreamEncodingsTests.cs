@@ -280,16 +280,16 @@ public class BitStreamEncodingsTests
     {
         var expected = NativeHuffmanCodes.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(256, expected.Length);
+        var tree = new HuffmanEncodingTree(StringCompressor.EnglishCharacterFrequencies);
         Span<byte> buffer = stackalloc byte[64];
         for (var value = 0; value < 256; value++)
         {
             var writer = new BitStreamWriter(buffer);
-            StringCompressor.English.Write(ref writer, [(byte)value], 0);
-            // The bit length (a compressed uint) then the code padded to a byte; the code is the prefix of the padding.
+            tree.EncodeArray([(byte)value], ref writer);
+            // The code padded to a byte; the code is the prefix of the padding.
             var reader = new BitStreamReader(writer.Written, writer.BitsWritten);
-            Assert.True(reader.TryReadCompressed(out uint bitLength));
             var code = expected[value];
-            Assert.Equal((code.Length + 7) / 8 * 8, (int)bitLength);
+            Assert.Equal((code.Length + 7) / 8 * 8, writer.BitsWritten);
             for (var i = 0; i < code.Length; i++)
             {
                 Assert.True(reader.TryReadBit(out var bit));

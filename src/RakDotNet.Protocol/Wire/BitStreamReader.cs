@@ -25,7 +25,21 @@ public ref struct BitStreamReader
         _bitLength = bitLength;
     }
 
-    public readonly int BitPosition => _bitPosition;
+    /// <summary>
+    /// The read position in bits; BitStream::GetReadOffset and SetReadOffset (BitStream.h:508-511). Setting 0 is
+    /// ResetReadPointer.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">Set outside 0 to the reader's bit length.</exception>
+    public int BitPosition
+    {
+        readonly get => _bitPosition;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, _bitLength);
+            _bitPosition = value;
+        }
+    }
 
     public readonly int BitsRemaining => _bitLength - _bitPosition;
 
@@ -65,10 +79,15 @@ public ref struct BitStreamReader
     }
 
     /// <summary>
-    /// Reads <paramref name="bitCount"/> bits into <paramref name="destination"/>: whole bytes in order, then
-    /// a right-aligned final partial byte. Matches BitStream::ReadBits with alignBitsToRight=true.
+    /// Reads <paramref name="bitCount"/> bits into <paramref name="destination"/>: whole bytes in order, then the final
+    /// partial byte right-aligned, or with <paramref name="alignBitsToRight"/> false left as it sits in the stream.
+    /// Matches BitStream::ReadBits (BitStream.cpp:551-617).
     /// </summary>
-    public bool TryReadBits(scoped Span<byte> destination, int bitCount)
+    /// <remarks>
+    /// Left-aligned, RakNet does not mask the final byte, so its low bits hold the bits of the stream byte that follow
+    /// the ones read (BitStream.cpp:580-583); this reader does the same.
+    /// </remarks>
+    public bool TryReadBits(scoped Span<byte> destination, int bitCount, bool alignBitsToRight = true)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(bitCount);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(bitCount, destination.Length * 8);
@@ -78,9 +97,56 @@ public ref struct BitStreamReader
         for (var i = 0; i < wholeBytes; i++)
             TryReadBits(8, out destination[i]);
         var remainder = bitCount & 7;
-        if (remainder > 0)
+        if (remainder == 0)
+            return true;
+        if (alignBitsToRight)
+        {
             TryReadBits(remainder, out destination[wholeBytes]);
+            return true;
+        }
+
+        var byteIndex = _bitPosition >> 3;
+        var bitInByte = _bitPosition & 7;
+        var value = (byte)(_buffer[byteIndex] << bitInByte);
+        if (bitInByte > 0 && remainder > 8 - bitInByte)
+            value |= (byte)(_buffer[byteIndex + 1] >> (8 - bitInByte));
+        destination[wholeBytes] = value;
+        _bitPosition += remainder;
         return true;
+    }
+
+    /// <summary>
+    /// Copies <paramref name="bitCount"/> bits into <paramref name="destination"/>; false, without moving, when fewer
+    /// are unread. Matches BitStream::Read(BitStream*, numberOfBits) (BitStream.cpp:246-252).
+    /// </summary>
+    public bool TryReadBits(BitStream destination, int bitCount)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(bitCount);
+        if (BitsRemaining < bitCount)
+            return false;
+        destination.Write(ref this, bitCount);
+        return true;
+    }
+
+    /// <summary>
+    /// Skips <paramref name="bitCount"/> bits; false, without moving, when fewer are unread. BitStream::IgnoreBits
+    /// (BitStream.cpp:912-915) moves regardless and lets the next read fail.
+    /// </summary>
+    public bool IgnoreBits(int bitCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bitCount);
+        if (BitsRemaining < bitCount)
+            return false;
+        _bitPosition += bitCount;
+        return true;
+    }
+
+    /// <summary>Skips <paramref name="byteCount"/> bytes' worth of bits. See <see cref="IgnoreBits"/>.</summary>
+    public bool IgnoreBytes(int byteCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(byteCount);
+        return IgnoreBits(checked(byteCount * 8));
     }
 
     /// <summary>Reads bytes at the current bit position without aligning first.</summary>
@@ -180,6 +246,14 @@ public ref struct BitStreamReader
         }
         value = new UInt24((uint)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16)));
         return true;
+    }
+
+    /// <summary>Reads a GUID as BitStream::Read(RakNetGUID) does (BitStream.h:1551-1554): a big-endian u64.</summary>
+    public bool TryReadRakNetGuid(out RakNetGuid value)
+    {
+        var ok = TryReadUInt64(out var raw);
+        value = new RakNetGuid(raw);
+        return ok;
     }
 
     /// <summary>

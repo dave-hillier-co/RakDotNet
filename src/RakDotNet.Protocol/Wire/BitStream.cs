@@ -27,6 +27,10 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
     private byte[]? _buffer;
     private int _bitPosition;
 
+    // The bytes written since the last Reset, past the position when SetWriteOffset moved it back; they are kept when the
+    // buffer grows and are not zero-filled when the position moves forward again, as RakNet's buffer keeps them.
+    private int _highWaterBytes;
+
     public BitStream(int initialCapacityBytes = DefaultInitialCapacityBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(initialCapacityBytes);
@@ -61,7 +65,58 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
     {
         ThrowIfDisposed();
         _bitPosition = 0;
+        _highWaterBytes = 0;
     }
+
+    /// <summary>
+    /// Moves the write position to <paramref name="bitOffset"/>, so a field can be patched and the length restored.
+    /// Matches BitStream::SetWriteOffset (BitStream.cpp:924-927).
+    /// </summary>
+    /// <remarks>
+    /// As in RakNet, a write that starts inside a byte ORs into the bits already there, so patch on byte boundaries or
+    /// over zero bits. Moving past the end grows the buffer and zero-fills the bytes in between, where RakNet leaves them
+    /// uninitialised.
+    /// </remarks>
+    public void SetWriteOffset(int bitOffset)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bitOffset);
+        var end = Math.Max(AlignedBytes(), _highWaterBytes);
+        var needed = (bitOffset + 7) >> 3;
+        if (needed > end)
+        {
+            Reserve(needed - (_bitPosition >> 3));
+            _buffer.AsSpan(end, needed - end).Clear();
+        }
+        MoveTo(bitOffset);
+    }
+
+    /// <inheritdoc cref="BitStreamWriter.PadWithZeroToByteLength"/>
+    public void PadWithZeroToByteLength(int byteLength)
+    {
+        var writer = BeginWrite(Math.Max(0, byteLength - (_bitPosition >> 3)));
+        writer.PadWithZeroToByteLength(byteLength);
+        EndWrite(writer);
+    }
+
+    /// <summary>
+    /// Copies <paramref name="bitCount"/> bits from <paramref name="source"/>'s position and advances it past them,
+    /// stopping early when the source runs out. Matches BitStream::Write(BitStream*, numberOfBits)
+    /// (BitStream.cpp:193-237).
+    /// </summary>
+    public void Write(scoped ref BitStreamReader source, int bitCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bitCount);
+        var writer = BeginWrite((Math.Min(bitCount, source.BitsRemaining) >> 3) + 1);
+        var copied = writer.Write(source, bitCount);
+        EndWrite(writer);
+        source.IgnoreBits(copied);
+    }
+
+    /// <summary>
+    /// Copies every unread bit of <paramref name="source"/> and advances it to the end. Matches BitStream::Write(BitStream*)
+    /// (BitStream.cpp:189-192).
+    /// </summary>
+    public void Write(scoped ref BitStreamReader source) => Write(ref source, source.BitsRemaining);
 
     /// <summary>A writer at the current bit position over a buffer with at least <paramref name="sizeHintBytes"/> free.</summary>
     public BitStreamWriter BeginWrite(int sizeHintBytes)
@@ -80,7 +135,7 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
             throw new ArgumentException("The writer was not created by this stream's BeginWrite, or the stream has grown since.", nameof(writer));
         if (writer.BitsWritten < _bitPosition)
             throw new ArgumentException("The writer is behind the stream's position.", nameof(writer));
-        _bitPosition = writer.BitsWritten;
+        MoveTo(writer.BitsWritten);
     }
 
     /// <summary>Writes a wire structure, growing the buffer until it fits.</summary>
@@ -212,6 +267,9 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
         EndWrite(writer);
     }
 
+    /// <inheritdoc cref="BitStreamWriter.WriteRakNetGuid"/>
+    public void WriteRakNetGuid(RakNetGuid value) => WriteUInt64(value.Value);
+
     /// <summary>A reader over <see cref="Written"/>, limited to <see cref="BitsWritten"/>.</summary>
     public BitStreamReader CreateReader() => new(Written, _bitPosition);
 
@@ -221,7 +279,7 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(count);
         var start = AlignedBytes();
         ArgumentOutOfRangeException.ThrowIfGreaterThan(count, Buffer.Length - start);
-        _bitPosition = (start + count) * 8;
+        MoveTo((start + count) * 8);
     }
 
     /// <inheritdoc cref="Advance"/>
@@ -244,6 +302,7 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
             return;
         _buffer = null;
         _bitPosition = 0;
+        _highWaterBytes = 0;
         ArrayPool<byte>.Shared.Return(buffer);
     }
 
@@ -265,6 +324,12 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
     [DoesNotReturn]
     private void ThrowDisposed() => throw new ObjectDisposedException(nameof(BitStream));
 
+    private void MoveTo(int bitPosition)
+    {
+        _bitPosition = bitPosition;
+        _highWaterBytes = Math.Max(_highWaterBytes, (bitPosition + 7) >> 3);
+    }
+
     private int AlignedBytes()
     {
         ThrowIfDisposed();
@@ -279,7 +344,7 @@ public sealed class BitStream : IBufferWriter<byte>, IDisposable
         if (needed <= buffer.Length)
             return;
         var grown = ArrayPool<byte>.Shared.Rent(Math.Max(needed, checked(buffer.Length * 2)));
-        buffer.AsSpan(0, AlignedBytes()).CopyTo(grown);
+        buffer.AsSpan(0, Math.Max(AlignedBytes(), _highWaterBytes)).CopyTo(grown);
         ArrayPool<byte>.Shared.Return(buffer);
         _buffer = grown;
     }
