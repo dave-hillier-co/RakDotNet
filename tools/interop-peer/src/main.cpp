@@ -5,6 +5,7 @@
 #include "Names.h"
 #include "PacketEvent.h"
 #include "KeyGeneration.h"
+#include "NatCommands.h"
 #include "PluginCommands.h"
 #include "SecurityCommands.h"
 
@@ -154,7 +155,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), nat_(peer_) {}
 
         ~InteropPeer()
         {
@@ -320,6 +321,9 @@ namespace
             else if (cmd == "time")
                 result["time"] = std::to_string(RakNet::GetTime());
             else if (plugins_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (nat_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -607,6 +611,7 @@ namespace
         std::thread receiver_;
         std::atomic<bool> stop_{false};
         interop::PluginCommands plugins_;
+        interop::NatCommands nat_;
     };
 }
 

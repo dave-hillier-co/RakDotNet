@@ -73,11 +73,13 @@ set_target_properties(interop_keys PROPERTIES CXX_STANDARD 98 CXX_STANDARD_REQUI
 add_library(interop_logic STATIC
   src/Hex.cpp
   src/Names.cpp
+  src/NatCommands.cpp
+  src/NatGateway.cpp
   src/PacketEvent.cpp
   src/PluginCommands.cpp
   src/SecurityCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)
-target_link_libraries(interop_logic PUBLIC raknet_static interop_keys nlohmann_json::nlohmann_json)
+target_link_libraries(interop_logic PUBLIC raknet_static interop_keys nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
 interop_peer_settings(interop_logic)
 
 add_executable(interop-peer src/main.cpp)
