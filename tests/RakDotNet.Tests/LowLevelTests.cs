@@ -245,6 +245,19 @@ public sealed class LowLevelTests : IDisposable
         _raw.Dispose();
     }
 
+    [Fact]
+    public void TransportFactory_is_the_one_the_peer_bound_its_sockets_with()
+    {
+        // NatTypeDetectionClient and Server bind their extra sockets as RakPeer binds its own (NatTypeDetectionCommon.cpp:107-160).
+        Assert.Same(_network, _peer.LowLevel.TransportFactory);
+        Assert.True(_peer.LowLevel.TransportFactory.TryBind(new SocketBinding(new IPEndPoint(IPAddress.Loopback, 0)), out var extra, out _, out _));
+        using (extra)
+        {
+            Assert.True(extra.TrySend([1, 2], _raw.LocalAddress));
+            Assert.Equal([[1, 2]], ReceivedFrom(extra.LocalAddress));
+        }
+    }
+
     private RakPeer Start(InMemoryNetwork network, int maxIncoming = 0, NetworkSimulatorOptions? simulator = null) => RakPeer.Start(new RakPeerOptions
     {
         MaxConnections = 2,
@@ -260,6 +273,18 @@ public sealed class LowLevelTests : IDisposable
     {
         _time.Advance(TimeSpan.FromMilliseconds(10));
         _peer.Update();
+    }
+
+    private List<byte[]> ReceivedFrom(SystemAddress source)
+    {
+        var received = new List<byte[]>();
+        var buffer = new byte[2048];
+        while (_raw.TryReceive(buffer, out var length, out var from))
+        {
+            Assert.Equal(source, from);
+            received.Add(buffer[..length]);
+        }
+        return received;
     }
 
     private List<byte[]> Received()
