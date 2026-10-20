@@ -143,6 +143,35 @@ The `fileListTransferInfo` records:
 
 A `ddtDownload` handler records `files`, `progress` and `completed` the same way. File messages the plugins consume never reach the driver as `packet` events.
 
+### Cloud commands
+
+The cloud commands attach a `CloudClient` and a `CloudServer` and drive them. They live in `tools/interop-peer/src/CloudCommands.cpp`. Every command but an attach command fails with `ok:false` until its plugin is attached. A key is `{primaryKey, secondaryKey}`, with `primaryKey` a string and `secondaryKey` (0) a u32; `keys` is an array of them.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `cloudClientAttach` | | | `AttachPlugin` of a `CloudClient`, then of a plugin that passes `ID_CLOUD_GET_RESPONSE` to `OnGetReponse` and `ID_CLOUD_SUBSCRIPTION_NOTIFICATION` to `OnSubscriptionNotification` with a recording callback, and continues processing; again is a no-op |
+| `cloudServerAttach` | | | `AttachPlugin` of a `CloudServer`; again is a no-op |
+| `cloudPost` | `target` (guid), `key`, `data` (hex, "") | | `Post` |
+| `cloudRelease` | `target` (guid), `keys` | | `Release` |
+| `cloudGet` | `target` (guid), `keys`, `startingRowIndex` (0), `maxRowsToReturn` (0), `subscribe` (false), `specificSystems` (array of guids, absent) | | `Get` of a `CloudQuery`; with `specificSystems`, the overload taking a list of GUIDs |
+| `cloudUnsubscribe` | `target` (guid), `keys`, `specificSystems` (array of guids, absent) | | `Unsubscribe`; with `specificSystems`, the overload taking a list of GUIDs |
+| `cloudServerAddServer` | `guid` | | `AddServer` |
+| `cloudServerRemoveServer` | `guid` | | `RemoveServer` |
+| `cloudServerSetMaxUploadBytesPerClient` | `bytes` | | `SetMaxUploadBytesPerClient` |
+| `cloudServerForceExternalAddress` | `host` (IPv4 text), `port` | | `ForceExternalSystemAddress` |
+| `cloudServerSetFilter` | `rejectPostPrimaryKey` (""), `exemptGuid` (guid, absent) | | `RemoveAllQueryFilters`, then `AddQueryFilter` of Samples/CloudServer's `CloudServerHelperFilter`: a post under `rejectPostPrimaryKey` is rejected unless it comes from `exemptGuid`; everything else is allowed, and every call is recorded |
+| `cloudInfo` | | `gets`, `notifications`, `filterCalls`, `remoteServers` (guids), `localIp` | What the callback and the filter recorded, in the order they ran, `GetRemoteServers`, and `GetLocalIP(0)` |
+
+`CloudServer.cpp` defines no `GetInstance`, so the server is created with `new`.
+
+The `cloudInfo` records, where a recorded key has `primaryKey` as hex, since a `RakString` need not be UTF-8, and a row is a key with `data` (hex), `serverAddress` and `clientAddress` (written as `packet` events write addresses), `serverGuid` and `clientGuid`:
+
+- `gets`, from `OnGet`: the query's `keys`, `startingRowIndex`, `maxRowsToReturn` and `querySubscribe`, the result's `subscribeToResults`, and `rows`.
+- `notifications`, from `OnSubscriptionNotification`: `wasUpdated` and `row`.
+- `filterCalls`: `op` (`post`, `release`, `get` or `unsubscribe`), `clientGuid`, `clientAddress`, then `key` and `data` (hex) for a post, `keys` otherwise, and `specificSystems` for a get or an unsubscribe.
+
+Get responses and notifications also reach the driver as `packet` events; the requests a `CloudServer` consumes do not.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

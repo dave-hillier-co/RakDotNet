@@ -108,6 +108,7 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
 | FileListTransfer | Files sent whole with their contexts, referenced files read and sent a chunk at a time with acknowledgements, split message progress of a large file |
 | DirectoryDeltaTransfer, `DirectoryDeltaTransferTest` | A subdirectory downloaded into another with only the missing or changed files sent, with and without an incremental reader on the uploader, and a file named outside the output directory |
+| CloudTest, CloudClient, CloudServer | Two servers that added each other answering gets with their own rows then the other's, paging through both, a client on one server subscribed to a client on the other told of its posts and releases until it unsubscribes, and a directory server listing its clients and its own load with a filter on who may post it |
 
 ## Milestones
 

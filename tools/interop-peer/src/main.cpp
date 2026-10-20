@@ -5,6 +5,7 @@
 #include "Names.h"
 #include "PacketEvent.h"
 #include "KeyGeneration.h"
+#include "CloudCommands.h"
 #include "FileCommands.h"
 #include "PluginCommands.h"
 #include "SecurityCommands.h"
@@ -155,7 +156,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), files_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), files_(peer_), cloud_(peer_) {}
 
         ~InteropPeer()
         {
@@ -324,6 +325,9 @@ namespace
             {
             }
             else if (files_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (cloud_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -612,6 +616,7 @@ namespace
         std::atomic<bool> stop_{false};
         interop::PluginCommands plugins_;
         interop::FileCommands files_;
+        interop::CloudCommands cloud_;
     };
 }
 
