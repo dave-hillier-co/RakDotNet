@@ -218,6 +218,24 @@ public sealed class Router2Tests : IDisposable
         Assert.Equal(established.Address.WithPort(port), failed.Address);
     }
 
+    [Fact]
+    public void A_router_forwards_only_while_attached_with_forwarding_requests_and_until_its_peer_shuts_down()
+    {
+        var plugin = new Plugins.Router2(PeerThreading.Manual) { MaximumForwardingRequests = 2 };
+        Assert.Null(plugin.Forwarder);
+        var peer = _mesh.Add("127.0.0.1", plugins: plugin);
+        Assert.True(plugin.Forwarder!.IsRunning);
+
+        plugin.MaximumForwardingRequests = 0;
+        Assert.Null(plugin.Forwarder);
+        plugin.MaximumForwardingRequests = 1;
+        var forwarder = plugin.Forwarder!;
+
+        peer.Dispose();
+        Assert.Null(plugin.Forwarder);
+        Assert.False(forwarder.IsRunning);
+    }
+
     // Samples/Router2: A to B and C, B to C, D to B and C; then the pings settle.
     private void ConnectAsInTheSample()
     {

@@ -290,6 +290,22 @@ public sealed class UdpProxyTests : IDisposable
         }, seen[0]);
     }
 
+    [Fact]
+    public void The_proxy_server_forwards_while_attached_to_a_running_peer()
+    {
+        var plugin = new UdpProxyServer(PeerThreading.Manual) { MaxForwardEntries = 3 };
+        Assert.Null(plugin.Forwarder);
+        var server = _mesh.Add("127.0.0.1", plugins: plugin);
+        var forwarder = plugin.Forwarder!;
+        Assert.True(forwarder.IsRunning);
+        Assert.Equal(3, forwarder.MaxForwardEntries);
+
+        server.Dispose();
+
+        Assert.Null(plugin.Forwarder);
+        Assert.False(forwarder.IsRunning);
+    }
+
     private (RakPeer Peer, UdpProxyServer Plugin) LogInServer()
     {
         _coordinatorPlugin.RemoteLoginPassword = Password;
