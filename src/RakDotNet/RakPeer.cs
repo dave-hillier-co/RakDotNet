@@ -128,6 +128,7 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
         _plugins = new PluginCollection(this);
         _lowLevel = new RakPeerLowLevel(this, options.NetworkSimulator);
         _simulator.Configure(options.NetworkSimulator);
+        core.Observer = new NetworkObserverFanOut(this);
     }
 
     /// <summary>Binds every <see cref="RakPeerOptions.Bindings"/> entry, attaches the option plugins and starts the I/O cycle.</summary>

@@ -25,7 +25,10 @@ internal sealed class ReceivedMessageNumbers
     public UInt24 BaseIndex { get; private set; }
 
     /// <summary>True when <paramref name="messageNumber"/> is new and should be processed.</summary>
-    public bool TryAccept(UInt24 messageNumber)
+    public bool TryAccept(UInt24 messageNumber) => Accept(messageNumber) == MessageNumberCheck.Accepted;
+
+    /// <summary>Records <paramref name="messageNumber"/> when it is new, and says why when it is not.</summary>
+    public MessageNumberCheck Accept(UInt24 messageNumber)
     {
         // The subtraction wraps on purpose (ReliabilityLayer.cpp:946).
         var holeCount = (messageNumber - BaseIndex).Value;
@@ -37,18 +40,18 @@ internal sealed class ReceivedMessageNumbers
         }
         else if (holeCount > UInt24.Mask / 2)
         {
-            return false; // Behind the base: a duplicate.
+            return MessageNumberCheck.BehindBase; // Behind the base: a duplicate.
         }
         else if (holeCount < (uint)_holes.Count)
         {
             if (!_holes[(int)holeCount])
-                return false; // Already filled: a duplicate.
+                return MessageNumberCheck.Duplicate; // Already filled.
             _holes[(int)holeCount] = false;
         }
         else
         {
             if (holeCount > MaxHoleCount)
-                return false;
+                return MessageNumberCheck.TooFarAhead;
             while (holeCount > (uint)_holes.Count)
                 _holes.Enqueue(true);
             _holes.Enqueue(false);
@@ -59,6 +62,21 @@ internal sealed class ReceivedMessageNumbers
             _holes.Dequeue();
             BaseIndex++;
         }
-        return true;
+        return MessageNumberCheck.Accepted;
     }
+}
+
+/// <summary>What <see cref="ReceivedMessageNumbers.Accept"/> found, one value per branch of ReliabilityLayer.cpp:952-1037.</summary>
+internal enum MessageNumberCheck : byte
+{
+    Accepted,
+
+    /// <summary>holeCount &gt; typeRange / 2: behind the base index (line 959).</summary>
+    BehindBase,
+
+    /// <summary>A hole already filled (line 985).</summary>
+    Duplicate,
+
+    /// <summary>holeCount &gt; 1000000 (line 1003).</summary>
+    TooFarAhead,
 }

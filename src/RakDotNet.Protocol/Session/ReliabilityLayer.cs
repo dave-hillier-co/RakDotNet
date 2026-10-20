@@ -105,6 +105,9 @@ internal sealed class ReliabilityLayer
     private readonly List<ReceivedMessage> _released = [];
     private long _timeLastDatagramArrivedMs;
 
+    // receivePacketCount (ReliabilityLayer.cpp:1499): datagrams handled to the end, the receive frame number.
+    private uint _receivedDatagramCount;
+
     // Statistics.
     private readonly BpsTracker[] _metrics = new BpsTracker[MetricCount];
     private readonly uint[] _messagesInSendBuffer = new uint[PriorityCount];
@@ -172,6 +175,12 @@ internal sealed class ReliabilityLayer
             _splitMessages.ProgressInterval = value;
         }
     }
+
+    /// <summary>
+    /// The messageHandlerList ReliabilityLayer.cpp passes its hooks to. Null, or one that is not observing, raises
+    /// nothing and costs nothing.
+    /// </summary>
+    public ISessionObserver? Observer { get; set; }
 
     /// <summary>Split messages with some but not all of their parts received.</summary>
     public int IncompleteSplitMessages => _splitMessages.IncompleteCount;
@@ -335,28 +344,48 @@ internal sealed class ReliabilityLayer
 
         // A length of 1 or 2 is a connection request resend that is ignored (ReliabilityLayer.cpp:653).
         if (datagram.Length <= 2)
+        {
+            Notify("length <= 2 || buffer == 0", datagram.Length, isError: true);
             return true;
+        }
         _timeLastDatagramArrivedMs = nowUs / 1000;
 
         // Copy once, so delivered payloads and buffered ordered messages can slice it after the caller reuses its buffer.
         var bytes = datagram.ToArray();
         var reader = new BitStreamReader(bytes);
         if (!DatagramHeader.TryRead(ref reader, out var header))
-            return true; // Not a reliability-layer datagram (ReliabilityLayer.cpp:689-695).
+        {
+            // Not a reliability-layer datagram (ReliabilityLayer.cpp:689-695).
+            Notify("dhf.isValid==false", bytes.Length, isError: true);
+            return true;
+        }
 
         switch (header.Kind)
         {
             case DatagramKind.Ack:
-                return AckRangeList.TryRead(ref reader, out var acks) && ReceiveAcks(acks, nowUs);
+                if (!AckRangeList.TryRead(ref reader, out var acks))
+                {
+                    Notify("incomingAcks.Deserialize failed", bytes.Length, isError: true);
+                    return false; // ReliabilityLayer.cpp:729-735.
+                }
+                if (!ReceiveAcks(acks, nowUs, bytes.Length))
+                    return false;
+                break;
             case DatagramKind.Nak:
                 if (!AckRangeList.TryRead(ref reader, out var naks))
+                {
+                    Notify("incomingNAKs.Deserialize failed", bytes.Length, isError: true);
                     return false; // ReliabilityLayer.cpp:811-817.
+                }
                 ReceiveNaks(naks, nowUs);
-                return true;
+                break;
             default:
-                ReceiveData(header, bytes.AsMemory(reader.BitPosition >> 3), nowUs);
-                return true;
+                if (!ReceiveData(header, bytes.AsMemory(reader.BitPosition >> 3), nowUs, bytes.Length))
+                    return true;
+                break;
         }
+        _receivedDatagramCount++;
+        return true;
     }
 
     /// <summary>
@@ -521,10 +550,14 @@ internal sealed class ReliabilityLayer
         _timeToNextUnreliableCullUs = _unreliableTimeoutUs / 2;
     }
 
-    private void ReceiveData(DatagramHeader header, ReadOnlyMemory<byte> body, long nowUs)
+    // Returns false where the C++ returns before counting the datagram (ReliabilityLayer.cpp:861-895).
+    private bool ReceiveData(DatagramHeader header, ReadOnlyMemory<byte> body, long nowUs, int datagramLength)
     {
         if (!_window.OnGotPacket(header.DatagramNumber, nowUs, out var skippedMessageCount))
-            return;
+        {
+            Notify("congestionManager.OnGotPacket failed", datagramLength, isError: true);
+            return false;
+        }
 
         // NAK every datagram number jumped over (ReliabilityLayer.cpp:871-877).
         // Past the limit, numbers are left to the retransmission timeout.
@@ -535,18 +568,54 @@ internal sealed class ReliabilityLayer
         _acknowledgements.Insert(header.DatagramNumber);
 
         var messages = new EncapsulatedMessageReader(body);
+        if (!messages.TryReadNext(out var first))
+        {
+            // Only the first message failing is reported; a later one ends the loop (ReliabilityLayer.cpp:888-895, 1493).
+            Notify("CreateInternalPacketFromBitStream failed", datagramLength, isError: true);
+            return false;
+        }
+        ReceiveMessage(first, nowUs, datagramLength);
         while (!IsDead && messages.TryReadNext(out var message))
-            ReceiveMessage(message, nowUs);
+            ReceiveMessage(message, nowUs, datagramLength);
+        return true;
     }
 
     // The body of the parse loop, ReliabilityLayer.cpp:897-1494.
-    private void ReceiveMessage(EncapsulatedMessage message, long nowUs)
+    private void ReceiveMessage(EncapsulatedMessage message, long nowUs, int datagramLength)
     {
-        if (message.Reliability.IsReliable() && !_receivedMessageNumbers.TryAccept(message.ReliableMessageNumber))
+        var isReliable = message.Reliability.IsReliable();
+        if (Observer is { IsObserving: true } observer)
         {
-            // A duplicate, ReliabilityLayer.cpp:959-999.
-            _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
-            return;
+            // ReliabilityLayer.cpp:899-906, before any check; the creation time is the time read (line 2700).
+            observer.OnFrame(new SessionFrame(
+                isSend: false,
+                _receivedDatagramCount,
+                nowUs,
+                message.Reliability,
+                default,
+                message.OrderingChannel,
+                isReliable ? message.ReliableMessageNumber : UnassignedMessageNumber,
+                message.OrderingIndex,
+                message.SequencingIndex,
+                message.Split,
+                nowUs,
+                message.Payload.Span,
+                message.PayloadBitLength));
+        }
+
+        if (isReliable)
+        {
+            var check = _receivedMessageNumbers.Accept(message.ReliableMessageNumber);
+            if (check != MessageNumberCheck.Accepted)
+            {
+                // A duplicate, or too far ahead, ReliabilityLayer.cpp:959-1017.
+                if (check == MessageNumberCheck.BehindBase)
+                    Notify("holeCount > typeRange/(DatagramSequenceNumberType) 2", datagramLength, isError: false);
+                else if (check == MessageNumberCheck.TooFarAhead)
+                    Notify("holeCount > 1000000", datagramLength, isError: true);
+                _metrics[(int)SessionMetric.UserMessageBytesReceivedIgnored].Push(nowUs, (ulong)BitsToBytes(message.PayloadBitLength));
+                return;
+            }
         }
 
         ReceivedMessage received;
@@ -610,12 +679,16 @@ internal sealed class ReliabilityLayer
     }
 
     // The ACK branch of HandleSocketReceiveFromConnectedPlayer, ReliabilityLayer.cpp:696-806.
-    private bool ReceiveAcks(AckRangeList acks, long nowUs)
+    private bool ReceiveAcks(AckRangeList acks, long nowUs, int datagramLength)
     {
         foreach (var range in acks.Ranges)
         {
             if (range.Max == UInt24.MaxValue)
-                return false; // ReliabilityLayer.cpp:738-745; earlier ranges have been processed.
+            {
+                // ReliabilityLayer.cpp:738-745; earlier ranges have been processed.
+                Notify("incomingAcks minIndex > maxIndex or maxIndex is max value", datagramLength, isError: true);
+                return false;
+            }
 
             // The C++ visits every number in the range; only numbers this layer could know about are visited here, in
             // the same ascending order, so a hostile range costs at most the history size.
@@ -694,13 +767,17 @@ internal sealed class ReliabilityLayer
         var rttUs = nowUs > sentUs ? nowUs - sentUs : 0;
         _window.OnAck(rttUs, _bandwidthExceeded, datagramNumber);
         foreach (var messageNumber in messageNumbers)
-            RemoveFromResendList(messageNumber);
+            RemoveFromResendList(messageNumber, nowUs);
         _datagramHistory.Remove(datagramNumber);
     }
 
     // RemovePacketFromResendListAndDeleteOlderReliableSequenced, ReliabilityLayer.cpp:2437-2523.
-    private void RemoveFromResendList(UInt24 messageNumber)
+    private void RemoveFromResendList(UInt24 messageNumber, long nowUs)
     {
+        // Every number of an acknowledged datagram is reported, whether or not it is still waiting (lines 2448-2455).
+        if (Observer is { IsObserving: true } observer)
+            observer.OnAck(messageNumber, nowUs);
+
         var slot = (int)(messageNumber.Value % ResendBufferLength);
         var message = _resendBuffer[slot];
         // May be asked to remove twice, for example after a resend and a second ack.
@@ -837,6 +914,7 @@ internal sealed class ReliabilityLayer
             _window.OnResend();
             message.NextActionTimeUs = _window.GetRtoForRetransmission() + nowUs;
             pushedAnything = true;
+            ReportSentFrame(message, nowUs); // ReliabilityLayer.cpp:1942-1949.
 
             // InsertPacketIntoResendList(internalPacket, time, false, false): back at the tail.
             _resendList.AddLast(head);
@@ -894,6 +972,7 @@ internal sealed class ReliabilityLayer
             _metrics[(int)SessionMetric.UserMessageBytesSent].Push(nowUs, (ulong)BitsToBytes(message.BitLength));
             PushPacket(message);
             message.TimesSent++;
+            ReportSentFrame(message, nowUs); // ReliabilityLayer.cpp:2112-2119.
 
             if (ResendBufferOverflow())
                 break;
@@ -961,6 +1040,36 @@ internal sealed class ReliabilityLayer
     {
         _metrics[(int)SessionMetric.ActualBytesSent].Push(nowUs, (ulong)datagram.Length);
         _datagrams.Enqueue(datagram);
+    }
+
+    // OnInternalPacket for a message just pushed into the datagram being filled, which goes out as the next datagram
+    // number plus the datagrams already filled this update.
+    private void ReportSentFrame(OutgoingMessage message, long nowUs)
+    {
+        if (Observer is not { IsObserving: true } observer)
+            return;
+        var frameNumber = _window.NextDatagramNumber + (uint)_datagramBoundaries.Count;
+        observer.OnFrame(new SessionFrame(
+            isSend: true,
+            frameNumber.Value,
+            nowUs,
+            message.Reliability,
+            message.Priority,
+            message.OrderingChannel,
+            message.ReliableMessageNumber,
+            message.OrderingIndex,
+            message.SequencingIndex,
+            message.Split,
+            message.CreationTimeUs,
+            message.Data.Span,
+            message.BitLength));
+    }
+
+    // OnReliabilityLayerNotification with BYTES_TO_BITS(length).
+    private void Notify(string message, int datagramLength, bool isError)
+    {
+        if (Observer is { IsObserving: true } observer)
+            observer.OnNotification(message, datagramLength * 8, isError);
     }
 
     // ResendBufferOverflow, ReliabilityLayer.cpp:3758-3765.

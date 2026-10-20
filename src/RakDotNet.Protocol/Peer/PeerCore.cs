@@ -165,6 +165,12 @@ internal sealed class PeerCore
     public BanTable Bans => _bans;
 
     /// <summary>
+    /// Receives the reliability-layer hooks of every connection (the pluginListNTS RakPeer hands each ReliabilityLayer).
+    /// Null raises nothing.
+    /// </summary>
+    public IPeerObserver? Observer { get; set; }
+
+    /// <summary>
     /// ChangeSystemAddress (RakPeer.cpp:2846-2856, 5646-5654): the system with <paramref name="guid"/> is from now on
     /// reached at, and recognised by, <paramref name="address"/>. Nothing happens when no system has the GUID.
     /// </summary>
@@ -1250,6 +1256,7 @@ internal sealed class PeerCore
             SplitMessageProgressInterval = _splitMessageProgressInterval,
         };
         var system = new RemoteSystem(index, address, guid, session, mode, nowMs) { Mtu = mtu };
+        session.Observer = new RemoteSystemObserver(this, system);
         _slots[index] = system;
         _active.Add(system);
         SlotsVersion++;
