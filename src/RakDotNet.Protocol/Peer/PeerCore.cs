@@ -69,6 +69,7 @@ internal sealed class PeerCore
     private readonly DatagramQueue<(IPEndPoint Remote, bool DoNotFragment)> _datagrams = new();
     private readonly Queue<PeerEvent> _events = new();
     private readonly Stack<MessageReceived> _freeMessages = new();
+    private readonly Stack<SendReceiptAcked> _freeReceipts = new();
     private readonly BanTable _bans = new();
     private byte[] _offlinePingResponse = [];
     private long _defaultTimeoutMs;
@@ -322,6 +323,14 @@ internal sealed class PeerCore
         ArgumentNullException.ThrowIfNull(message);
         if (_freeMessages.Count < MaxPooledMessages)
             _freeMessages.Push(message);
+    }
+
+    /// <summary>Hands back a receipt event the caller is done with, so a later receipt can reuse it.</summary>
+    public void Recycle(SendReceiptAcked acked)
+    {
+        ArgumentNullException.ThrowIfNull(acked);
+        if (_freeReceipts.Count < MaxPooledMessages)
+            _freeReceipts.Push(acked);
     }
 
     /// <summary>
@@ -798,7 +807,10 @@ internal sealed class PeerCore
                 system.Session.Recycle(delivered);
                 break;
             case ReceiptAcknowledged acknowledged:
-                _events.Enqueue(new SendReceiptAcked(system.Address, system.Guid, acknowledged.Receipt));
+                var acked = _freeReceipts.TryPop(out var free) ? free : new SendReceiptAcked(system.Address, system.Guid, 0);
+                acked.Set(system.Address, system.Guid, acknowledged.Receipt);
+                _events.Enqueue(acked);
+                system.Session.Recycle(acknowledged);
                 break;
             case ReceiptLost lost:
                 _events.Enqueue(new SendReceiptLost(system.Address, system.Guid, lost.Receipt));

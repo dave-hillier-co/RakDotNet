@@ -39,6 +39,8 @@ public sealed class HotPathAllocationTests : IDisposable
     private RakPeer? _server;
     private RakPeer? _client;
     private RakConnection? _toServer;
+    private Reliability _reliability = Reliability.ReliableOrdered;
+    private int _receipts;
 
     public HotPathAllocationTests() => _message[0] = (byte)MessageId.UserPacketEnum;
 
@@ -53,6 +55,21 @@ public sealed class HotPathAllocationTests : IDisposable
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         AssertWithinBudget(allocated, MeasuredMessages, "RakPeer in Manual mode (Send, Update on both peers, Events.TryRead)");
+    }
+
+    [Fact]
+    public void Manual_mode_send_with_an_ack_receipt_and_its_receipt_event_allocate_nothing_in_steady_state()
+    {
+        _reliability = Reliability.ReliableOrderedWithAckReceipt;
+        Start(PeerThreading.Manual);
+        Transfer(WarmUpMessages);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Transfer(MeasuredMessages);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.InRange(_receipts, WarmUpMessages, WarmUpMessages + MeasuredMessages);
+        AssertWithinBudget(allocated, MeasuredMessages, "RakPeer in Manual mode with ID_SND_RECEIPT_ACKED (Send, Update on both peers, Events.TryRead)");
     }
 
     [Fact]
@@ -120,7 +137,7 @@ public sealed class HotPathAllocationTests : IDisposable
     {
         for (var i = 0; i < count; i++)
         {
-            Assert.True(_toServer!.Send(_message, Reliability.ReliableOrdered).IsQueued);
+            Assert.True(_toServer!.Send(_message, _reliability).IsQueued);
             var deadline = Stopwatch.GetTimestamp() + (long)(MessageTimeout.TotalSeconds * Stopwatch.Frequency);
             var received = false;
             var spinner = default(SpinWait);
@@ -132,8 +149,10 @@ public sealed class HotPathAllocationTests : IDisposable
                 Cycle();
                 while (_server!.Events.TryRead(out var e))
                     received |= e.Kind == PeerEventKind.Message;
-                while (_client!.Events.TryRead(out _))
+                while (_client!.Events.TryRead(out var e))
                 {
+                    if (e.Kind == PeerEventKind.ReceiptAcked)
+                        _receipts++;
                 }
                 spinner.SpinOnce(sleep1Threshold: -1);
             }

@@ -8,7 +8,7 @@ internal abstract record SessionEvent;
 
 /// <summary>A message arrived and its ordering and sequencing allow it through.</summary>
 /// <remarks>
-/// The session reuses its instances: one handed back through <see cref="ReliabilityLayer.Recycle"/> may be delivered
+/// The session reuses its instances: one handed back through <see cref="ReliabilityLayer.Recycle(MessageDelivered)"/> may be delivered
 /// again with another payload, so a consumer that recycles an event must be done with it and its payload. One that is
 /// never recycled keeps its payload.
 /// </remarks>
@@ -58,7 +58,13 @@ internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLen
 /// The remote system acknowledged a message sent with an ack-receipt reliability: ID_SND_RECEIPT_ACKED
 /// (ReliabilityLayer.cpp:757-762, 2486-2496).
 /// </summary>
-internal sealed record ReceiptAcknowledged(uint Receipt) : SessionEvent;
+/// <remarks>Reused like <see cref="MessageDelivered"/> once handed back through <see cref="ReliabilityLayer.Recycle(ReceiptAcknowledged)"/>.</remarks>
+internal sealed record ReceiptAcknowledged(uint Receipt) : SessionEvent
+{
+    public uint Receipt { get; private set; } = Receipt;
+
+    internal void Set(uint receipt) => Receipt = receipt;
+}
 
 /// <summary>
 /// An UNRELIABLE_WITH_ACK_RECEIPT message was not acknowledged within the retransmission timeout:

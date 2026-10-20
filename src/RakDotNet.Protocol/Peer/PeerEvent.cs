@@ -104,7 +104,7 @@ internal sealed record IncomingConnectionCompleted(IPEndPoint Remote, ulong Guid
 
 /// <summary>An application message arrived (RakPeer.cpp:6226-6237).</summary>
 /// <remarks>
-/// The core reuses its instances: one handed back through <see cref="PeerCore.Recycle"/> may be delivered again for
+/// The core reuses its instances: one handed back through <see cref="PeerCore.Recycle(MessageReceived)"/> may be delivered again for
 /// another message, so a consumer that recycles an event must be done with it and its data. One that is never
 /// recycled keeps its data.
 /// </remarks>
@@ -147,9 +147,19 @@ internal sealed record MessageReceived(IPEndPoint Remote, ulong Guid, ReadOnlyMe
 /// ID_SND_RECEIPT_ACKED: a message sent with an ack-receipt reliability was acknowledged. The serial follows the ID in
 /// host byte order, little-endian on every supported platform (memcpy at ReliabilityLayer.cpp:2494).
 /// </summary>
+/// <remarks>Reused like <see cref="MessageReceived"/> once handed back through <see cref="PeerCore.Recycle(SendReceiptAcked)"/>.</remarks>
 internal sealed record SendReceiptAcked(IPEndPoint Remote, ulong Guid, uint Receipt) : PeerEvent(Remote, Guid)
 {
+    public uint Receipt { get; private set; } = Receipt;
+
     public override ReadOnlyMemory<byte> Packet => ReceiptPacket(MessageId.SndReceiptAcked, Receipt);
+
+    internal void Set(IPEndPoint remote, ulong guid, uint receipt)
+    {
+        Remote = remote;
+        Guid = guid;
+        Receipt = receipt;
+    }
 
     internal static byte[] ReceiptPacket(MessageId id, uint receipt)
     {

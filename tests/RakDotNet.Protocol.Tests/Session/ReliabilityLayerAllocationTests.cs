@@ -31,9 +31,15 @@ public class ReliabilityLayerAllocationTests
         _message[0] = (byte)MessageId.UserPacketEnum;
     }
 
-    [Fact]
-    public void Sending_and_receiving_a_non_split_message_allocates_nothing_in_steady_state()
+    private Reliability _reliability = Reliability.ReliableOrdered;
+    private int _receipts;
+
+    [Theory]
+    [InlineData(Reliability.ReliableOrdered)]
+    [InlineData(Reliability.ReliableOrderedWithAckReceipt)]
+    public void Sending_and_receiving_a_non_split_message_allocates_nothing_in_steady_state(Reliability reliability)
     {
+        _reliability = reliability;
         for (var i = 0; i < WarmUpMessages; i++)
             Step();
 
@@ -43,6 +49,7 @@ public class ReliabilityLayerAllocationTests
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.Equal(WarmUpMessages + MeasuredMessages, _delivered);
+        Assert.Equal(reliability.HasAckReceipt() ? _delivered : 0, _receipts);
         Assert.True(
             allocated / MeasuredMessages <= BudgetBytesPerMessage,
             $"ReliabilityLayer Send, Update, Receive and the ACK path allocated {allocated} B for {MeasuredMessages} messages "
@@ -54,7 +61,7 @@ public class ReliabilityLayerAllocationTests
     private void Step()
     {
         _nowUs += StepUs;
-        _sender.Send(_message, Reliability.ReliableOrdered, Priority.High, channel: 0, receipt: 0, _nowUs);
+        _sender.Send(_message, _reliability, Priority.High, channel: 0, receipt: 1, _nowUs);
         _sender.Update(_nowUs);
         while (_sender.TryDequeueDatagram(_datagram, out var length))
             _receiver.Receive(_datagram.AsSpan(0, length), _nowUs);
@@ -69,8 +76,13 @@ public class ReliabilityLayerAllocationTests
         }
         while (_receiver.TryDequeueDatagram(_datagram, out var length))
             _sender.Receive(_datagram.AsSpan(0, length), _nowUs);
-        while (_sender.TryDequeueEvent(out _))
+        while (_sender.TryDequeueEvent(out var e))
         {
+            if (e is ReceiptAcknowledged acknowledged)
+            {
+                _receipts++;
+                _sender.Recycle(acknowledged);
+            }
         }
     }
 }

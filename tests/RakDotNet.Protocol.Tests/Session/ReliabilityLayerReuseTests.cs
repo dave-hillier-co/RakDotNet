@@ -98,6 +98,24 @@ public class ReliabilityLayerReuseTests
     }
 
     [Fact]
+    public void A_recycled_receipt_event_is_reused_for_the_next_receipt_and_one_kept_keeps_its_receipt()
+    {
+        var receipts = SendOneDatagramEachWithReceipts(3);
+        _sender.Receive(Ack(new AckRange(new UInt24(0), new UInt24(0))), _nowUs);
+        Assert.True(_sender.TryDequeueEvent(out var first));
+        _sender.Recycle(Assert.IsType<ReceiptAcknowledged>(first));
+        _sender.Receive(Ack(new AckRange(new UInt24(1), new UInt24(1))), _nowUs);
+        Assert.True(_sender.TryDequeueEvent(out var second));
+        _sender.Receive(Ack(new AckRange(new UInt24(2), new UInt24(2))), _nowUs);
+        Assert.True(_sender.TryDequeueEvent(out var third));
+
+        Assert.Same(first, second);
+        Assert.Equal(receipts[1], Assert.IsType<ReceiptAcknowledged>(second).Receipt);
+        Assert.NotSame(second, third);
+        Assert.Equal(receipts[2], Assert.IsType<ReceiptAcknowledged>(third).Receipt);
+    }
+
+    [Fact]
     public void Datagrams_copied_into_a_caller_buffer_are_the_datagrams_returned_as_arrays()
     {
         var other = new ReliabilityLayer(Mtu, Start);

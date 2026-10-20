@@ -83,6 +83,22 @@ public class PeerCoreReuseTests
     }
 
     [Fact]
+    public void A_recycled_receipt_event_is_reused_for_the_next_receipt_and_one_kept_keeps_its_receipt()
+    {
+        Connect();
+        var first = SendWithReceipt();
+        _client.Recycle(first);
+        var second = SendWithReceipt();
+        var third = SendWithReceipt();
+
+        Assert.Same(first, second);
+        Assert.NotSame(second, third);
+        Assert.Equal(second.Receipt + 1, third.Receipt);
+        Assert.Equal(ServerAddress, second.Remote);
+        Assert.Equal(ServerGuid, second.Guid);
+    }
+
+    [Fact]
     public void Connection_events_keep_their_packets_while_the_messages_after_them_reuse_the_deliveries()
     {
         Connect();
@@ -134,6 +150,16 @@ public class PeerCoreReuseTests
         _client.Send(ServerGuid, message, Reliability.ReliableOrdered, Priority.High, 0, _link.NowUs);
         _link.RunUntil(() => _link.EventsOf(_server).Skip(count).OfType<MessageReceived>().Any(), TimeSpan.FromSeconds(1));
         return _link.EventsOf(_server).Skip(count).OfType<MessageReceived>().Single();
+    }
+
+    private SendReceiptAcked SendWithReceipt()
+    {
+        var count = _link.EventsOf(_client).Count;
+        var receipt = _client.Send(ServerGuid, [(byte)MessageId.UserPacketEnum], Reliability.ReliableOrderedWithAckReceipt, Priority.High, 0, _link.NowUs);
+        _link.RunUntil(() => _link.EventsOf(_client).Skip(count).OfType<SendReceiptAcked>().Any(), TimeSpan.FromSeconds(1));
+        var acked = _link.EventsOf(_client).Skip(count).OfType<SendReceiptAcked>().Single();
+        Assert.Equal(receipt, acked.Receipt);
+        return acked;
     }
 
     private void Connect()

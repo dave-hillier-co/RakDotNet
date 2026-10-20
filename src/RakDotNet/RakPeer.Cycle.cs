@@ -600,6 +600,7 @@ public sealed partial class RakPeer
                     break;
                 case SendReceiptAcked acked:
                     OnReceipt(acked.Receipt, acked: true);
+                    _core.Recycle(acked);
                     break;
                 case SendReceiptLost lost:
                     OnReceipt(lost.Receipt, acked: false);

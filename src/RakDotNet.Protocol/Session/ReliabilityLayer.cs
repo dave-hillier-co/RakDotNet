@@ -114,6 +114,7 @@ internal sealed class ReliabilityLayer
     private readonly List<AckRange> _receivedRanges = [];
     private readonly List<UInt24> _knownDatagramNumbers = [];
     private readonly Stack<MessageDelivered> _freeDeliveries = new();
+    private readonly Stack<ReceiptAcknowledged> _freeReceipts = new();
     private byte[] _receiveBuffer = [];
     private long _timeLastDatagramArrivedMs;
 
@@ -469,6 +470,14 @@ internal sealed class ReliabilityLayer
             _freeDeliveries.Push(delivered);
     }
 
+    /// <summary>Hands back a receipt event the caller is done with, so a later receipt can reuse it.</summary>
+    public void Recycle(ReceiptAcknowledged acknowledged)
+    {
+        ArgumentNullException.ThrowIfNull(acknowledged);
+        if (_freeReceipts.Count < MaxPooled)
+            _freeReceipts.Push(acknowledged);
+    }
+
     public bool TryDequeueEvent([NotNullWhen(true)] out SessionEvent? sessionEvent) => _events.TryDequeue(out sessionEvent);
 
     /// <summary>
@@ -661,6 +670,14 @@ internal sealed class ReliabilityLayer
         }
     }
 
+    private ReceiptAcknowledged Acknowledged(uint receipt)
+    {
+        if (!_freeReceipts.TryPop(out var acknowledged))
+            return new ReceiptAcknowledged(receipt);
+        acknowledged.Set(receipt);
+        return acknowledged;
+    }
+
     // A delivery event for the payload, reused when one was recycled. A payload in the receive buffer is copied; one the
     // session made for itself (reassembled, or held for ordering) is not written to again and is passed on as it is.
     private MessageDelivered Deliver(ReadOnlyMemory<byte> payload, int bitLength)
@@ -763,7 +780,7 @@ internal sealed class ReliabilityLayer
         {
             if (_unreliableReceipts[k].DatagramNumber == datagramNumber)
             {
-                _events.Enqueue(new ReceiptAcknowledged(_unreliableReceipts[k].Receipt));
+                _events.Enqueue(Acknowledged(_unreliableReceipts[k].Receipt));
                 _unreliableReceipts.RemoveAt(k);
             }
             else
@@ -797,7 +814,7 @@ internal sealed class ReliabilityLayer
 
         // Only the last part of a split message reports its receipt (ReliabilityLayer.cpp:2486-2488).
         if (message.Reliability >= Reliability.ReliableWithAckReceipt && (message.Split is not { } split || split.Index + 1 == split.Count))
-            _events.Enqueue(new ReceiptAcknowledged(message.Receipt));
+            _events.Enqueue(Acknowledged(message.Receipt));
 
         // RemoveFromList(internalPacket, isReliable), ReliabilityLayer.cpp:3559-3579.
         _resendList.Remove(message.ResendNode);

@@ -50,7 +50,9 @@ RakDotNet loopback round=1 messages=100000 bytes=400 reliability=RELIABLE_ORDERE
 | `--rounds` | 3 | Rounds on the same connection; the first includes warm-up |
 | `--threading` | `background` | RakDotNet only: `background` or `manual` (the calling thread runs both I/O cycles) |
 
-Compare like with like: run both on an idle machine, use the later rounds, and compare small messages (`--bytes 400`) and split messages (`--bytes 16000 --messages 2000`) separately. Unreliable modes may drop messages under load, and a round then never ends, so throughput comparisons use the reliable modes.
+Compare like with like: run both on an idle machine, use the later rounds (the first ones include JIT tiering on the C# side; `--rounds 10` gives split messages time to settle), and compare small messages (`--bytes 400`) and split messages (`--bytes 16000 --messages 500`) separately. Unreliable modes may drop messages under load, and a round then never ends, so throughput comparisons use the reliable modes.
+
+A native split-message round can also never end. A burst much larger than the socket receive buffer loses datagrams, the resent parts arrive out of order, and RakNet joins a split message's parts in arrival order ([plan.md](plan.md), wire format notes), so the reassembled message is corrupt and its message ID is not the one counted. Keep split bursts small enough to fit, around 500 messages of 16000 bytes, and stop a native run that stalls.
 
 ## Allocation budget
 
@@ -58,8 +60,8 @@ Compare like with like: run both on an idle machine, use the later rounds, and c
 
 | Test | Path measured | Counter |
 |---|---|---|
-| `ReliabilityLayerAllocationTests` (`RakDotNet.Protocol.Tests`) | Two `ReliabilityLayer`s: send, update, receive, deliver and the ACK path | `GC.GetAllocatedBytesForCurrentThread` |
-| `HotPathAllocationTests`, Manual mode (`RakDotNet.Tests`) | Two `RakPeer`s over loopback UDP, both cycles run on the test thread | `GC.GetAllocatedBytesForCurrentThread` |
+| `ReliabilityLayerAllocationTests` (`RakDotNet.Protocol.Tests`) | Two `ReliabilityLayer`s: send, update, receive, deliver and the ACK path, with and without an ack receipt | `GC.GetAllocatedBytesForCurrentThread` |
+| `HotPathAllocationTests`, Manual mode (`RakDotNet.Tests`) | Two `RakPeer`s over loopback UDP, both cycles run on the test thread, with and without `ID_SND_RECEIPT_ACKED` | `GC.GetAllocatedBytesForCurrentThread` |
 | `HotPathAllocationTests`, Background mode (`RakDotNet.Tests`) | Two `RakPeer`s over loopback UDP, each on its own loop thread | `GC.GetTotalAllocatedBytes(precise: true)`, in a collection that runs alone |
 
 Each test charges everything allocated during the measured messages to those messages, idle cycles included, and divides by the message count. The Background test warms up and measures over ten times as many messages as the others: on the real clock the number of messages awaiting an ACK at once depends on thread scheduling, and the pools below grow to the largest number seen. To find where a path allocates, run the matching benchmark: the `Allocated` column splits the cost by layer and by send or receive side.
@@ -70,8 +72,8 @@ Each test charges everything allocated during the measured messages to those mes
 |---|---|
 | `ReliabilityLayer.Send` | A pool of `OutgoingMessage`s (RakNet's `internalPacketPool`), each keeping its payload buffer and its resend and unreliable list nodes. A message returns to the pool when it is acknowledged, or once sent if unreliable. A split message's parts share one new copy of the message. |
 | Framing (`WriteDatagram`, ACKs, NAKs) | Datagrams are written in place into a `DatagramQueue`, one buffer reused whenever the queue empties. `EncapsulatedMessage` and `AckRangeList` have allocation-free static writers and readers for the session's use. The datagram history keeps its message-number lists for reuse. |
-| `ReliabilityLayer.Receive` | The datagram body is copied into a buffer reused per datagram and read without making `EncapsulatedMessage`s; the ACK and NAK ranges go into a reused list. Ordering and split reassembly copy what they hold. A delivered message is copied into a `MessageDelivered` that the consumer hands back with `Recycle`. |
-| `PeerCore` | Datagrams for the transport go into its own `DatagramQueue` and are taken without a copy (`TryDequeueDatagram(out IPEndPoint, out ReadOnlySpan<byte>, out bool)`). Message events are `MessageReceived`s that the consumer hands back with `Recycle`; the core recycles the session's deliveries itself and copies the payloads of the connection events it keeps. Connected pings and pongs are encoded on the stack. |
+| `ReliabilityLayer.Receive` | The datagram body is copied into a buffer reused per datagram and read without making `EncapsulatedMessage`s; the ACK and NAK ranges go into a reused list. Ordering and split reassembly copy what they hold. A delivered message is copied into a `MessageDelivered` that the consumer hands back with `Recycle`; a reassembled split message is passed on without a copy. Receipts are `ReceiptAcknowledged`s handed back the same way. |
+| `PeerCore` | Datagrams for the transport go into its own `DatagramQueue` and are taken without a copy (`TryDequeueDatagram(out IPEndPoint, out ReadOnlySpan<byte>, out bool)`). Message and receipt events are `MessageReceived`s and `SendReceiptAcked`s that the consumer hands back with `Recycle`; the core recycles the session's events itself and copies the payloads of the connection events it keeps. Connected pings and pongs are encoded on the stack. |
 | Statistics | `BpsTracker` adds pushes within 10 ms of each other to one entry, so its small preallocated buffer holds a second at any message rate. |
 
 A consumer that never recycles keeps what it was given: an event that is not handed back is simply not reused. The tests in `RakDotNet.Protocol.Tests` read the layers this way, with the allocating `TryDequeueDatagram(out ...)` overloads that return arrays.
