@@ -62,6 +62,9 @@ public class TelnetTransport : IConsoleTransport, IDisposable
         set => _sendSuffix = value;
     }
 
+    /// <summary>The interface the transport created on <see cref="Start"/>, as RakNet keeps it protected; null when stopped.</summary>
+    protected TcpInterface? TcpInterface => _tcp;
+
     /// <summary>GetCommandParser: none.</summary>
     public virtual CommandParser? CommandParser => null;
 

@@ -12,7 +12,7 @@ public sealed class TelnetTransportTests : IDisposable
 {
     private static readonly byte[] WillEcho = [255, 251, 1];
 
-    private readonly Plugins.TelnetTransport _telnet = new();
+    private readonly ObservedTelnet _telnet = new();
     private readonly Plugins.TcpInterface _client = new();
     private SystemAddress _server;
 
@@ -73,11 +73,11 @@ public sealed class TelnetTransportTests : IDisposable
         ConnectAndDrain();
 
         Type("\u001b[B");
-        Poll.Never(() => _telnet.Receive() is not null, "a line from a cursor key", 150);
+        ServerReturnsNoLine();
         _client.Send([255, 253, 1], _server, broadcast: false);
-        Poll.Never(() => _telnet.Receive() is not null, "a line from IAC DO ECHO", 150);
+        ServerReturnsNoLine();
         Type("\tx\n");
-        Poll.Never(() => _telnet.Receive() is not null, "a line starting with tab", 150);
+        ServerReturnsNoLine();
 
         Type("ok\n");
         Assert.Equal("ok", Encoding.ASCII.GetString(ReceiveLine().Data.Span));
@@ -110,7 +110,9 @@ public sealed class TelnetTransportTests : IDisposable
         _server = _client.Connect("127.0.0.1", (ushort)_telnet.ListenEndPoint!.Port, block: true);
         Type("early\n");
 
-        Poll.Never(() => _telnet.Receive() is not null, "a line before the connection was reported");
+        Poll.True(() => _telnet.HasPacket, "the early packet at the server");
+        Assert.Null(_telnet.Receive());
+        Assert.False(_telnet.HasPacket);
         Poll.Address(_telnet.HasNewIncomingConnection, "the new connection");
 
         Assert.Equal(WillEcho, Poll.Bytes(_client, _server, 3));
@@ -184,10 +186,20 @@ public sealed class TelnetTransportTests : IDisposable
 
     private void Type(string text) => _client.Send(Encoding.ASCII.GetBytes(text), _server, broadcast: false);
 
-    // The server handles input only when polled.
-    private void ServerReturnsNoLine() => Poll.Never(() => _telnet.Receive() is not null, "a line", 100);
+    // The server handles a packet when polled; waiting for it to arrive first keeps packets apart.
+    private void ServerReturnsNoLine()
+    {
+        Poll.True(() => _telnet.HasPacket, "the packet at the server");
+        Assert.Null(_telnet.Receive());
+    }
 
     private TransportPacket ReceiveLine() => Poll.Until(_telnet.Receive, "a line");
+
+    /// <summary>Shows whether the transport's interface holds a packet not yet taken by Receive.</summary>
+    private sealed class ObservedTelnet : Plugins.TelnetTransport
+    {
+        public bool HasPacket => TcpInterface?.ReceiveHasPackets() ?? false;
+    }
 
     private static string Text(byte[] bytes) => Encoding.ASCII.GetString(bytes);
 }
