@@ -131,7 +131,30 @@ This page maps every unit of RakNet 4.081 `Source/` (a `.h`/`.cpp` pair, a lone 
 
 | C++ unit (files) | C# location | Milestone | Note |
 |---|---|---|---|
-| `SecureHandshake` (`SecureHandshake.cpp`, `SecureHandshake.h`) | [`ConnectSecurity.cs`](../src/RakDotNet/Security/ConnectSecurity.cs), [`ServerSecurity.cs`](../src/RakDotNet/Security/ServerSecurity.cs), [`RakKeyPair.cs`](../src/RakDotNet/Security/RakKeyPair.cs), [`RakPublicKey.cs`](../src/RakDotNet/Security/RakPublicKey.cs) | M7 | `LIBCAT_SECURITY` handshake over the `DependentExtensions/cat` primitives, ported bit-exact; entropy, threads and aligned allocation are `RandomNumberGenerator`, `Lock` and the GC. |
+| `SecureHandshake` (`SecureHandshake.cpp`, `SecureHandshake.h`) | [`ConnectSecurity.cs`](../src/RakDotNet/Security/ConnectSecurity.cs), [`ServerSecurity.cs`](../src/RakDotNet/Security/ServerSecurity.cs), [`RakKeyPair.cs`](../src/RakDotNet/Security/RakKeyPair.cs), [`RakPublicKey.cs`](../src/RakDotNet/Security/RakPublicKey.cs), [`Security/`](../src/RakDotNet.Protocol/Security/) | M7 | `LIBCAT_SECURITY` handshake over the `DependentExtensions/cat` primitives, ported bit-exact; entropy, threads and aligned allocation are `RandomNumberGenerator`, `Lock` and the GC. `SecureHandshake.cpp` is the unit that compiles cat; the cat sources it includes are mapped below. |
+
+### DependentExtensions/cat
+
+`SecureHandshake.cpp` compiles these parts of `reference/RakNet/DependentExtensions/cat`, which C# comments cite relative to that folder. They live in `RakDotNet.Protocol.Security`, internal, and are checked against known answers from [`tools/cat-vectors`](../tools/cat-vectors/) ([golden-vectors.md](golden-vectors.md)). Units RakNet compiles but never calls (`Passwords`, `MurmurHash2`, `Strings`, `BigMontgomery`) have no counterpart.
+
+| C++ unit (files) | C# location | Milestone | Note |
+|---|---|---|---|
+| `EasyHandshake` (`crypt/tunnel/EasyHandshake.hpp`, `.cpp`) | [`EasyHandshake.cs`](../src/RakDotNet.Protocol/Security/EasyHandshake.cs) | M7 | `EasyHandshake`, `ServerEasyHandshake` and `ClientEasyHandshake` over the 256-bit curve; each object owns its curve registers and takes an `ISecureRandom` in place of its `FortunaOutput`. |
+| `KeyAgreement` (`crypt/tunnel/KeyAgreement.hpp`, `.cpp`) | [`KeyAgreementCommon.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementCommon.cs) | M7 | Curve constants and key generation; only the 256-bit curve is instantiated. |
+| `KeyMaker` (`crypt/tunnel/KeyMaker.hpp`, `.cpp`) | [`KeyAgreementCommon.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementCommon.cs) | M7 | Long-term key pair generation. |
+| `KeyAgreementResponder` (`crypt/tunnel/KeyAgreementResponder.hpp`, `.cpp`) | [`KeyAgreementResponder.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementResponder.cs) | M7 | Server side: challenge answer, ephemeral rekey after 100 challenges, initiator identity verification. `Sign` is not called by RakNet. |
+| `KeyAgreementInitiator` (`crypt/tunnel/KeyAgreementInitiator.hpp`, `.cpp`) | [`KeyAgreementInitiator.cs`](../src/RakDotNet.Protocol/Security/KeyAgreementInitiator.cs) | M7 | Client side: challenge, answer check and identity proof. `Verify` is not called by RakNet. |
+| `AuthenticatedEncryption` (`crypt/tunnel/AuthenticatedEncryption.hpp`, `.cpp`) | [`AuthenticatedEncryption.cs`](../src/RakDotNet.Protocol/Security/AuthenticatedEncryption.cs) | M7 | Key derivation, proofs, allocation-free datagram encrypt and decrypt with the 1024-IV replay window. A whole-word window shift gives 0 for the bits shifted in, as the native build does. |
+| `CookieJar` (`crypt/cookie/CookieJar.hpp`, `.cpp`) | [`CookieJar.cs`](../src/RakDotNet.Protocol/Security/CookieJar.cs) | M7 | Salsa6 address cookies; the millisecond clock is a parameter. |
+| `Skein` (`crypt/hash/Skein.hpp`, `Skein.cpp`, `Skein256.cpp`, `Skein512.cpp`) | [`Skein.cs`](../src/RakDotNet.Protocol/Security/Skein.cs) | M7 | Skein-256 in key, MAC and KDF modes with cat's per-crunch tweak counting. The 512-bit state and PRNG mode serve only Fortuna. |
+| `HMAC_MD5` (`crypt/hash/HMAC_MD5.hpp`, `.cpp`) | [`HmacMd5.cs`](../src/RakDotNet.Protocol/Security/HmacMd5.cs) | M7 | cat's little-endian HMAC-MD5 with its own initial state and padding; a stack value type. |
+| `ChaCha` (`crypt/symmetric/ChaCha.hpp`, `privatekey/ChaCha.cpp`) | [`ChaCha.cs`](../src/RakDotNet.Protocol/Security/ChaCha.cs) | M7 | 12-round ChaCha with cat's key schedule; stack value types. |
+| `SecureCompare` (`crypt/SecureCompare.hpp`, `.cpp`) | `System.Security.Cryptography.CryptographicOperations.FixedTimeEquals` | M7 | Constant-time equality of equal-length buffers. |
+| `Fortuna` (`crypt/rand/Fortuna.hpp`, `.cpp`, `Entropy*.cpp`), `IRandom` (`rand/IRandom.hpp`) | `System.Security.Cryptography.RandomNumberGenerator`; [`ISecureRandom.cs`](../src/RakDotNet.Protocol/Security/ISecureRandom.cs) | M7 | The CSPRNG's output is never on the wire. |
+| `BigRTL` (`math/BigRTL.hpp`, `src/math/BigRTL.cpp`, `src/math/rtl/`) | [`BigRtl.cs`](../src/RakDotNet.Protocol/Security/BigRtl.cs) | M7 | Register file of 64-bit legs; add, subtract, multiply and `MulMod` division as cat computes them. |
+| `BigPseudoMersenne` (`math/BigPseudoMersenne.hpp`, `src/math/BigPseudoMersenne.cpp`, `src/math/mersenne/`) | [`BigPseudoMersenne.cs`](../src/RakDotNet.Protocol/Security/BigPseudoMersenne.cs) | M7 | Arithmetic modulo 2^256 - 435 with cat's partial reductions. `MrSquareRoot` serves only `PtGenerate`, which RakNet does not call. |
+| `BigTwistedEdwards` (`math/BigTwistedEdwards.hpp`, `src/math/BigTwistedEdwards.cpp`, `src/math/edward/`) | [`BigTwistedEdwards.cs`](../src/RakDotNet.Protocol/Security/BigTwistedEdwards.cs) | M7 | Extended twisted Edwards point arithmetic, validation and w-MOF single and simultaneous scalar multiplication. |
+| `Platform`, `EndianNeutral`, `AlignedAlloc`, `BitMath`, `Legs`, `Clock`, `Mutex`, `Thread`, `WaitableFlag`, `Atomic`, `Singleton` | `System.Buffers.Binary.BinaryPrimitives`, `System.UInt128`, `System.Numerics.BitOperations`, the GC; [`AuthenticatedEncryption.cs`](../src/RakDotNet.Protocol/Security/AuthenticatedEncryption.cs) | M7 | Portability and threading support; `ReconstructCounter` from `BitMath.hpp` is `AuthenticatedEncryption.ReconstructCounter`. |
 
 ## Plugins
 

@@ -30,7 +30,7 @@ Each layer depends only on the layers below it.
 
 Projects:
 
-- `RakDotNet.Protocol`: layers 0 to 2, no dependencies. Layer 0 (Wire) is public. Layers 1 and 2 are namespaces with `internal` visibility; layer 2 stays internal so the public API is the only surface ([api-design.md](api-design.md), decision 11.2).
+- `RakDotNet.Protocol`: layers 0 to 2, no dependencies. Layer 0 (Wire) is public. Layers 1 and 2 are namespaces with `internal` visibility; layer 2 stays internal so the public API is the only surface ([api-design.md](api-design.md), decision 11.2). The internal `Security` namespace beneath them is the port of cat (milestone 7).
 - `RakDotNet`: layer 3, the public API, with `RakDotNet.Security` for key and connect-security types. Designed in [api-design.md](api-design.md).
 - `RakDotNet.Connections`: layer 4, `ConnectionDemultiplexer`.
 - `RakDotNet.Testing`: layer 4, `InMemoryNetwork` for sociable multi-peer tests.
