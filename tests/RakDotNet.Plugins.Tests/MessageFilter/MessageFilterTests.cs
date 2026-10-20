@@ -247,6 +247,25 @@ public sealed class MessageFilterTests : IDisposable
         Assert.Equal(1, _filter.FilterSetCount);
     }
 
+    [Fact]
+    public void Its_update_on_every_read_allocates_nothing_while_no_system_outstays_its_set()
+    {
+        _filter.AutoAddNewConnectionsToFilter = 0;
+        _filter.SetFilterMaxTime(TimeSpan.FromHours(1), banOnExceed: false, TimeSpan.Zero, 0);
+        _mesh.Connect(_client, _server);
+        _mesh.Run(TimeSpan.FromSeconds(3));
+        _server.Events.TryRead(out _);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++)
+        {
+            _mesh.Time.Advance(TimeSpan.FromMilliseconds(30));
+            _server.Events.TryRead(out _);
+        }
+
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+    }
+
     private static byte[] Rpc4Call(string function)
     {
         var writer = new BitStreamWriter(new byte[64]);

@@ -230,7 +230,8 @@ public sealed class MessageFilter : IRakPlugin
     {
         if (_host is not { } host)
             return;
-        var expired = new List<(FilteredSystem System, FilterSet FilterSet)>();
+        // Runs on every read, so nothing is allocated unless a system has outstayed its filter set.
+        List<(FilteredSystem System, FilterSet FilterSet)>? expired = null;
         lock (_gate)
         {
             var now = host.GetTime();
@@ -240,13 +241,18 @@ public sealed class MessageFilter : IRakPlugin
             {
                 var filterSet = membership.FilterSet;
                 if (filterSet.MaxMemberTimeMs > 0 && now - membership.TimeEnteredMs >= filterSet.MaxMemberTimeMs)
-                    expired.Add((membership.System, filterSet));
+                    (expired ??= []).Add((membership.System, filterSet));
             }
-            foreach (var (system, _) in expired)
-                _systems.Remove(SystemKey.From(system));
+            if (expired is not null)
+            {
+                foreach (var (system, _) in expired)
+                    _systems.Remove(SystemKey.From(system));
+            }
             _whenLastTimeoutCheck = now + TimeoutCheckIntervalMs;
         }
 
+        if (expired is null)
+            return;
         foreach (var (system, filterSet) in expired)
         {
             filterSet.TimeoutCallback?.Invoke(system, filterSet.Id);
