@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ReplicaManager3Commands.h"
+
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
@@ -24,7 +26,8 @@ namespace RakNet
 namespace interop
 {
     // The object replication and RPC commands of docs/interop-protocol.md: RandSync, NetworkIDManager and
-    // NetworkIDObject, GridSectorizer, VariableDeltaSerializer and RPC4. Errors are thrown as PluginCommandError.
+    // NetworkIDObject, GridSectorizer, VariableDeltaSerializer, RPC4, and ReplicaManager3 through
+    // ReplicaManager3Commands. Errors are thrown as PluginCommandError.
     // Every method is called with the peer's lock held, the lock Receive() runs under.
     class ReplicationCommands
     {
@@ -84,5 +87,6 @@ namespace interop
         RakNet::RPC4* rpc4_ = nullptr;
         std::vector<Handler> handlers_;
         std::vector<Invocation> invocations_;
+        ReplicaManager3Commands replicaManager3_;
     };
 }

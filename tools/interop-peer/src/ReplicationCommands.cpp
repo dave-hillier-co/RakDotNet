@@ -197,7 +197,7 @@ namespace interop
         int handle_;
     };
 
-    ReplicationCommands::ReplicationCommands(RakNet::RakPeerInterface* peer) : peer_(peer)
+    ReplicationCommands::ReplicationCommands(RakNet::RakPeerInterface* peer) : peer_(peer), replicaManager3_(peer)
     {
         g_commands = this;
     }
@@ -218,7 +218,8 @@ namespace interop
             || DispatchNetworkId(cmd, command, result)
             || DispatchGrid(cmd, command, result)
             || DispatchDelta(cmd, command, result)
-            || DispatchRpc4(cmd, command, result);
+            || DispatchRpc4(cmd, command, result)
+            || replicaManager3_.Dispatch(cmd, command, result);
     }
 
     bool ReplicationCommands::DispatchRandSync(const std::string& cmd, const json& command, ordered_json& result)

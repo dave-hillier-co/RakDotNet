@@ -75,6 +75,7 @@ add_library(interop_logic STATIC
   src/Names.cpp
   src/PacketEvent.cpp
   src/PluginCommands.cpp
+  src/ReplicaManager3Commands.cpp
   src/ReplicationCommands.cpp
   src/SecurityCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)

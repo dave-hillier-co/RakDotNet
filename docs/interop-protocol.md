@@ -160,6 +160,28 @@ A `deltaSerialize` group has `mode` (`UNRELIABLE_ACKED`, `UNIQUE` or `IDENTICAL`
 
 Each RPC4 registration is a function of its own, numbered by `handler` in registration order, which records the packet's GUID, its address (empty when unassigned) and `wasGeneratedLocally`, and the unread bits of the parameter stream; the stream's read position is left as it was.
 
+### ReplicaManager3 commands
+
+The ReplicaManager3 commands live in `tools/interop-peer/src/ReplicaManager3Commands.cpp`. They drive a ReplicaManager3
+with the replicas of `Samples/ReplicaManager3` (`ClientCreatible_ClientSerialized`, `ServerCreated_ClientSerialized`,
+`ClientCreatible_ServerSerialized`, `ServerCreated_ServerSerialized`, `P2PReplica`, each with the sample's four int
+variables and VariableDeltaSerializer) and the `User` of `Samples/ReplicatedLogin`. The topology replaces the samples'
+global: a sample replica is on a server unless the topology is `CLIENT`, and a User only when it is `SERVER`. Every
+command but `rm3Attach` fails with `ok:false` until the plugin is attached. NetworkIDs and GUIDs are decimal strings.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `rm3Attach` | `topology` (`SERVER`; `CLIENT`, `SERVER` or `P2P`), `autoSerializeMs` (30; negative is never), `groupDownloads` (true) | | `AttachPlugin` of the sample's ReplicaManager3 with a NetworkIDManager of its own, `SetNetworkIDManager`, `SetAutoSerializeInterval`; its connections return `groupDownloads` from `QueryGroupDownloadMessages`. A second plugin passes ID_SND_RECEIPT_ACKED and ID_SND_RECEIPT_LOSS to the replicas this system created, as the sample's loop does. Again is a no-op |
+| `rm3Create` | `kinds` (array of class names), `username` (""), `userGuid` (for a User) | `networkIds` | `Reference` of a new replica of each kind, all in this one call, as the sample's 'C' does |
+| `rm3Set` | `networkId`, and any of `var1` to `var4` (sample replicas), `score` and `username` (a User) | | sets the variables, as the sample's 'R' does with random values |
+| `rm3DestroyMine` | | `destroyed` | the sample's 'D': `GetReplicasCreatedByMe`, `BroadcastDestructionList`, then deletes each |
+| `rm3Destroy` | `networkId` | | ReplicatedLogin's `DeleteUserWithGuid`: `BroadcastDestruction`, `Dereference`, then deletes it |
+| `rm3Info` | | `replicas` (below), `connections`, an array of `{guid,validated,downloadComplete,constructed}` (`constructed` the NetworkIDs of `GetConstructedReplicas`), `destructions`, an array of `{networkId,kind,text,deletingGuid}` that `DeserializeDestruction` read (`text` empty for a User), `allDownloadsCompleted` | `GetReferencedReplicaList`, `GetConnectionAtIndex`, `GetAllConnectionDownloadsCompleted` |
+
+Each of `replicas`, in `GetReferencedReplicaList` order, has `networkId`, `creatingGuid` and `kind`; a sample replica
+adds `var1` to `var4` and `constructionText`, the string its `DeserializeConstruction` read (empty for a replica created
+here); a User adds `score`, `username` and `userGuid`.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

@@ -108,6 +108,7 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
 | RPC4 | Slots by priority, local and interrupted signals, a blocking call returning data, calls and the remote error, the messages as a system without RPC4 receives them, CallLoopback and local callbacks |
 | RandSync, ReplicaManager3 (`VariableDeltaSerializer`), NetworkIDObject | Construction and updates keeping two generators in step, skipped and replayed numbers; acknowledged, lost and unchanged variable updates; IDs from an authority found on the other system; GridSectorizer cells agreeing on both |
+| ReplicaManager3, ReplicatedLogin | Client and server creating the sample objects and replicating them by each class's construction and serialization rules, with grouped downloads, variable changes through VariableDeltaSerializer, destruction and the departure of a system; peers doing the same with P2PReplica; logged-in users replicated to every client and destroyed when their client leaves |
 
 ## Milestones
 
