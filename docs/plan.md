@@ -35,6 +35,7 @@ Projects:
 - `RakDotNet.Connections`: layer 4, `ConnectionDemultiplexer`.
 - `RakDotNet.Testing`: layer 4, `InMemoryNetwork` for sociable multi-peer tests.
 - `RakDotNet.Compatibility`: layer 4, the `RakPeerInterface`-shaped facade. Nothing else depends on it.
+- `RakDotNet.Plugins`: layer 4, RakNet's plugins and utilities on the public API, one folder per plugin.
 - A test project per library, plus `RakDotNet.Interop.Tests`.
 - `samples/`: console projects showing the public API in use.
 - `tools/interop-peer`: native C++ test peer.
@@ -102,6 +103,9 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | `MaximumConnectTest`, `ManyClientsOneServer*`, `PeerConnectDisconnect*` | Connection limits, `ID_NO_FREE_INCOMING_CONNECTIONS`, connect/cancel churn |
 | `SystemAddressAndGuidTest`, `PacketAndLowLevelTestsTest` | Address and GUID handling, low-level packet cases |
 | `SecurityFunctionsTest`, Encryption | Secure handshake, identity keys, security exceptions, encrypted delivery |
+| MessageFilter | Filter sets on the server: allowed IDs, a change of set, kick and ban on a disallowed message, time limits, timestamped and RPC4 messages |
+| ReadyEvent | Two and three systems waiting on each other: set, unset, forced completion, status by query, a disconnect leaving the wait list |
+| TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
 
 ## Milestones
 

@@ -24,6 +24,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\RakDotNet\RakDotNet.csproj" />
     <ProjectReference Include="..\RakDotNet.Interop.FakePeer\RakDotNet.Interop.FakePeer.csproj" />
+    <ProjectReference Include="..\..\src\RakDotNet.Plugins\RakDotNet.Plugins.csproj" />
   </ItemGroup>
 
 </Project>

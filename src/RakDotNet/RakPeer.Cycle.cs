@@ -923,7 +923,7 @@ public sealed partial class RakPeer
     }
 
     /// <summary>The kind and typed fields of an entry, from its first byte (docs/api-design.md section 4).</summary>
-    private static void Classify(EventSegment segment)
+    internal static void Classify(EventSegment segment)
     {
         var data = segment.Data;
         segment.Kind = PeerEventKind.Message;

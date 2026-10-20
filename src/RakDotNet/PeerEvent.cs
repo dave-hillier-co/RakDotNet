@@ -69,8 +69,9 @@ public readonly ref struct PeerEvent
     public ulong ReceivedTime => Segment.ReceivedTime;
 
     /// <summary>
-    /// Packet::wasGeneratedLocally: set only on the ID_CONNECTION_LOST of a silent local close (RakPeer.cpp:1676).
-    /// Loopback and injected packets leave it clear, as AllocPacket does (RakPeer.cpp:165, 183).
+    /// Packet::wasGeneratedLocally: set on the ID_CONNECTION_LOST of a silent local close (RakPeer.cpp:1676) and on
+    /// packets injected with <c>generatedLocally</c>, as plugins push them back (TwoWayAuthentication.cpp:272).
+    /// Loopback and other injected packets leave it clear, as AllocPacket does (RakPeer.cpp:165, 183).
     /// </summary>
     public bool IsLocal => Segment.IsLocal;
 
@@ -168,6 +169,35 @@ public readonly ref struct PeerEvent
             throw new InvalidOperationException("The event is already detached.");
         segment.Pool.MarkOwned(segment);
         return new OwnedPeerEvent(segment, _generation);
+    }
+
+    /// <summary>
+    /// Packet::data[0] = <paramref name="id"/>: the rewrite a plugin makes to a message it passes on, which later plugins
+    /// and the reader then see (TwoWayAuthentication.cpp:375, Router2.cpp:1260). Writes <see cref="Data"/>[0] whatever it
+    /// holds, as RakNet does.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The event is not a <see cref="PeerEventKind.Message"/>, or <paramref name="id"/> would make it another kind.
+    /// </exception>
+    public void RewriteId(MessageId id)
+    {
+        var segment = Segment;
+        if (segment.Kind != PeerEventKind.Message || segment.Length == 0)
+            throw new InvalidOperationException("Only a non-empty Message event can have its ID rewritten.");
+        var data = segment.WritableData;
+        var previous = data[0];
+        data[0] = (byte)id;
+        RakPeer.Classify(segment);
+        if (segment.Kind == PeerEventKind.Message)
+            return;
+        data[0] = previous;
+        segment.Kind = PeerEventKind.Message;
+        segment.IsIncoming = false;
+        segment.DisconnectReason = default;
+        segment.Receipt = default;
+        segment.ConnectFailure = default;
+        segment.RemoteProtocolVersion = 0;
+        throw new InvalidOperationException($"Rewriting the ID to {id} would change the kind of the event.");
     }
 
     /// <summary>An unpooled copy of <see cref="Data"/>.</summary>

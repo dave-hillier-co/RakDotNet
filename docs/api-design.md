@@ -38,6 +38,7 @@ The API exposes the whole of RakNet's `RakPeerInterface` and `PluginInterface2` 
 | `RakDotNet.Testing` | `RakDotNet.Testing` | `InMemoryNetwork`, a datagram transport fake for sociable multi-peer tests | `src/RakDotNet.Testing/` |
 | `RakDotNet.Connections` | `RakDotNet.Connections` | Layer 4: `ConnectionDemultiplexer`, a queue per connection | `src/RakDotNet.Connections/` |
 | `RakDotNet.Compatibility` | `RakDotNet.Compatibility` | Layer 4: the `RakPeerInterface`-shaped facade (decision 11.1) | `src/RakDotNet.Compatibility/` |
+| `RakDotNet.Plugins` | `RakDotNet.Plugins` | Layer 4: RakNet's plugins and utilities on the public API, one folder per plugin | `src/RakDotNet.Plugins/` |
 
 Wire types are reused everywhere and never redeclared, as [conventions.md](conventions.md) requires. Layer 2 has internal types named `PeerEvent` and `ConnectionState`; code in a `RakDotNet.*` namespace that uses them qualifies them as `Protocol.Peer.PeerEvent`, because the public types of the same name in `RakDotNet` take precedence over a `using` there.
 
@@ -212,14 +213,15 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `OnFailedConnectionAttempt(packet, FCAR_*)` | `OnConnectFailed(PeerEvent, ConnectFailure)` |
 | `UsesReliabilityLayer` | the plugin also implements `INetworkObserver` |
 | `OnDirectSocketSend` / `OnDirectSocketReceive` | `INetworkObserver.OnDatagramSent` / `OnDatagramReceived` |
-| `OnReliabilityLayerNotification` | `INetworkObserver.OnReliabilityNotification` |
-| `OnInternalPacket` | `INetworkObserver.OnFrame(in FrameInfo)` |
-| `OnAck` | `INetworkObserver.OnAck` |
+| `OnReliabilityLayerNotification` | `INetworkObserver.OnReliabilityNotification`, with RakNet's message text, for the notifications RakNet raises without `LOG_TRIVIAL_NOTIFICATIONS` |
+| `OnInternalPacket` | `INetworkObserver.OnFrame(in FrameInfo)`, on send, resend and receive, where ReliabilityLayer.cpp calls it |
+| `OnAck` | `INetworkObserver.OnAck`, for each message number of an acknowledged datagram |
 | `OnPushBackPacket` | `IRakPlugin.OnInjected` |
 | `GetRakPeerInterface` / `SetRakPeerInterface` / `SetTCPInterface` | the `IPluginHost` passed to `OnAttached`; `host.Peer` |
 | `GetMyGUIDUnified` | `host.RakNetGuid` |
 | `SendUnified` / `SendListUnified` | `host.Send` / `host.Broadcast` with any `OutgoingMessage` |
-| `AllocatePacketUnified` / `PushBackPacketUnified` / `DeallocPacketUnified` | `host.Inject` / `OwnedPeerEvent.Dispose` |
+| `AllocatePacketUnified` / `PushBackPacketUnified` / `DeallocPacketUnified` | `host.Inject` / `OwnedPeerEvent.Dispose`; `generatedLocally: true` for a packet whose `wasGeneratedLocally` the plugin sets |
+| `packet->data[0] = id` in `OnReceive`, passing the packet on | `e.RewriteId(id)`, for a `Message` event that stays one |
 
 ### 10.2 `IPeerDriver` on the public API
 

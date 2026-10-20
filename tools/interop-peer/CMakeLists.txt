@@ -67,7 +67,8 @@ endfunction()
 add_library(interop_logic STATIC
   src/Hex.cpp
   src/Names.cpp
-  src/PacketEvent.cpp)
+  src/PacketEvent.cpp
+  src/PluginCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)
 target_link_libraries(interop_logic PUBLIC raknet_static nlohmann_json::nlohmann_json)
 interop_peer_settings(interop_logic)

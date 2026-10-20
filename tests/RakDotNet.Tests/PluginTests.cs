@@ -159,6 +159,95 @@ public class PluginTests
     }
 
     [Fact]
+    public void A_plugin_can_inject_a_packet_generated_locally()
+    {
+        // TwoWayAuthentication.cpp:265-273 and FullyConnectedMesh2.cpp:447 set wasGeneratedLocally before PushBackPacket.
+        var log = new List<string>();
+        using var peers = new ManualPeers();
+        var seenLocal = new List<bool>();
+        var injector = new RecordingPlugin("a", log)
+        {
+            OnUpdateAction = host => host.Inject([0x90], SystemAddress.Unassigned, new RakNetGuid(5), atHead: true, generatedLocally: true),
+            Consume = e =>
+            {
+                seenLocal.Add(e.IsLocal);
+                return false;
+            },
+        };
+        peers.Client.Plugins.Attach(injector);
+
+        Assert.True(peers.Client.Events.TryRead(out var e));
+
+        Assert.Equal([0x90], e.ToArray());
+        Assert.True(e.IsLocal);
+        Assert.Equal([true], seenLocal);
+    }
+
+    [Fact]
+    public void A_plugin_that_rewrites_the_id_passes_the_rewritten_packet_on()
+    {
+        // TwoWayAuthentication.cpp:375 rewrites packet->data[0] and returns RR_CONTINUE_PROCESSING.
+        var log = new List<string>();
+        using var peers = new ManualPeers();
+        var seenByLater = new List<byte>();
+        peers.Client.Plugins.Attach(new RecordingPlugin("a", log)
+        {
+            Consume = e =>
+            {
+                e.RewriteId((MessageId)0x87);
+                return false;
+            },
+        });
+        peers.Client.Plugins.Attach(new RecordingPlugin("b", log)
+        {
+            Consume = e =>
+            {
+                seenByLater.Add(e.Data[0]);
+                return false;
+            },
+        });
+
+        peers.Client.SendLoopback([0x86, 1]);
+        peers.Client.Update();
+        Assert.True(peers.Client.Events.TryRead(out var e));
+
+        Assert.Equal([0x87, 1], e.ToArray());
+        Assert.Equal(MessageId.UserPacketEnum + 1, e.Id);
+        Assert.Equal(PeerEventKind.Message, e.Kind);
+        Assert.Equal([0x87], seenByLater);
+    }
+
+    [Fact]
+    public void Rewriting_the_id_into_another_kind_of_event_is_refused()
+    {
+        using var peers = new ManualPeers();
+        Exception? thrown = null;
+        peers.Client.Plugins.Attach(new RecordingPlugin("a", [])
+        {
+            Consume = e =>
+            {
+                try
+                {
+                    e.RewriteId(MessageId.ConnectionLost);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    thrown = ex;
+                }
+                return false;
+            },
+        });
+
+        peers.Client.SendLoopback([0x86, 1]);
+        peers.Client.Update();
+        Assert.True(peers.Client.Events.TryRead(out var e));
+
+        Assert.IsType<InvalidOperationException>(thrown);
+        Assert.Equal([0x86, 1], e.ToArray());
+        Assert.Equal(PeerEventKind.Message, e.Kind);
+    }
+
+    [Fact]
     public void Reading_from_inside_a_hook_is_refused()
     {
         using var peers = new ManualPeers();
