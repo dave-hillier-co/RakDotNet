@@ -21,18 +21,19 @@ internal enum SessionMetric
 /// </summary>
 /// <remarks>
 /// Unlike the C++, which keeps one entry per push, pushes less than <see cref="BucketUs"/> after the newest entry are
-/// added to it, and leave the sum with it: at most 1 ms early, well inside the 100 ms the clearing interval already
-/// allows. A second then holds at most about a thousand entries whatever the message rate, in a buffer allocated once.
+/// added to it, and leave the sum with it: at most 10 ms early, well inside the 100 ms the clearing interval already
+/// allows. A second then holds at most about a hundred entries whatever the message rate, in a small buffer allocated
+/// once.
 /// </remarks>
 internal sealed class BpsTracker
 {
     /// <summary>The span of push times one entry covers.</summary>
-    public const long BucketUs = 1_000;
+    public const long BucketUs = 10_000;
 
     private const long WindowUs = 1_000_000;
 
-    // A second of entries, plus the clearing interval and some slack, so the queue never grows in use.
-    private const int InitialCapacity = 2 * (int)(WindowUs / BucketUs);
+    // A second of entries plus the clearing interval, so the queue does not grow while the layer is updated.
+    private const int InitialCapacity = 128;
 
     private readonly RingQueue<(long TimeUs, ulong Value)> _entries = new(InitialCapacity);
 

@@ -20,16 +20,16 @@ public class BpsTrackerTests
     }
 
     [Fact]
-    public void Pushes_within_a_millisecond_are_kept_as_one_entry_that_expires_with_the_first()
+    public void Pushes_within_a_bucket_are_kept_as_one_entry_that_expires_with_the_first()
     {
         var tracker = new BpsTracker();
         tracker.Push(1_000_000, 1);
-        tracker.Push(1_000_999, 2);
-        tracker.Push(1_001_000, 4);
+        tracker.Push(1_000_000 + BpsTracker.BucketUs - 1, 2);
+        tracker.Push(1_000_000 + BpsTracker.BucketUs, 4);
 
         tracker.ClearExpired(2_000_001);
         Assert.Equal(4UL, tracker.LastSecond);
-        tracker.ClearExpired(2_001_001);
+        tracker.ClearExpired(2_000_001 + BpsTracker.BucketUs);
         Assert.Equal(0UL, tracker.LastSecond);
     }
 

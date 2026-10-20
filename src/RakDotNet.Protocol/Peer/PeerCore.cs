@@ -793,7 +793,7 @@ internal sealed class PeerCore
         switch (sessionEvent)
         {
             case MessageDelivered delivered:
-                ProcessMessage(system, delivered.Payload, delivered.BitLength, nowUs);
+                ProcessMessage(system, delivered.Payload, delivered.BitLength, delivered.OwnsPayload, nowUs);
                 // Nothing keeps the payload: whatever ProcessMessage queued has its own copy.
                 system.Session.Recycle(delivered);
                 break;
@@ -812,7 +812,8 @@ internal sealed class PeerCore
     }
 
     // The Receive loop of RunUpdateCycle, RakPeer.cpp:5939-6248.
-    private void ProcessMessage(RemoteSystem system, ReadOnlyMemory<byte> payload, int bitLength, long nowUs)
+    // payloadIsShared: the payload is in the delivery's own buffer, which the session reuses once the delivery is recycled.
+    private void ProcessMessage(RemoteSystem system, ReadOnlyMemory<byte> payload, int bitLength, bool payloadIsShared, long nowUs)
     {
         var data = payload.Span;
         var id = (MessageId)data[0];
@@ -903,7 +904,11 @@ internal sealed class PeerCore
                 if (data[0] >= (byte)MessageId.Timestamp || id is MessageId.SndReceiptAcked or MessageId.SndReceiptLoss)
                 {
                     var message = _freeMessages.TryPop(out var free) ? free : new MessageReceived(system.Address, system.Guid, default);
-                    message.CopyFrom(system.Address, system.Guid, data, bitLength);
+                    // A reassembled split message is passed on as it is: it can be large, and nothing writes to it again.
+                    if (payloadIsShared)
+                        message.CopyFrom(system.Address, system.Guid, data, bitLength);
+                    else
+                        message.Reference(system.Address, system.Guid, payload, bitLength);
                     _events.Enqueue(message);
                 }
                 break;

@@ -6,9 +6,10 @@ using RakDotNet.Protocol.Wire;
 namespace RakDotNet.Transport;
 
 /// <summary>
-/// One bound UDP socket. Receives without blocking with <c>Socket.ReceiveFrom(Span, SocketFlags, SocketAddress)</c>,
-/// and in Background mode keeps one outstanding <c>ReceiveFromAsync</c> into a slot as the wake signal, armed only when
-/// the socket has been drained.
+/// One bound UDP socket. In Manual mode it receives without blocking with
+/// <c>Socket.ReceiveFrom(Span, SocketFlags, SocketAddress)</c> while <c>Available</c> says a datagram waits. In
+/// Background mode every receive is a <c>ReceiveFromAsync</c> into a slot: one that completes at once is a waiting
+/// datagram, taken straight away, and the first that does not stays outstanding as the wake signal.
 /// </summary>
 /// <remarks>
 /// While the asynchronous receive is outstanding no synchronous receive is made, because the runtime serialises
@@ -150,6 +151,8 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         // The receive may have completed between the first take and reading _armed; its datagram comes first.
         if (TryTakeSlot(buffer, out length, out remote))
             return true;
+        if (_signal is not null)
+            return TryReceiveThroughSlot(buffer, out length, out remote);
 
         while (true)
         {
@@ -320,14 +323,32 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         return true;
     }
 
+    // Background mode: every receive goes through the slot. One that completes at once is a datagram that was waiting,
+    // taken straight away without a signal, since the loop is already reading; the first that cannot complete stays
+    // outstanding as the signal. One system call per datagram, where checking Available first would take two.
+    private bool TryReceiveThroughSlot(Span<byte> buffer, out int length, out SystemAddress remote)
+    {
+        while (Arm(signalIfCompletedNow: false))
+        {
+            if (TryTakeSlot(buffer, out length, out remote))
+                return true;
+            if (_fatal is { } fatal)
+                throw fatal;
+            if (_disposed)
+                break;
+            // The receive failed for that datagram alone, such as an ICMP port unreachable; try the next.
+        }
+        return TryTakeSlot(buffer, out length, out remote);
+    }
+
     /// <summary>
     /// Issues the outstanding receive. Never while the slot holds an unread datagram: the next receive would write into
-    /// the same slot.
+    /// the same slot. Returns true when the receive completed at once, its outcome already in the slot.
     /// </summary>
-    internal void Arm()
+    internal bool Arm(bool signalIfCompletedNow = true)
     {
         if (_signal is null || _disposed || _slotReady || Interlocked.CompareExchange(ref _armed, 1, 0) != 0)
-            return;
+            return false;
         try
         {
 #pragma warning disable CA2012 // The awaiter is consumed exactly once, by OnSlotReceived.
@@ -336,15 +357,20 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         }
         catch (ObjectDisposedException)
         {
-            return;
+            return false;
         }
-        if (_pending.IsCompleted)
-            OnSlotReceived();
-        else
+        if (!_pending.IsCompleted)
+        {
             _pending.UnsafeOnCompleted(_onSlotReceived);
+            return false;
+        }
+        Complete(signalIfCompletedNow);
+        return true;
     }
 
-    private void OnSlotReceived()
+    private void OnSlotReceived() => Complete(signal: true);
+
+    private void Complete(bool signal)
     {
         try
         {
@@ -372,7 +398,8 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         {
             _pending = default;
             Volatile.Write(ref _armed, 0);
-            _signal?.Invoke();
+            if (signal)
+                _signal?.Invoke();
         }
     }
 }

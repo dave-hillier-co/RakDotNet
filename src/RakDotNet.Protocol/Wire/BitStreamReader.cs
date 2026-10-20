@@ -94,8 +94,7 @@ public ref struct BitStreamReader
         if (BitsRemaining < bitCount)
             return false;
         var wholeBytes = bitCount >> 3;
-        for (var i = 0; i < wholeBytes; i++)
-            TryReadBits(8, out destination[i]);
+        ReadWholeBytes(destination[..wholeBytes]);
         var remainder = bitCount & 7;
         if (remainder == 0)
             return true;
@@ -170,6 +169,36 @@ public ref struct BitStreamReader
         return true;
     }
 
+    // At a byte boundary with enough left, the next byteCount bytes, consumed. False, consuming nothing, otherwise.
+    private bool TryTakeAligned(int byteCount, out ReadOnlySpan<byte> bytes)
+    {
+        if ((_bitPosition & 7) != 0 || BitsRemaining < byteCount * 8)
+        {
+            bytes = default;
+            return false;
+        }
+        bytes = _buffer.Slice(_bitPosition >> 3, byteCount);
+        _bitPosition += byteCount * 8;
+        return true;
+    }
+
+    // Reads destination.Length whole bytes, which the caller has checked are there: each is the next eight bits, so off a
+    // byte boundary it joins the low bits of one stream byte to the high bits of the next (TryReadBits(8, ...)).
+    private void ReadWholeBytes(scoped Span<byte> destination)
+    {
+        var index = _bitPosition >> 3;
+        var shift = _bitPosition & 7;
+        _bitPosition += destination.Length * 8;
+        if (shift == 0)
+        {
+            _buffer.Slice(index, destination.Length).CopyTo(destination);
+            return;
+        }
+        var buffer = _buffer;
+        for (var i = 0; i < destination.Length; i++, index++)
+            destination[i] = (byte)((buffer[index] << shift) | (buffer[index + 1] >> (8 - shift)));
+    }
+
     /// <summary>Skips to the next byte boundary. Matches BitStream::AlignReadToByteBoundary.</summary>
     public void AlignToByte() => _bitPosition = Math.Min(AlignedPosition(), _bitLength);
 
@@ -179,6 +208,11 @@ public ref struct BitStreamReader
 
     public bool TryReadUInt16(out ushort value)
     {
+        if (TryTakeAligned(sizeof(ushort), out var aligned))
+        {
+            value = BinaryPrimitives.ReadUInt16BigEndian(aligned);
+            return true;
+        }
         Span<byte> bytes = stackalloc byte[sizeof(ushort)];
         var ok = TryReadBytes(bytes);
         value = ok ? BinaryPrimitives.ReadUInt16BigEndian(bytes) : default;
@@ -194,6 +228,11 @@ public ref struct BitStreamReader
 
     public bool TryReadUInt32(out uint value)
     {
+        if (TryTakeAligned(sizeof(uint), out var aligned))
+        {
+            value = BinaryPrimitives.ReadUInt32BigEndian(aligned);
+            return true;
+        }
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         var ok = TryReadBytes(bytes);
         value = ok ? BinaryPrimitives.ReadUInt32BigEndian(bytes) : default;
@@ -209,6 +248,11 @@ public ref struct BitStreamReader
 
     public bool TryReadUInt64(out ulong value)
     {
+        if (TryTakeAligned(sizeof(ulong), out var aligned))
+        {
+            value = BinaryPrimitives.ReadUInt64BigEndian(aligned);
+            return true;
+        }
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         var ok = TryReadBytes(bytes);
         value = ok ? BinaryPrimitives.ReadUInt64BigEndian(bytes) : default;

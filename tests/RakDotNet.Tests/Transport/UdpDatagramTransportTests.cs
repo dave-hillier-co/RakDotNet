@@ -41,6 +41,34 @@ public sealed class UdpDatagramTransportTests : IDisposable
     }
 
     [Fact]
+    public void Datagrams_already_waiting_are_read_one_after_another_without_signalling_and_the_next_one_signals()
+    {
+        var buffer = new byte[2048];
+        Assert.False(_transport.TryReceive(buffer, out _, out _));
+        Send(1);
+        Assert.True(_ready.Wait(Timeout, TestContext.Current.CancellationToken), "The armed receive did not complete.");
+        Send(2);
+        Send(3);
+        // Loopback delivers at once; the pause only lets both reach the socket before the reads start.
+        Thread.Sleep(TimeSpan.FromMilliseconds(50));
+
+        var read = new List<byte>();
+        while (_transport.TryReceive(buffer, out var length, out _))
+        {
+            Assert.Equal(1, length);
+            read.Add(buffer[0]);
+        }
+
+        Assert.Equal([1, 2, 3], read);
+        Assert.Equal(0, _ready.CurrentCount);
+        // Drained, so the receive is armed again and the next datagram is the signal.
+        Send(4);
+        Assert.True(_ready.Wait(Timeout, TestContext.Current.CancellationToken), "The next datagram did not signal.");
+        Assert.True(_transport.TryReceive(buffer, out _, out _));
+        Assert.Equal(4, buffer[0]);
+    }
+
+    [Fact]
     public void Binding_sends_four_zero_bytes_to_its_own_address_as_a_test()
     {
         // RNS2_Berkley::BindShared (RakNetSocket2.cpp:317-326) sends 4 zero bytes to its bound address and fails the

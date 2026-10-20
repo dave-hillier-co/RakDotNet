@@ -22,6 +22,13 @@ internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLen
 
     public int BitLength { get; private set; } = BitLength;
 
+    /// <summary>
+    /// True when <see cref="Payload"/> is in this event's own buffer, which a later delivery reuses once the event is
+    /// recycled. False when it is memory nothing writes to again, such as a reassembled split message, which a consumer
+    /// may keep after recycling the event.
+    /// </summary>
+    public bool OwnsPayload { get; private set; }
+
     /// <summary>Delivers <paramref name="payload"/>, copied into this event's own buffer.</summary>
     internal void CopyFrom(ReadOnlySpan<byte> payload, int bitLength)
     {
@@ -30,6 +37,7 @@ internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLen
         payload.CopyTo(_buffer);
         Payload = _buffer.AsMemory(0, payload.Length);
         BitLength = bitLength;
+        OwnsPayload = true;
     }
 
     /// <summary>Delivers <paramref name="payload"/> as it is, for memory nothing else will write to.</summary>
@@ -37,6 +45,7 @@ internal sealed record MessageDelivered(ReadOnlyMemory<byte> Payload, int BitLen
     {
         Payload = payload;
         BitLength = bitLength;
+        OwnsPayload = false;
     }
 
     public bool Equals(MessageDelivered? other) =>

@@ -128,9 +128,17 @@ internal sealed record MessageReceived(IPEndPoint Remote, ulong Guid, ReadOnlyMe
         if (_buffer.Length < data.Length)
             _buffer = new byte[Math.Max(data.Length, 64)];
         data.CopyTo(_buffer);
+        Set(remote, guid, _buffer.AsMemory(0, data.Length), bitLength);
+    }
+
+    /// <summary>Makes this the event for another message held in memory nothing writes to again, without a copy.</summary>
+    internal void Reference(IPEndPoint remote, ulong guid, ReadOnlyMemory<byte> data, int bitLength) => Set(remote, guid, data, bitLength);
+
+    private void Set(IPEndPoint remote, ulong guid, ReadOnlyMemory<byte> data, int bitLength)
+    {
         Remote = remote;
         Guid = guid;
-        Data = _buffer.AsMemory(0, data.Length);
+        Data = data;
         BitLength = bitLength;
     }
 }

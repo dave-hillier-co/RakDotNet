@@ -66,6 +66,23 @@ public class PeerCoreReuseTests
     }
 
     [Fact]
+    public void A_split_message_kept_after_its_event_is_recycled_is_not_written_over_by_the_next_message()
+    {
+        Connect();
+        var large = Enumerable.Range(0, 3_000).Select(i => (byte)i).ToArray();
+        large[0] = (byte)MessageId.UserPacketEnum;
+        var split = SendToServer(large);
+        var kept = split.Data;
+        _server.Recycle(split);
+
+        var next = SendToServer([(byte)MessageId.UserPacketEnum, 7, 7, 7]);
+
+        Assert.Same(split, next);
+        Assert.Equal([(byte)MessageId.UserPacketEnum, 7, 7, 7], next.Packet.ToArray());
+        Assert.Equal(large, kept.ToArray());
+    }
+
+    [Fact]
     public void Connection_events_keep_their_packets_while_the_messages_after_them_reuse_the_deliveries()
     {
         Connect();

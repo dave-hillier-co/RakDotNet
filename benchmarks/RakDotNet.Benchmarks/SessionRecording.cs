@@ -78,13 +78,17 @@ internal sealed class SessionRecording
         sender.Update(nowUs);
     }
 
+    /// <summary>Takes the layer's events, recycling each delivery as PeerCore does, and counts the deliveries.</summary>
     public static int CountDelivered(ReliabilityLayer layer)
     {
         var delivered = 0;
         while (layer.TryDequeueEvent(out var e))
         {
-            if (e is MessageDelivered)
+            if (e is MessageDelivered message)
+            {
                 delivered++;
+                layer.Recycle(message);
+            }
         }
         return delivered;
     }

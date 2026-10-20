@@ -162,15 +162,22 @@ public ref struct BitStreamWriter
     /// <summary>Writes bytes at the current bit position without aligning first.</summary>
     public void WriteBytes(scoped ReadOnlySpan<byte> source)
     {
-        if ((_bitPosition & 7) == 0)
+        EnsureCapacity(source.Length * 8);
+        var index = _bitPosition >> 3;
+        var shift = _bitPosition & 7;
+        _bitPosition += source.Length * 8;
+        if (shift == 0)
         {
-            EnsureCapacity(source.Length * 8);
-            source.CopyTo(_buffer[(_bitPosition >> 3)..]);
-            _bitPosition += source.Length * 8;
+            source.CopyTo(_buffer[index..]);
             return;
         }
+        // Each byte straddles two: its high bits fill the partial byte, its low bits start the next (WriteBits(b, 8)).
+        var buffer = _buffer;
         foreach (var b in source)
-            WriteBits(b, 8);
+        {
+            buffer[index] |= (byte)(b >> shift);
+            buffer[++index] = (byte)(b << (8 - shift));
+        }
     }
 
     /// <summary>Aligns to the next byte boundary, then writes bytes. Matches BitStream::WriteAlignedBytes.</summary>
@@ -196,6 +203,11 @@ public ref struct BitStreamWriter
 
     public void WriteUInt16(ushort value)
     {
+        if (TryTakeAligned(sizeof(ushort), out var aligned))
+        {
+            BinaryPrimitives.WriteUInt16BigEndian(aligned, value);
+            return;
+        }
         Span<byte> bytes = stackalloc byte[sizeof(ushort)];
         BinaryPrimitives.WriteUInt16BigEndian(bytes, value);
         WriteBytes(bytes);
@@ -205,6 +217,11 @@ public ref struct BitStreamWriter
 
     public void WriteUInt32(uint value)
     {
+        if (TryTakeAligned(sizeof(uint), out var aligned))
+        {
+            BinaryPrimitives.WriteUInt32BigEndian(aligned, value);
+            return;
+        }
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32BigEndian(bytes, value);
         WriteBytes(bytes);
@@ -214,6 +231,11 @@ public ref struct BitStreamWriter
 
     public void WriteUInt64(ulong value)
     {
+        if (TryTakeAligned(sizeof(ulong), out var aligned))
+        {
+            BinaryPrimitives.WriteUInt64BigEndian(aligned, value);
+            return;
+        }
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64BigEndian(bytes, value);
         WriteBytes(bytes);
@@ -229,11 +251,10 @@ public ref struct BitStreamWriter
     public void WriteUInt24(UInt24 value)
     {
         AlignToByte();
-        Span<byte> bytes = stackalloc byte[3];
+        TryTakeAligned(3, out var bytes);
         bytes[0] = (byte)value.Value;
         bytes[1] = (byte)(value.Value >> 8);
         bytes[2] = (byte)(value.Value >> 16);
-        WriteBytes(bytes);
     }
 
     /// <summary>Writes the GUID's u64 big-endian. Matches BitStream::Write(RakNetGUID) (BitStream.h:1187-1190).</summary>
@@ -275,6 +296,20 @@ public ref struct BitStreamWriter
         foreach (var b in bytes)
             WriteByte((byte)~b);
         WriteUInt16(address.Port);
+    }
+
+    // At a byte boundary, the next byteCount bytes, taken as written. False, taking nothing, off a boundary.
+    private bool TryTakeAligned(int byteCount, out Span<byte> bytes)
+    {
+        if ((_bitPosition & 7) != 0)
+        {
+            bytes = default;
+            return false;
+        }
+        EnsureCapacity(byteCount * 8);
+        bytes = _buffer.Slice(_bitPosition >> 3, byteCount);
+        _bitPosition += byteCount * 8;
+        return true;
     }
 
     private readonly void EnsureCapacity(int bits)

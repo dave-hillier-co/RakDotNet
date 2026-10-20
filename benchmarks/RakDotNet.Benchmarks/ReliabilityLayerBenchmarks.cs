@@ -19,6 +19,9 @@ namespace RakDotNet.Benchmarks;
 /// When the recording runs out the replayed layer is replaced by a new one, once every
 /// <see cref="RecordingSteps"/> operations; that construction is amortised into the measurement.
 /// </para>
+/// <para>
+/// Datagrams and deliveries are taken as PeerCore takes them: copied into a reused buffer, and recycled once read.
+/// </para>
 /// </remarks>
 [MemoryDiagnoser]
 public class ReliabilityLayerBenchmarks
@@ -31,6 +34,7 @@ public class ReliabilityLayerBenchmarks
     private ReliabilityLayer _receiver = null!;
     private int _sendStep;
     private int _receiveStep;
+    private readonly byte[] _datagram = new byte[SessionRecording.Mtu];
 
     [Params(1, 16)]
     public int MessagesPerStep { get; set; }
@@ -72,7 +76,7 @@ public class ReliabilityLayerBenchmarks
     {
         var nowUs = SessionRecording.TimeOf(step);
         _recording.SendStep(sender, nowUs);
-        while (sender.TryDequeueDatagram(out _))
+        while (sender.TryDequeueDatagram(_datagram, out _))
         {
         }
         var acks = _recording.ToSender(step);
@@ -90,7 +94,7 @@ public class ReliabilityLayerBenchmarks
         for (var i = 0; i < datagrams.Count; i++)
             receiver.Receive(datagrams[i], nowUs);
         receiver.Update(nowUs);
-        while (receiver.TryDequeueDatagram(out _))
+        while (receiver.TryDequeueDatagram(_datagram, out _))
         {
         }
         return SessionRecording.CountDelivered(receiver);

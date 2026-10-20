@@ -119,11 +119,18 @@ internal sealed class PeerRecording
         client.Update(nowUs);
     }
 
+    /// <summary>Takes the core's events, recycling each message as RakPeer does, and counts the messages.</summary>
     public static int CountDelivered(PeerCore peer)
     {
         var delivered = 0;
         while (peer.TryDequeueEvent(out var e))
-            delivered += e is MessageReceived ? 1 : 0;
+        {
+            if (e is MessageReceived message)
+            {
+                delivered++;
+                peer.Recycle(message);
+            }
+        }
         return delivered;
     }
 

@@ -13,7 +13,8 @@ namespace RakDotNet.Benchmarks;
 /// <see cref="ClientSendAndUpdate"/>: the client sends the step's messages, updates, and takes the server's recorded
 /// acknowledgements. <see cref="ServerReceiveAndUpdate"/>: the server takes the client's recorded datagrams, updates
 /// and delivers the messages as events. When the recording runs out the replayed side is replaced by a freshly
-/// connected one, once every <see cref="RecordingSteps"/> operations.
+/// connected one, once every <see cref="RecordingSteps"/> operations. Datagrams and message events are taken as RakPeer
+/// takes them: without a copy, and recycled once read.
 /// </remarks>
 [MemoryDiagnoser]
 public class PeerCoreBenchmarks
@@ -52,7 +53,7 @@ public class PeerCoreBenchmarks
         var step = _clientStep++;
         var nowUs = _recording.TimeOf(step);
         _recording.SendStep(_client, nowUs);
-        while (_client.TryDequeueDatagram(out _))
+        while (_client.TryDequeueDatagram(out _, out _, out _))
         {
         }
         var acks = _recording.ToClient(step);
@@ -77,7 +78,7 @@ public class PeerCoreBenchmarks
         for (var i = 0; i < datagrams.Count; i++)
             _server.Receive(PeerRecording.ClientAddress, datagrams[i], nowUs);
         _server.Update(nowUs);
-        while (_server.TryDequeueDatagram(out _))
+        while (_server.TryDequeueDatagram(out _, out _, out _))
         {
         }
         return PeerRecording.CountDelivered(_server);

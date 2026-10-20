@@ -72,7 +72,7 @@ Each test charges everything allocated during the measured messages to those mes
 | Framing (`WriteDatagram`, ACKs, NAKs) | Datagrams are written in place into a `DatagramQueue`, one buffer reused whenever the queue empties. `EncapsulatedMessage` and `AckRangeList` have allocation-free static writers and readers for the session's use. The datagram history keeps its message-number lists for reuse. |
 | `ReliabilityLayer.Receive` | The datagram body is copied into a buffer reused per datagram and read without making `EncapsulatedMessage`s; the ACK and NAK ranges go into a reused list. Ordering and split reassembly copy what they hold. A delivered message is copied into a `MessageDelivered` that the consumer hands back with `Recycle`. |
 | `PeerCore` | Datagrams for the transport go into its own `DatagramQueue` and are taken without a copy (`TryDequeueDatagram(out IPEndPoint, out ReadOnlySpan<byte>, out bool)`). Message events are `MessageReceived`s that the consumer hands back with `Recycle`; the core recycles the session's deliveries itself and copies the payloads of the connection events it keeps. Connected pings and pongs are encoded on the stack. |
-| Statistics | `BpsTracker` adds pushes within a millisecond of each other to one entry, so its preallocated buffer holds a second at any message rate. |
+| Statistics | `BpsTracker` adds pushes within 10 ms of each other to one entry, so its small preallocated buffer holds a second at any message rate. |
 
 A consumer that never recycles keeps what it was given: an event that is not handed back is simply not reused. The tests in `RakDotNet.Protocol.Tests` read the layers this way, with the allocating `TryDequeueDatagram(out ...)` overloads that return arrays.
 

@@ -21,12 +21,12 @@ internal sealed class RingQueue<T>
         get
         {
             ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)Count, nameof(index));
-            return _items[(_head + index) % _items.Length];
+            return _items[Slot(index)];
         }
         set
         {
             ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((uint)index, (uint)Count, nameof(index));
-            _items[(_head + index) % _items.Length] = value;
+            _items[Slot(index)] = value;
         }
     }
 
@@ -34,7 +34,7 @@ internal sealed class RingQueue<T>
     {
         if (Count == _items.Length)
             Grow();
-        _items[(_head + Count) % _items.Length] = item;
+        _items[Slot(Count)] = item;
         Count++;
     }
 
@@ -44,7 +44,7 @@ internal sealed class RingQueue<T>
             throw new InvalidOperationException("The queue is empty.");
         var item = _items[_head];
         _items[_head] = default!;
-        _head = (_head + 1) % _items.Length;
+        _head = _head + 1 == _items.Length ? 0 : _head + 1;
         Count--;
         return item;
     }
@@ -61,6 +61,14 @@ internal sealed class RingQueue<T>
         Array.Clear(_items);
         _head = 0;
         Count = 0;
+    }
+
+    // The array index of the entry offset from the head; offset is at most the capacity, so one wrap is enough. A
+    // subtraction rather than a modulo, which costs a division on every access.
+    private int Slot(int offset)
+    {
+        var slot = _head + offset;
+        return slot >= _items.Length ? slot - _items.Length : slot;
     }
 
     private void Grow()
