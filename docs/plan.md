@@ -106,6 +106,8 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | MessageFilter | Filter sets on the server: allowed IDs, a change of set, kick and ban on a disallowed message, time limits, timestamped and RPC4 messages |
 | ReadyEvent | Two and three systems waiting on each other: set, unset, forced completion, status by query, a disconnect leaving the wait list |
 | TwoWayAuthentication | Challenges for a shared password in either direction, for a password the other system lacks, and with a different password |
+| FileListTransfer | Files sent whole with their contexts, referenced files read and sent a chunk at a time with acknowledgements, split message progress of a large file |
+| DirectoryDeltaTransfer, `DirectoryDeltaTransferTest` | A subdirectory downloaded into another with only the missing or changed files sent, with and without an incremental reader on the uploader, and a file named outside the output directory |
 
 ## Milestones
 

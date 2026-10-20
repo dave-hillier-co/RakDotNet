@@ -111,6 +111,38 @@ Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFi
 
 TwoWayAuthentication's results reach the driver as `packet` events.
 
+### File commands
+
+The file commands attach a `FileListTransfer` and a `DirectoryDeltaTransfer` and drive them. They live in `tools/interop-peer/src/FileCommands.cpp`. Every command but an attach command fails with `ok:false` until its plugin is attached. Paths are the peer's own file system paths, so the driver and the peer share a machine.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `fileListTransferAttach` | | | `AttachPlugin` of a `FileListTransfer`, with `AddCallback` of a `FileListProgress` that records the sends; again is a no-op |
+| `fileListTransferStartThreads` | `count` (1) | | `StartIncrementalReadThreads` |
+| `fileListTransferSetupReceive` | `sender` (guid), `allocateIriDataChunk` (true) | `setId` (65535 on failure) | `SetupReceive` of a new recording handler, `deleteHandler` false; the handler sets `allocateIrIDataChunkAutomatically` on every progress |
+| `fileListTransferSend` | `target` (guid), `setId`, `files` (array, below), `priority` (`HIGH_PRIORITY`), `channel` (0), `incremental` (false), `chunkSize` (16777216) | | `Send` of a `FileList` built from `files`, with an `IncrementalReadInterface` when `incremental` |
+| `fileListTransferCancelReceive` | `setId` | | `CancelReceive` |
+| `fileListTransferInfo` | `setId` (absent), `target` (guid, absent) | `files`, `progress`, `completed`, `dereferenced`, `pushes`, `pushesComplete`, `sendAborted`, and `handlerActive` when `setId` is given, `pendingFiles` when `target` is | `IsHandlerActive`, `GetPendingFilesToAddress`, and what the callbacks recorded, in the order they ran |
+| `ddtAttach` | | | `AttachPlugin` of a `DirectoryDeltaTransfer`, after `fileListTransferAttach`'s plugin when none is attached, then `SetFileListTransferPlugin`; again is a no-op |
+| `ddtSetApplicationDirectory` | `path` | | `SetApplicationDirectory` |
+| `ddtAddUploads` | `subdir` | `filesForUpload` | `AddUploadsFromSubdirectory`, `GetNumberOfFilesForUpload` |
+| `ddtClearUploads` | | | `ClearUploads` |
+| `ddtSetIncrementalRead` | `chunkSize` (0 = none) | | `SetDownloadRequestIncrementalReadInterface` with an `IncrementalReadInterface`, or null for 0 |
+| `ddtDownload` | `subdir`, `outputSubdir`, `prependAppDir` (true), `target` (guid), `priority` (`HIGH_PRIORITY`), `channel` (0) | `setId` | `DownloadFromSubdirectory` with a recording handler and no `FileListProgress` |
+
+Each element of `files` is `{name, data, path, reference, fileLength, context}`: `name` is required; `path` defaults to `name`; with `reference` (false) the file is added as a reference, `AddFile(name, path, 0, fileLength, fileLength, context, true)`, where `fileLength` defaults to `GetFileLength(path)`; otherwise `data` (hex, "") is added with `fileLength` defaulting to its length. `context` is `{op, extraData1, extraData2, extraData3}`, each 0 when absent.
+
+The `fileListTransferInfo` records:
+
+- `files`, from `OnFile`: `setId`, `fileIndex`, `fileName`, `byteLengthOfThisFile`, `bytesDownloadedForThisFile`, `numberOfFilesInThisSet`, `byteLengthOfThisSet`, `bytesDownloadedForThisSet`, `context`, `senderGuid`, `hasData`, and when it has data `hash` (`SuperFastHash` of the file's bytes) and, for files of up to 1024 bytes, `data` (hex).
+- `progress`, from `OnFileProgress`: `setId`, `fileIndex`, `fileName`, `partCount`, `partTotal`, `dataChunkLength`, `iriWriteOffset`, `bytesDownloadedForThisFile`, `bytesDownloadedForThisSet`, `hasIriDataChunk`, and when it is set `iriHash` (`SuperFastHash` of `dataChunkLength` bytes of it).
+- `completed`, from `OnDownloadComplete`: `setId`, `numberOfFilesInThisSet`, `byteLengthOfThisSet`, `senderGuid`. The handler returns false, ending itself.
+- `dereferenced`: the set IDs of `fileListTransferSetupReceive` handlers given `OnDereference`, in order.
+- `pushes`, from `OnFilePush`: `fileName`, `fileLengthBytes`, `offset`, `bytesBeingSent`, `done`, `setId`.
+- `pushesComplete`, the set IDs from `OnFilePushesComplete`; `sendAborted`, the addresses from `OnSendAborted`.
+
+A `ddtDownload` handler records `files`, `progress` and `completed` the same way. File messages the plugins consume never reach the driver as `packet` events.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
