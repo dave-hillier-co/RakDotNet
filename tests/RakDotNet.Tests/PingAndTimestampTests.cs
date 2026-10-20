@@ -55,6 +55,24 @@ public class PingAndTimestampTests
     }
 
     [Fact]
+    public async Task Ping_during_shutdown_takes_no_receipt_number()
+    {
+        using var peers = new ManualPeers();
+        var server = peers.Connect();
+        var shutdown = peers.Client.ShutdownAsync(TimeSpan.FromSeconds(1), cancellationToken: TestContext.Current.CancellationToken);
+        var before = peers.Client.PeekNextReceipt();
+
+        server.Ping();
+        var after = peers.Client.PeekNextReceipt();
+        peers.Time.Advance(TimeSpan.FromSeconds(2));
+        await shutdown;
+
+        // PingInternal returns while the peer is not active (RakPeer.cpp:4105-4106), and Send returns before
+        // IncrementNextSendReceipt once endThreads is set (RakPeer.cpp:1371-1372).
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
     public void An_ID_TIMESTAMP_message_arrives_in_the_receivers_clock()
     {
         using var clocks = new SkewedPeers();
@@ -119,6 +137,34 @@ public class PingAndTimestampTests
         Assert.Equal([1_000_000UL], timestamps);
     }
 
+    [Fact]
+    public void A_received_timestamp_left_unread_until_its_senders_connection_ended_is_not_shifted()
+    {
+        using var clocks = new SkewedPeers();
+        var server = clocks.ClientSideConnection();
+        var sent = clocks.Server.GetTime();
+        var message = new byte[1 + 8 + 1];
+        message[0] = (byte)MessageId.Timestamp;
+        BinaryPrimitives.WriteUInt64BigEndian(message.AsSpan(1), sent);
+        message[9] = (byte)MessageId.UserPacketEnum;
+        Assert.True(clocks.Server.TryGetConnection(clocks.Client.RakNetGuid, out var toClient));
+        toClient.Send(message, Reliability.ReliableOrdered);
+        clocks.StepLeavingClientEventsUnread(50);
+
+        clocks.Client.Close(server, notify: false);
+        clocks.Client.Update();
+
+        // The packet waits in the queue unshifted; Receive shifts it only if its sender is still an active system when
+        // it is read (RakPeer.cpp:1548-1555, 3793).
+        var timestamps = new List<ulong>();
+        while (clocks.Client.Events.TryRead(out var e))
+        {
+            if (e.HasTimestamp)
+                timestamps.Add(e.Timestamp);
+        }
+        Assert.Equal([sent], timestamps);
+    }
+
     /// <summary>Two Manual-mode peers on separate fake clocks, the server's 5 s ahead, as two processes would be.</summary>
     private sealed class SkewedPeers : IDisposable
     {
@@ -152,6 +198,20 @@ public class PingAndTimestampTests
                 if (e.HasTimestamp)
                     Timestamps.Add(e.Timestamp);
                 _clientEvents.Add(SeenEvent.From(e));
+            }
+        }
+
+        /// <summary>Steps both peers without reading the client's events.</summary>
+        public void StepLeavingClientEventsUnread(int steps)
+        {
+            for (var i = 0; i < steps; i++)
+            {
+                _serverTime.Advance(TimeSpan.FromMilliseconds(1));
+                _clientTime.Advance(TimeSpan.FromMilliseconds(1));
+                Server.Update();
+                ManualPeers.Drain(Server, _serverEvents);
+                Client.Update();
+                Thread.Sleep(1);
             }
         }
 

@@ -48,6 +48,17 @@ public class RangeListTests
         Assert.Equal([Range(1, 3)], _list.Ranges);
     }
 
+    // minIndex-1 is uint24_t arithmetic (RakNetTypes.h:486), so for a range starting at 0 it is 0xFFFFFF and a repeated 0
+    // takes the "Insert here" branch (DS_RangeList.h:182-188) even though GetIndexFromKey found it.
+    [Fact]
+    public void A_repeated_zero_at_the_start_of_a_range_gets_its_own_range()
+    {
+        foreach (var n in new uint[] { 0, 1, 0 })
+            _list.Insert(new UInt24(n));
+
+        Assert.Equal([Range(0, 0), Range(0, 1)], _list.Ranges);
+    }
+
     // uint24_t arithmetic masks to 24 bits (RakNetTypes.h:485), so maxIndex+1 of a range ending at 0xFFFFFF is 0 and any
     // later number lands in the "Insert at end" branch (DS_RangeList.h:174-178), even one inside that range.
     [Fact]

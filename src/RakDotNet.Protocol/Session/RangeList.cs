@@ -24,7 +24,8 @@ internal sealed class RangeList
     /// minimum is above the number (RangeNodeComp compares against minIndex only, DS_RangeList.h:39-46), and only that
     /// range and, when joining, the one before it are examined. A number that extends or repeats the preceding range
     /// therefore gets a range of its own unless it is past the last range, so the list can hold overlapping and
-    /// adjacent ranges after out-of-order or duplicate arrivals, exactly as RakNet's ACK and NAK lists do.
+    /// adjacent ranges after out-of-order or duplicate arrivals, exactly as RakNet's ACK and NAK lists do; a repeated 0
+    /// at the start of a range is added again, because minIndex-1 wraps.
     /// </summary>
     public void Insert(UInt24 number)
     {
@@ -35,7 +36,7 @@ internal sealed class RangeList
             return;
         }
 
-        var index = IndexOfFirstRangeWithMinAtOrAbove(n, out var exists);
+        var index = IndexOfFirstRangeWithMinAtOrAbove(n);
         if (index == _ranges.Count)
         {
             var last = _ranges[index - 1];
@@ -48,11 +49,13 @@ internal sealed class RangeList
         }
 
         var range = _ranges[index];
-        if (!exists && n < Wrap(range.Min.Value - 1))
+        if (n < Wrap(range.Min.Value - 1))
         {
-            _ranges.Insert(index, new AckRange(number, number)); // Insert here (DS_RangeList.h:182-188).
+            // Insert here (DS_RangeList.h:182-188). A repeated number at the minimum lands here too when the minimum is
+            // 0, as minIndex-1 wraps to 0xFFFFFF.
+            _ranges.Insert(index, new AckRange(number, number));
         }
-        else if (!exists && n == Wrap(range.Min.Value - 1))
+        else if (n == Wrap(range.Min.Value - 1))
         {
             // Decrease minIndex and join left (DS_RangeList.h:189-199).
             _ranges[index] = new AckRange(number, range.Max);
@@ -63,7 +66,7 @@ internal sealed class RangeList
             }
         }
         // Otherwise the number is the range's minimum, already present (DS_RangeList.h:200-204); the join-right branch
-        // that follows cannot be reached, because every number left here is below the range's minimum.
+        // that follows cannot be reached, because every other number left here is below the range's minimum.
     }
 
     /// <summary>
@@ -82,26 +85,25 @@ internal sealed class RangeList
 
     private static uint Wrap(uint value) => value & UInt24.MaxValue.Value;
 
-    // OrderedList::GetIndexFromKey with RangeNodeComp (DS_OrderedList.h:119-170): the range whose minimum equals n, or
-    // the first whose minimum is above it.
-    private int IndexOfFirstRangeWithMinAtOrAbove(uint n, out bool exists)
+    // OrderedList::GetIndexFromKey with RangeNodeComp (DS_OrderedList.h:119-170), probe for probe: the range whose
+    // minimum equals n, or the first whose minimum is above it. Minimums can repeat, and the first probe at Size/2 picks
+    // which of the equal ranges is found.
+    private int IndexOfFirstRangeWithMinAtOrAbove(uint n)
     {
-        int low = 0, high = _ranges.Count - 1;
-        while (low <= high)
+        int lower = 0, upper = _ranges.Count - 1;
+        var index = _ranges.Count / 2;
+        while (true)
         {
-            var mid = low + (high - low) / 2;
-            var min = _ranges[mid].Min.Value;
+            var min = _ranges[index].Min.Value;
             if (n == min)
-            {
-                exists = true;
-                return mid;
-            }
+                return index;
             if (n < min)
-                high = mid - 1;
+                upper = index - 1;
             else
-                low = mid + 1;
+                lower = index + 1;
+            index = lower + (upper - lower) / 2;
+            if (lower > upper)
+                return lower;
         }
-        exists = false;
-        return low;
     }
 }

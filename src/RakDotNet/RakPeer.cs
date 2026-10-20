@@ -976,11 +976,14 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     /// <summary>
     /// Ping(SystemAddress): one unreliable ID_CONNECTED_PING on the next cycle (RakPeer.cpp:2073-2076). It goes through
-    /// Send, so it takes a receipt number (RakPeer.cpp:4114, 1326-1330).
+    /// Send, so it takes a receipt number (RakPeer.cpp:4114, 1326-1330); once the peer is ending it does nothing
+    /// (RakPeer.cpp:4105-4106, 1371-1372).
     /// </summary>
     internal void PingConnected(RakConnection connection)
     {
         ThrowIfStopped();
+        if (Volatile.Read(ref _state) != Active)
+            return;
         ReserveReceipt();
         Enqueue(new PeerCommand { Kind = CommandKind.PingConnected, Target = connection.RakNetGuid });
     }
