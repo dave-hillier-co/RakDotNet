@@ -26,6 +26,11 @@ public sealed class HotPathAllocationTests : IDisposable
     private const int WarmUpMessages = 2_000;
     private const int MeasuredMessages = 2_000;
 
+    // Over loopback UDP how many messages are unacknowledged at once still depends on when each datagram becomes
+    // readable, and the session and core pools grow to the highest count seen. Manual mode warms them with a burst sent
+    // while the server is held back, far past the dozen or so the one-at-a-time transfer reaches.
+    private const int BurstMessages = 64;
+
     // On the real clock how many messages are unacknowledged at once (ACKs wait up to 10 ms) varies with thread
     // scheduling, and the pools grow to the highest count seen, so a new high under load can still allocate a few KB
     // after warm-up. The longer windows keep the budget at 0 B per message; the test passes once one window is within
@@ -50,7 +55,7 @@ public sealed class HotPathAllocationTests : IDisposable
     public void Manual_mode_send_and_receive_of_a_non_split_message_allocates_nothing_in_steady_state()
     {
         Start(PeerThreading.Manual);
-        Transfer(WarmUpMessages);
+        WarmUpManual();
 
         var before = GC.GetAllocatedBytesForCurrentThread();
         Transfer(MeasuredMessages);
@@ -64,13 +69,13 @@ public sealed class HotPathAllocationTests : IDisposable
     {
         _reliability = Reliability.ReliableOrderedWithAckReceipt;
         Start(PeerThreading.Manual);
-        Transfer(WarmUpMessages);
+        WarmUpManual();
 
         var before = GC.GetAllocatedBytesForCurrentThread();
         Transfer(MeasuredMessages);
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        Assert.InRange(_receipts, WarmUpMessages, WarmUpMessages + MeasuredMessages);
+        Assert.InRange(_receipts, 2 * WarmUpMessages + BurstMessages, 2 * WarmUpMessages + BurstMessages + MeasuredMessages);
         AssertWithinBudget(allocated, MeasuredMessages, "RakPeer in Manual mode with ID_SND_RECEIPT_ACKED (Send, Update on both peers, Events.TryRead)");
     }
 
@@ -162,6 +167,44 @@ public sealed class HotPathAllocationTests : IDisposable
                 }
                 spinner.SpinOnce(sleep1Threshold: -1);
             }
+        }
+    }
+
+    private void WarmUpManual()
+    {
+        Transfer(WarmUpMessages);
+        HeldBackBurst(BurstMessages);
+        // Lets the congestion window and RTT estimate settle again after the burst.
+        Transfer(WarmUpMessages);
+    }
+
+    // The client sends one message per cycle while the server is not updated, so the messages, their datagram
+    // history entries, the deliveries and the receipts are all outstanding at once; then both peers run until every
+    // message is read and, with an ack receipt, every receipt event.
+    private void HeldBackBurst(int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            Assert.True(_toServer!.Send(_message, _reliability).IsQueued);
+            _time.Advance(TimeSpan.FromMilliseconds(1));
+            _client!.Update();
+        }
+        var deadline = Stopwatch.GetTimestamp() + (long)(MessageTimeout.TotalSeconds * Stopwatch.Frequency);
+        var received = 0;
+        var receiptsBefore = _receipts;
+        var receipts = _reliability == Reliability.ReliableOrderedWithAckReceipt ? count : 0;
+        while (received < count || _receipts - receiptsBefore < receipts)
+        {
+            Assert.True(Stopwatch.GetTimestamp() < deadline, "The burst was not delivered.");
+            Cycle();
+            while (_server!.Events.TryRead(out var e))
+                received += e.Kind == PeerEventKind.Message ? 1 : 0;
+            while (_client!.Events.TryRead(out var e))
+            {
+                if (e.Kind == PeerEventKind.ReceiptAcked)
+                    _receipts++;
+            }
+            Thread.Yield();
         }
     }
 

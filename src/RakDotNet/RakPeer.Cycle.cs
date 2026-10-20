@@ -208,8 +208,10 @@ public sealed partial class RakPeer
                 return;
             var nowUs = NowUs;
             DrainCommands(nowUs);
-            // Read again: applying a burst of sends can take long enough that datagrams framed below would carry a stale
-            // send time, and their RTT samples and retransmission timers would run early.
+            // A deliberate departure from RunUpdateCycle, which reads timeNS once and uses it both for SendImmediate of
+            // the buffered commands and for reliabilityLayer.Update (RakPeer.cpp:5583-5871). Reading again means that
+            // applying a burst of sends cannot leave the datagrams framed below with a stale send time, which would
+            // inflate their RTT samples and start their retransmission timers early. The wire is unchanged.
             nowUs = NowUs;
             if (_receivePaused && _queue.Count < _eventCapacity / 2)
                 _receivePaused = false;

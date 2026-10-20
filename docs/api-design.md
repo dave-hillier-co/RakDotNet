@@ -41,7 +41,7 @@ The API exposes the whole of RakNet's `RakPeerInterface` and `PluginInterface2` 
 
 Wire types are reused everywhere and never redeclared, as [conventions.md](conventions.md) requires. Layer 2 has internal types named `PeerEvent` and `ConnectionState`; code in a `RakDotNet.*` namespace that uses them qualifies them as `Protocol.Peer.PeerEvent`, because the public types of the same name in `RakDotNet` take precedence over a `using` there.
 
-Usage is shown by the projects in [samples/](../samples): a server loop ([RakDotNet.Samples.Server](../samples/RakDotNet.Samples.Server/Program.cs)), a client that connects and sends ([RakDotNet.Samples.Client](../samples/RakDotNet.Samples.Client/Program.cs)) the manual update mode ([RakDotNet.Samples.ManualUpdate](../samples/RakDotNet.Samples.ManualUpdate/Program.cs)), and a client and server echoing a message in one process, which CI publishes with NativeAOT ([RakDotNet.Samples.Loopback](../samples/RakDotNet.Samples.Loopback/LoopbackEcho.cs)).
+Usage is shown by the projects in [samples/](../samples): a server loop ([RakDotNet.Samples.Server](../samples/RakDotNet.Samples.Server/Program.cs)), a client that connects and sends ([RakDotNet.Samples.Client](../samples/RakDotNet.Samples.Client/Program.cs)), the manual update mode ([RakDotNet.Samples.ManualUpdate](../samples/RakDotNet.Samples.ManualUpdate/Program.cs)), and a client and server echoing a message in one process, which CI publishes with NativeAOT ([RakDotNet.Samples.Loopback](../samples/RakDotNet.Samples.Loopback/LoopbackEcho.cs)).
 
 ## 4. Event ordering
 
