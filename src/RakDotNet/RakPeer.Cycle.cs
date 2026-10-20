@@ -163,9 +163,11 @@ public sealed partial class RakPeer
         while (true)
         {
             wake.Wait();
+            // Reset before the stop check: Stop sets the flag and then the event, so a Set that a Reset here clears was
+            // preceded by the flag, and one landing after the Reset leaves the event set for the next Wait.
+            wake.Reset();
             if (_loopStopping)
                 return;
-            wake.Reset();
             Interlocked.Exchange(ref _wakePending, 0);
             try
             {
@@ -483,6 +485,9 @@ public sealed partial class RakPeer
                     throw new RakTransportException(socket, exception.SocketErrorCode);
                 }
 
+                // RakNetSocket2.cpp:357-361: only datagrams with bytesRead > 0 reach the peer.
+                if (length == 0)
+                    continue;
                 var datagram = _receiveBuffer.AsSpan(0, length);
                 if (filter is not null && !filter(datagram, remote, socket))
                     continue;
@@ -507,9 +512,26 @@ public sealed partial class RakPeer
         {
             SystemAddress remote = datagram.Remote;
             var socket = SocketOf(remote);
-            if (_simulator.PassesNow(datagram.Data, socket, remote, nowUs))
+            if (!_simulator.PassesNow(datagram.Data, socket, remote, nowUs))
+                continue;
+            if (datagram.DoNotFragment)
+                SendProbe(datagram.Data, socket, datagram.Remote, nowUs);
+            else
                 SendDatagram(datagram.Data, socket, remote, ttl: 0);
         }
+    }
+
+    // RakPeer.cpp:5768-5821: an MTU probe goes out with don't-fragment set. One too large for the path skips the rest of
+    // its MTU's attempts; one whose send took more than 100 ms drops the attempt to the smallest MTU.
+    private void SendProbe(byte[] probe, int socket, IPEndPoint remote, long nowUs)
+    {
+        SystemAddress to = remote;
+        NotifySent(probe, to);
+        var start = _time.GetTimestamp();
+        if (!_transports[socket].TrySendDoNotFragment(probe, to, out var error) && error == SocketError.MessageSize)
+            _core.ReportDatagramTooLarge(remote, nowUs);
+        else if ((long)_time.GetElapsedTime(start).TotalMilliseconds > 100)
+            _core.ReportProbeSendSlow(remote, nowUs);
     }
 
     // RakPeer's direct socket sends: SendOutOfBand, AdvertiseSystem and SendTTL bypass the reliability layer.
@@ -527,11 +549,16 @@ public sealed partial class RakPeer
 
     private void SendDatagram(ReadOnlySpan<byte> datagram, int socket, SystemAddress remote, int ttl)
     {
+        NotifySent(datagram, remote);
+        _transports[socket].TrySend(datagram, remote, ttl);
+    }
+
+    private void NotifySent(ReadOnlySpan<byte> datagram, SystemAddress remote)
+    {
         foreach (var observer in _lowLevel.Observers.Current)
             observer.OnDatagramSent(datagram, remote);
         foreach (var observer in _plugins.Observers)
             observer.OnDatagramSent(datagram, remote);
-        _transports[socket].TrySend(datagram, remote, ttl);
     }
 
     private void ProcessCoreEvents(long nowUs)

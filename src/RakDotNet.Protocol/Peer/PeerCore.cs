@@ -416,6 +416,29 @@ internal sealed class PeerCore
     }
 
     /// <summary>
+    /// The transport took more than 100 ms to send an MTU probe (<see cref="OutgoingDatagram.DoNotFragment"/>) to
+    /// <paramref name="remote"/>. As RakPeer does (RakPeer.cpp:5798-5812), the attempt drops to the smallest MTU and
+    /// probes again on the next <see cref="Update"/>, or ends if it has already reached the smallest MTU.
+    /// </summary>
+    public void ReportProbeSendSlow(IPEndPoint remote, long nowUs)
+    {
+        ArgumentNullException.ThrowIfNull(remote);
+        var attempt = FindAttempt(remote);
+        if (attempt is null)
+            return;
+        var lowestMtuIndex = attempt.AttemptCount / RakNetConstants.MtuSizes.Length * (RakNetConstants.MtuSizes.Length - 1);
+        if (lowestMtuIndex > attempt.RequestsMade)
+        {
+            attempt.RequestsMade = (byte)lowestMtuIndex;
+            attempt.NextRequestTimeMs = nowUs / 1000;
+        }
+        else
+        {
+            attempt.RequestsMade = unchecked((byte)(attempt.AttemptCount + 1));
+        }
+    }
+
+    /// <summary>
     /// RakPeer::Ping(host, port, onlyReplyOnAcceptingConnections) (RakPeer.cpp:2090-2142): an unconnected ping.
     /// </summary>
     public bool Ping(IPEndPoint remote, bool onlyIfAccepting, long nowUs)

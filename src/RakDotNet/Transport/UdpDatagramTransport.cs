@@ -21,6 +21,13 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
     // Larger than any datagram, so an oversized one is read whole and then ignored rather than truncated.
     private const int SlotSize = 64 * 1024;
 
+    // Linux <netinet/in.h>: IP_MTU_DISCOVER at IPPROTO_IP and IPV6_MTU_DISCOVER at IPPROTO_IPV6, which
+    // Socket.DontFragment sets on Linux.
+    private const int IpProtocolIp = 0;
+    private const int IpMtuDiscover = 10;
+    private const int IpProtocolIpv6 = 41;
+    private const int Ipv6MtuDiscover = 23;
+
     private readonly Socket _socket;
     private readonly SocketAddress _receiveAddress;
     private readonly SocketAddress _slotAddress;
@@ -36,6 +43,7 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
     private SystemAddress _slotRemote;
     private volatile SocketException? _fatal;
     private volatile bool _disposed;
+    private bool _dontFragmentSupported = true;
 
     private UdpDatagramTransport(Socket socket)
     {
@@ -49,7 +57,30 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
 
     public SystemAddress LocalAddress { get; }
 
-    /// <summary>Binds a UDP socket as RakNet's RNS2_Berkley::Bind does, without SO_REUSEADDR so a taken port fails.</summary>
+    internal int ReceiveBufferSize => _socket.ReceiveBufferSize;
+
+    internal int SendBufferSize => _socket.SendBufferSize;
+
+    /// <summary>The raw IP_MTU_DISCOVER (or IPV6_MTU_DISCOVER) value. Linux only.</summary>
+    internal int PathMtuDiscovery
+    {
+        get
+        {
+            Span<byte> value = stackalloc byte[sizeof(int)];
+            var (level, name) = MtuDiscoverOption;
+            _socket.GetRawSocketOption(level, name, value);
+            return BitConverter.ToInt32(value);
+        }
+    }
+
+    private (int Level, int Name) MtuDiscoverOption =>
+        _socket.AddressFamily == AddressFamily.InterNetworkV6 ? (IpProtocolIpv6, Ipv6MtuDiscover) : (IpProtocolIp, IpMtuDiscover);
+
+    /// <summary>
+    /// Binds a UDP socket as RakNet's RNS2_Berkley::BindShared does (RakNetSocket2_Berkley.cpp:160-263,
+    /// RakNetSocket2.cpp:303-332): the binding's buffer sizes, SO_BROADCAST as RakPeer::Startup asks (RakPeer.cpp:505),
+    /// no SO_REUSEADDR so a taken port fails, then 4 zero bytes sent to the bound address as a test.
+    /// </summary>
     public static bool TryBind(SocketBinding binding, out UdpDatagramTransport? transport, out StartupError startupError, out SocketError socketError)
     {
         ArgumentNullException.ThrowIfNull(binding);
@@ -71,6 +102,7 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
                 socket.ReceiveBufferSize = receive;
             if (binding.SendBufferSize is { } send)
                 socket.SendBufferSize = send;
+            socket.EnableBroadcast = true;
             socket.Bind(binding.LocalEndPoint);
         }
         catch (SocketException exception)
@@ -83,6 +115,21 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
                 SocketError.AddressFamilyNotSupported or SocketError.ProtocolFamilyNotSupported => StartupError.SocketFamilyNotSupported,
                 _ => StartupError.SocketFailedToBind,
             };
+            return false;
+        }
+
+        // RakNetSocket2.cpp:317-326. The bound address has 0.0.0.0 replaced by 127.0.0.1 (RakNetSocket2_Berkley.cpp:97-101).
+        var bound = (IPEndPoint)socket.LocalEndPoint!;
+        var self = new IPEndPoint(bound.Address.Equals(IPAddress.Any) ? IPAddress.Loopback : bound.Address, bound.Port);
+        try
+        {
+            socket.SendTo(stackalloc byte[4], SocketFlags.None, self);
+        }
+        catch (SocketException exception)
+        {
+            socket.Dispose();
+            socketError = exception.SocketErrorCode;
+            startupError = StartupError.SocketFailedTestSend;
             return false;
         }
 
@@ -163,10 +210,93 @@ internal sealed class UdpDatagramTransport : IDatagramTransport
         }
     }
 
+    /// <summary>
+    /// RakPeer.cpp:5779-5821: IP don't-fragment is set for this send only (RNS2_Berkley::SetDoNotFragment,
+    /// RakNetSocket2_Berkley.cpp:71-80). A platform that refuses the option sends the datagram as it is.
+    /// </summary>
+    public bool TrySendDoNotFragment(ReadOnlySpan<byte> datagram, in SystemAddress remote, out SocketError socketError)
+    {
+        socketError = SocketError.Success;
+        if (remote.AddressFamily != _socket.AddressFamily || _disposed)
+        {
+            socketError = SocketError.AddressFamilyNotSupported;
+            return false;
+        }
+        lock (_sendGate)
+        {
+            var restore = SetDontFragment();
+            try
+            {
+                remote.CopyTo(_sendAddress);
+                return _socket.SendTo(datagram, SocketFlags.None, _sendAddress) == datagram.Length;
+            }
+            catch (SocketException exception)
+            {
+                socketError = exception.SocketErrorCode;
+                return false;
+            }
+            catch (ObjectDisposedException)
+            {
+                socketError = SocketError.OperationAborted;
+                return false;
+            }
+            finally
+            {
+                if (restore is { } previous)
+                    RestoreDontFragment(previous);
+            }
+        }
+    }
+
     public void Dispose()
     {
         _disposed = true;
         _socket.Dispose();
+    }
+
+    /// <summary>
+    /// Sets don't-fragment and returns what puts the socket back: on Linux the raw path MTU discovery mode it had (a new
+    /// socket's IP_PMTUDISC_WANT, which Socket.DontFragment = false would turn into IP_PMTUDISC_DONT), elsewhere 0. Null
+    /// when the option could not be set.
+    /// </summary>
+    private int? SetDontFragment()
+    {
+        if (!_dontFragmentSupported)
+            return null;
+        try
+        {
+            var previous = OperatingSystem.IsLinux() ? PathMtuDiscovery : 0;
+            _socket.DontFragment = true;
+            return previous;
+        }
+        catch (Exception exception) when (exception is SocketException or NotSupportedException)
+        {
+            _dontFragmentSupported = false;
+            return null;
+        }
+        catch (ObjectDisposedException)
+        {
+            return null;
+        }
+    }
+
+    private void RestoreDontFragment(int previous)
+    {
+        try
+        {
+            if (OperatingSystem.IsLinux())
+            {
+                var (level, name) = MtuDiscoverOption;
+                _socket.SetRawSocketOption(level, name, BitConverter.GetBytes(previous));
+            }
+            else
+            {
+                _socket.DontFragment = false;
+            }
+        }
+        catch (Exception exception) when (exception is SocketException or NotSupportedException or ObjectDisposedException)
+        {
+        }
     }
 
     // Errors that concern one datagram, not the socket: an ICMP port unreachable from an earlier send, or an

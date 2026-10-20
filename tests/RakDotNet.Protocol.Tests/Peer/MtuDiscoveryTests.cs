@@ -242,6 +242,47 @@ public class MtuDiscoveryTests
     }
 
     [Fact]
+    public void A_probe_that_was_slow_to_send_drops_to_576_at_once()
+    {
+        // RakPeer.cpp:5798-5808: a probe whose sendto took over 100 ms jumps requestsMade to the first 576 attempt,
+        // (attempts / 3) * 2, and probes again on the next update.
+        _client.Connect(ServerAddress, default, 12, 500, 0, _link.NowUs);
+        _client.Update(_link.NowUs + 1_000);
+        Assert.Equal(1492, Assert.Single(Datagrams(_client)).Data.Length + RakNetConstants.UdpHeaderSize);
+
+        _client.ReportProbeSendSlow(ServerAddress, _link.NowUs + 1_000);
+        _client.Update(_link.NowUs + 2_000);
+
+        Assert.Equal(576, Assert.Single(Datagrams(_client)).Data.Length + RakNetConstants.UdpHeaderSize);
+    }
+
+    [Fact]
+    public void A_slow_probe_send_once_the_576_attempts_are_reached_ends_the_attempt()
+    {
+        // RakPeer.cpp:5809-5810: when requestsMade has reached the first 576 attempt, it is set past the attempt count,
+        // so the next update reports ID_CONNECTION_ATTEMPT_FAILED.
+        _client.Connect(Nobody, default, 3, 100, 0, _link.NowUs);
+        _link.RunUntil(() => ProbeMtus(Nobody).Count == 2, TimeSpan.FromSeconds(1));
+        Assert.Equal([1492, 1200], ProbeMtus(Nobody));
+
+        _client.ReportProbeSendSlow(Nobody, _link.NowUs);
+        _link.RunUntil(() => _link.EventsOf(_client).Count > 0, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(MessageId.ConnectionAttemptFailed, Assert.IsType<ConnectionAttemptFailed>(Assert.Single(_link.EventsOf(_client))).Reason);
+        Assert.Equal([1492, 1200], ProbeMtus(Nobody));
+    }
+
+    [Fact]
+    public void A_slow_probe_send_for_an_address_with_no_attempt_is_ignored()
+    {
+        _client.ReportProbeSendSlow(Nobody, _link.NowUs);
+        _client.Update(_link.NowUs + 1_000);
+
+        Assert.Empty(Datagrams(_client));
+        Assert.Empty(Events(_client));
+    }
+
+    [Fact]
     public void A_datagram_too_large_for_an_address_with_no_attempt_is_ignored()
     {
         _client.ReportDatagramTooLarge(Nobody, _link.NowUs);

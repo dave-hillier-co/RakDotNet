@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 using RakDotNet.Protocol.Wire;
 
@@ -10,6 +11,8 @@ namespace RakDotNet;
 /// </remarks>
 public sealed class RakSocket
 {
+    private static readonly SystemAddress AnyIPv4 = new(IPAddress.Any, 0);
+
     private readonly IDatagramTransport _transport;
     private volatile bool _isOpen = true;
 
@@ -17,13 +20,16 @@ public sealed class RakSocket
     {
         Index = index;
         _transport = transport;
-        LocalAddress = transport.LocalAddress;
+        // RNS2_Berkley::GetSystemAddressIPV4 (RakNetSocket2_Berkley.cpp:89-102): a socket bound to every interface
+        // reports 127.0.0.1.
+        var bound = transport.LocalAddress;
+        LocalAddress = bound.EqualsIgnoringPort(AnyIPv4) ? new SystemAddress(IPAddress.Loopback, bound.Port) : bound;
     }
 
     /// <summary>The binding's index in <see cref="RakPeerOptions.Bindings"/>.</summary>
     public int Index { get; }
 
-    /// <summary>GetMyBoundAddress(index)</summary>
+    /// <summary>GetMyBoundAddress(index): the bound address, with 0.0.0.0 reported as 127.0.0.1.</summary>
     public SystemAddress LocalAddress { get; }
 
     public AddressFamily AddressFamily => LocalAddress.AddressFamily;
