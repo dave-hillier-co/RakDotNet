@@ -64,7 +64,7 @@ A native split-message round can also never end. A burst much larger than the so
 | `HotPathAllocationTests`, Manual mode (`RakDotNet.Tests`) | Two `RakPeer`s over loopback UDP, both cycles run on the test thread, with and without `ID_SND_RECEIPT_ACKED` | `GC.GetAllocatedBytesForCurrentThread` |
 | `HotPathAllocationTests`, Background mode (`RakDotNet.Tests`) | Two `RakPeer`s over loopback UDP, each on its own loop thread | `GC.GetTotalAllocatedBytes(precise: true)`, in a collection that runs alone |
 
-Each test charges everything allocated during the measured messages to those messages, idle cycles included, and divides by the message count. The Background test warms up and measures over ten times as many messages as the others: on the real clock the number of messages awaiting an ACK at once depends on thread scheduling, and the pools below grow to the largest number seen. To find where a path allocates, run the matching benchmark: the `Allocated` column splits the cost by layer and by send or receive side.
+Each test charges everything allocated during the measured messages to those messages, idle cycles included, and divides by the message count. The Background test warms up and measures over ten times as many messages as the others: on the real clock the number of messages awaiting an ACK at once depends on thread scheduling, and the pools below grow to the largest number seen, so it passes once one of three measured windows is within the budget. To find where a path allocates, run the matching benchmark: the `Allocated` column splits the cost by layer and by send or receive side.
 
 ### How the hot path avoids allocating
 

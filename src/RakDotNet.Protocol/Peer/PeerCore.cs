@@ -803,7 +803,7 @@ internal sealed class PeerCore
         {
             case MessageDelivered delivered:
                 ProcessMessage(system, delivered.Payload, delivered.BitLength, delivered.OwnsPayload, nowUs);
-                // Nothing keeps the payload: whatever ProcessMessage queued has its own copy.
+                // Whatever ProcessMessage queued copied the payload, or keeps memory the session never writes to again.
                 system.Session.Recycle(delivered);
                 break;
             case ReceiptAcknowledged acknowledged:
