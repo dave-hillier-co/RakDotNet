@@ -26,7 +26,9 @@ namespace RakDotNet.Plugins;
 /// applied while a team is referenced runs on any system, not only the host. Deliberate differences: a truncated message
 /// is ignored where RakNet reads uninitialised values; a request for any team that no team allows is refused with
 /// ID_TEAM_BALANCER_REQUESTED_TEAM_LOCKED naming team UNASSIGNED_NETWORK_ID with zero counts, where RakNet dereferences a
-/// null team (TeamManager.cpp:2436, 1935); and a deserialised request naming no team to join is dropped.
+/// null team (TeamManager.cpp:2436, 1935); a deserialised request naming no team to join is dropped; and
+/// ID_RUN_UpdateTeamsRequestedToNoneAndAddTeam for a team the member is already on does not add it a second time, where
+/// RakNet lists the member on the team again with each repeat.
 /// </para>
 /// <para>Members may be called from any thread; hooks run on the dispatch step. RakNet's TeamBalancer and this plugin cannot be attached together.</para>
 /// </remarks>
@@ -627,7 +629,10 @@ public sealed class TeamManager : IRakPlugin
             return;
         member.StoreLastTeams();
         member.UpdateTeamsRequestedToNone();
-        member.AddToTeamList(team);
+        // RakNet adds the team again when the member is already on it (TeamManager.cpp:2591), so each repeat of this
+        // message would grow both lists; here a member is on a team once.
+        if (!member.IsOnTeamInternal(team))
+            member.AddToTeamList(team);
         PushTeamAssigned(member);
     }
 

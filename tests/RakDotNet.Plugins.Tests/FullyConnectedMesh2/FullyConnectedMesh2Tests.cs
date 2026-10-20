@@ -415,6 +415,183 @@ public sealed class FullyConnectedMesh2Tests : IDisposable
         Assert.All(_systems, s => Assert.Equal(3, s.Peer.ConnectionCount));
     }
 
+    [Fact]
+    public void Truncated_mesh_messages_are_consumed_and_change_nothing()
+    {
+        var (older, olderMesh) = AddSystem();
+        _mesh.Run(TimeSpan.FromMilliseconds(100));
+        var (newer, _) = AddSystem();
+        _mesh.Connect(newer, older);
+        _mesh.Settle();
+        var count = olderMesh.TotalConnectionCount;
+        var order = olderMesh.GetHostOrder();
+
+        byte[][] truncated =
+        [
+            [(byte)MessageId.Fcm2RequestFcmguid],
+            // The bit saying a GUID follows, then a connection count cut short.
+            [(byte)MessageId.Fcm2RequestFcmguid, 0x80, 0xFF, 0xFF],
+            // No GUID, then an elapsed runtime cut short.
+            [(byte)MessageId.Fcm2RequestFcmguid, 0x00, 0xFF, 0xFF, 0xFF],
+            [(byte)MessageId.Fcm2RespondConnectionCount, 0xFF, 0xFF, 0xFF],
+            [(byte)MessageId.Fcm2InformFcmguid, 0, 0, 0, 0, 0, 0, 0, 1, 0xFF, 0xFF],
+            [(byte)MessageId.Fcm2UpdateMinTotalConnectionCount, 0xFF, 0xFF, 0xFF],
+        ];
+        foreach (var message in truncated)
+            newer.Send(message, older.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal(count, olderMesh.TotalConnectionCount);
+        Assert.Equal(order, olderMesh.GetHostOrder());
+        Assert.Equal([newer.RakNetGuid], olderMesh.GetParticipantList());
+        Assert.Equal(older.RakNetGuid, olderMesh.ConnectedHost);
+        Assert.DoesNotContain(_mesh.Seen(older), e => Internal.Contains(e.Id));
+    }
+
+    [Fact]
+    public void A_truncated_remote_connection_list_connects_only_to_complete_entries()
+    {
+        var (peer, _) = AddSystem();
+        var (sender, _) = AddSystem();
+        var (target, _) = AddSystem();
+        _mesh.Connect(sender, peer);
+        _mesh.Settle();
+
+        var buffer = new byte[64];
+        var writer = new BitStreamWriter(buffer);
+        writer.WriteByte((byte)MessageId.RemoteNewIncomingConnection);
+        writer.WriteUInt32(1);
+        writer.WriteAddress(target.Sockets[0].LocalAddress);
+        var cutMidAddress = writer.Written[..8].ToArray();
+        sender.Send(new byte[] { (byte)MessageId.RemoteNewIncomingConnection, 0, 0 }, peer.RakNetGuid, Reliability.ReliableOrdered);
+        sender.Send(cutMidAddress, peer.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal([sender.RakNetGuid], peer.Connections.Select(c => c.RakNetGuid));
+
+        // A count far past the one entry that follows: the entry is connected to and the list ends with the message.
+        writer = new BitStreamWriter(buffer);
+        writer.WriteByte((byte)MessageId.RemoteNewIncomingConnection);
+        writer.WriteUInt32(uint.MaxValue);
+        writer.WriteAddress(target.Sockets[0].LocalAddress);
+        writer.WriteRakNetGuid(target.RakNetGuid);
+        sender.Send(writer.Written.ToArray(), peer.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal(new[] { sender.RakNetGuid, target.RakNetGuid }.Order(), peer.Connections.Select(c => c.RakNetGuid).Order());
+    }
+
+    [Fact]
+    public void A_truncated_verified_join_start_is_consumed_and_starts_no_join()
+    {
+        var (host, _, member, _) = AddMesh();
+        var (client, clientMesh) = AddSystem(autoParticipate: false, connectOnNew: false);
+        _mesh.Connect(client, host);
+        _mesh.Settle();
+
+        var listCountPastEntries = StartBytes(host, (member, [1, 2]));
+        listCountPastEntries[2] = 2;
+        // The entry's bit count (after ID, count, GUID and address) says 64 bits; one byte follows.
+        var bitCountPastEnd = StartBytes(host, (member, [0xAA]));
+        BinaryPrimitives.WriteUInt32BigEndian(bitCountPastEnd.AsSpan(1 + 2 + 8 + 7), 64);
+        byte[][] truncated =
+        [
+            [(byte)MessageId.Fcm2VerifiedJoinStart],
+            [(byte)MessageId.Fcm2VerifiedJoinStart, 0],
+            StartBytes(host, (member, [1, 2]))[..10],
+            listCountPastEntries,
+            bitCountPastEnd,
+        ];
+        foreach (var message in truncated)
+            host.Send(message, client.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.DoesNotContain(_mesh.Seen(client), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinStart);
+        Assert.Empty(clientMesh.GetVerifiedJoinRequiredProcessingList(host.RakNetGuid));
+        Assert.DoesNotContain(_mesh.Seen(host), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinCapable);
+        Assert.Equal([host.RakNetGuid], client.Connections.Select(c => c.RakNetGuid));
+    }
+
+    [Fact]
+    public void A_truncated_update_to_a_verified_join_leaves_it_as_it_was()
+    {
+        var (host, _, member, _) = AddMesh();
+        var (client, clientMesh) = AddSystem(autoParticipate: false, connectOnNew: false);
+        _mesh.Connect(client, host);
+        host.Send(StartBytes(host, (member, [])), client.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+        var required = Assert.Single(clientMesh.GetVerifiedJoinRequiredProcessingList(host.RakNetGuid));
+
+        // An update listing two systems, only the first of which follows: applied, it would add that system and mark the
+        // member unnecessary.
+        var buffer = new byte[64];
+        var writer = new BitStreamWriter(buffer);
+        writer.WriteByte((byte)MessageId.Fcm2VerifiedJoinStart);
+        writer.WriteUInt16(2);
+        writer.WriteRakNetGuid(new RakNetGuid(0x77));
+        writer.WriteAddress(member.Sockets[0].LocalAddress);
+        writer.WriteUInt32(0);
+        host.Send(writer.Written.ToArray(), client.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal([required], clientMesh.GetVerifiedJoinRequiredProcessingList(host.RakNetGuid));
+        Assert.Single(_mesh.Seen(client), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinStart);
+        Assert.DoesNotContain(_mesh.Seen(host), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinCapable);
+    }
+
+    [Fact]
+    public void A_truncated_verified_join_capable_is_consumed_without_an_answer()
+    {
+        var (host, hostMesh, member, _) = AddMesh();
+        var (client, _) = AddSystem(autoParticipate: false, connectOnNew: false);
+        _mesh.Connect(client, host);
+        _mesh.Settle();
+
+        byte[][] truncated =
+        [
+            [(byte)MessageId.Fcm2VerifiedJoinCapable],
+            [(byte)MessageId.Fcm2VerifiedJoinCapable, 0],
+            // One member listed, cut in its GUID.
+            [(byte)MessageId.Fcm2VerifiedJoinCapable, 0, 1, .. BitConverter.GetBytes(member.RakNetGuid.Value)[..3]],
+        ];
+        foreach (var message in truncated)
+            client.Send(message, host.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.DoesNotContain(_mesh.Seen(host), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinCapable);
+        byte[] answers = [(byte)MessageId.Fcm2VerifiedJoinStart, (byte)MessageId.Fcm2VerifiedJoinFailed, (byte)MessageId.Fcm2VerifiedJoinAccepted, (byte)MessageId.Fcm2VerifiedJoinRejected];
+        Assert.DoesNotContain(_mesh.Seen(client), e => answers.Contains(e.Id));
+        Assert.Equal([member.RakNetGuid], hostMesh.GetParticipantList());
+    }
+
+    [Fact]
+    public void A_truncated_verified_join_accepted_reaches_the_application_and_changes_nothing()
+    {
+        var (host, hostMesh, member, _) = AddMesh();
+        var (client, clientMesh) = AddSystem(autoParticipate: false, connectOnNew: false);
+        _mesh.Connect(client, host);
+        hostMesh.StartVerifiedJoin(client.RakNetGuid);
+        _mesh.Settle();
+        client.Connect(member.Sockets[0].LocalAddress);
+        _mesh.Settle();
+        var capable = Assert.Single(_mesh.Seen(host), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinCapable);
+
+        // This system accepted, the member listed as a system to disconnect from, then the reached list cut short.
+        var cut = AcceptedBytes(client, [member], [], [])[..^2];
+        host.Send(cut, client.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Single(_mesh.Seen(client), e => e.Id == (byte)MessageId.Fcm2VerifiedJoinAccepted);
+        Assert.Equal(2, client.ConnectionCount);
+        Assert.Empty(clientMesh.GetParticipantList());
+
+        // The join is still in progress: a real acceptance completes it.
+        hostMesh.RespondOnVerifiedJoinCapable(capable.Data, capable.Address, capable.RakNetGuid, accept: true);
+        _mesh.Settle();
+
+        Assert.Equal(new[] { host.RakNetGuid, member.RakNetGuid }.Order(), clientMesh.GetParticipantList().Order());
+    }
+
     private (RakPeer Peer, Plugins.FullyConnectedMesh2 Mesh) AddSystem(bool withGraph = false, bool autoParticipate = true, bool connectOnNew = true)
     {
         var mesh = new Plugins.FullyConnectedMesh2 { AutoParticipateConnections = autoParticipate, ConnectOnNewRemoteConnection = connectOnNew };

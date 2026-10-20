@@ -23,7 +23,9 @@ public readonly record struct ConnectionGraphConnection(SystemAddress Address, R
 /// </para>
 /// <para>
 /// Remote systems and their connection lists are kept in GUID order, as RakNet's ordered lists keep them. A message from a
-/// system that is not a participant is ignored, as is a truncated one, where RakNet would read uninitialised values.
+/// system that is not a participant is ignored, as is a truncated one, where RakNet would read uninitialised values; a
+/// truncated list adds none of its entries. As in RakNet, a participant can grow its connection list without limit by
+/// announcing new systems: the list is dropped only when the connection to that participant closes.
 /// RakNet's quirk in <see cref="GetLowestAveragePingSystem"/> is kept: the starting value is the ping to the last remote
 /// system divided by the number of remote systems with a ping (ConnectionGraph2.cpp:116-133).
 /// </para>
@@ -256,13 +258,17 @@ public sealed class ConnectionGraph2 : IRakPlugin
             reader.IgnoreBytes(1);
             if (!reader.TryReadUInt32(out var count))
                 return;
+            // Every entry is read before any is added, so a truncated list adds nothing.
+            var entries = new List<ConnectionGraphConnection>();
             for (var i = 0u; i < count; i++)
             {
                 if (!reader.TryReadSystemAddress(out var address) || !reader.TryReadRakNetGuid(out var guid) || !reader.TryReadUInt16(out var ping))
                     return;
-                // ConnectionGraph2.cpp:296-298: a system already listed keeps its first entry.
-                list.TryAdd(guid, new ConnectionGraphConnection(address, guid, ping));
+                entries.Add(new ConnectionGraphConnection(address, guid, ping));
             }
+            // ConnectionGraph2.cpp:296-298: a system already listed keeps its first entry.
+            foreach (var entry in entries)
+                list.TryAdd(entry.RakNetGuid, entry);
         }
     }
 

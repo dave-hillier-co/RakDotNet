@@ -390,6 +390,55 @@ public sealed class TeamManagerTests : IDisposable
         Assert.Equal(1, small.MemberLimit);
     }
 
+    [Fact]
+    public void A_truncated_message_changes_no_member()
+    {
+        var (host, second, _) = FormLobby();
+        var member = Id(second.User.NetworkId);
+        var team = Id(PlayerTeam1);
+
+        // ID_TEAM_BALANCER_INTERNAL: operation, world, then the operation's fields; 4 is
+        // ID_RUN_UpdateTeamsRequestedToNoneAndAddTeam (member, team).
+        byte[][] consumed =
+        [
+            [(byte)MessageId.TeamBalancerInternal],
+            [(byte)MessageId.TeamBalancerInternal, 4],
+            [(byte)MessageId.TeamBalancerInternal, 4, 0, .. member, .. team[..4]],
+            [(byte)MessageId.TeamBalancerTeamRequestedCancelled],
+            [(byte)MessageId.TeamBalancerTeamRequestedCancelled, 0, .. member[..3]],
+        ];
+        // ID_TEAM_BALANCER_TEAM_ASSIGNED: world, member, a team count past the teams that follow; then cut in the member.
+        byte[][] passedOn =
+        [
+            [(byte)MessageId.TeamBalancerTeamAssigned, 0, .. member, 0, 2, .. team],
+            [(byte)MessageId.TeamBalancerTeamAssigned, 0, .. member[..5]],
+        ];
+        foreach (var message in consumed.Concat(passedOn))
+            host.Peer.Send(message, second.Peer.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal(0, second.User.CurrentTeamCount);
+        Assert.Equal(0, second.Teams[0].TeamMembersCount);
+        var seen = _mesh.Seen(second.Peer);
+        Assert.DoesNotContain(seen, e => e.Id is (byte)MessageId.TeamBalancerInternal or (byte)MessageId.TeamBalancerTeamRequestedCancelled);
+        Assert.Equal(passedOn.Length, seen.Count(e => e.Id == (byte)MessageId.TeamBalancerTeamAssigned));
+    }
+
+    [Fact]
+    public void A_repeated_add_to_a_team_the_member_is_on_does_not_add_it_again()
+    {
+        var (host, second, _) = FormLobby();
+
+        // ID_RUN_UpdateTeamsRequestedToNoneAndAddTeam (operation 4) for the same member and team, twice.
+        byte[] add = [(byte)MessageId.TeamBalancerInternal, 4, 0, .. Id(second.User.NetworkId), .. Id(PlayerTeam1)];
+        host.Peer.Send(add, second.Peer.RakNetGuid, Reliability.ReliableOrdered);
+        host.Peer.Send(add, second.Peer.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal([second.Teams[0]], second.User.GetCurrentTeams());
+        Assert.Equal([second.User], second.Teams[0].GetTeamMembers());
+    }
+
     private (Lobby Host, Lobby Second, Lobby Third) FormLobby()
     {
         var host = AddLobby();

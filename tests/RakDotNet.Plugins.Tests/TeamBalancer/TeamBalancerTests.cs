@@ -179,6 +179,53 @@ public sealed class TeamBalancerTests : IDisposable
         Assert.Equal(host.Peer.RakNetGuid, clients[0].Balancer.HostGuid);
     }
 
+    [Fact]
+    public void A_truncated_internal_message_is_consumed_and_adds_no_member()
+    {
+        var (host, clients) = FormGroup(limits: [1, 1]);
+
+        // TeamBalancerOperations: 0 status update to a new host, 2 any team, 3 a specific team. Each would put member 9 on
+        // team 0 if it were read.
+        byte[][] truncated =
+        [
+            [(byte)MessageId.TeamBalancerInternal],
+            [(byte)MessageId.TeamBalancerInternal, 0],
+            // Two members listed, the first complete, the second cut in its NetworkID.
+            [(byte)MessageId.TeamBalancerInternal, 0, 2, .. Id(9), 0, NoTeam, 0, 0, 0],
+            [(byte)MessageId.TeamBalancerInternal, 2, .. Id(9)[..7]],
+            [(byte)MessageId.TeamBalancerInternal, 3, .. Id(9)],
+        ];
+        foreach (var message in truncated)
+            clients[0].Peer.Send(message, host.Peer.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        // Team 0 still has room.
+        clients[1].Balancer.RequestSpecificTeam(2, 0);
+        RunUntilTeam(clients[1].Balancer, 2, 0);
+        Assert.DoesNotContain(_mesh.Seen(host.Peer), e => e.Id == (byte)MessageId.TeamBalancerInternal);
+        Assert.DoesNotContain(_mesh.Seen(clients[0].Peer), e => e.Id == (byte)MessageId.TeamBalancerTeamAssigned);
+    }
+
+    [Fact]
+    public void A_truncated_assignment_from_the_host_is_consumed()
+    {
+        var (host, clients) = FormGroup(limits: [2, 2]);
+        clients[0].Balancer.RequestAnyTeam(1);
+        RunUntilTeam(clients[0].Balancer, 1, 0);
+
+        byte[][] truncated =
+        [
+            [(byte)MessageId.TeamBalancerTeamAssigned],
+            [(byte)MessageId.TeamBalancerTeamAssigned, 1, .. Id(1)[..7]],
+        ];
+        foreach (var message in truncated)
+            host.Peer.Send(message, clients[0].Peer.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.Equal(0, clients[0].Balancer.GetMyTeam(1));
+        Assert.Single(_mesh.Seen(clients[0].Peer), e => e.Id == (byte)MessageId.TeamBalancerTeamAssigned);
+    }
+
     // The oldest system is host by FullyConnectedMesh2; the others connect to it. Limits are set on every system, as
     // the header advises in case one becomes host.
     private ((RakPeer Peer, Plugins.TeamBalancer Balancer) Host, List<(RakPeer Peer, Plugins.TeamBalancer Balancer)> Clients) FormGroup(ushort[] limits)

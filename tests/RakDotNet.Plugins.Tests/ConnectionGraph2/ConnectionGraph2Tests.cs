@@ -169,6 +169,49 @@ public sealed class ConnectionGraph2Tests : IDisposable
         Assert.Equal(_first.RakNetGuid, _firstGraph.GetLowestAveragePingSystem());
     }
 
+    [Fact]
+    public void A_truncated_message_from_a_participant_reaches_the_application_and_changes_nothing()
+    {
+        _mesh.Connect(_first, _server);
+        _mesh.Connect(_second, _server);
+        _mesh.Settle();
+        Assert.True(_firstGraph.TryGetConnectionList(_server.RakNetGuid, out var before));
+        var stranger = new RakNetGuid(0x77);
+
+        // Three systems listed, one complete and the next cut in its GUID.
+        var buffer = new byte[64];
+        var writer = new BitStreamWriter(buffer);
+        writer.WriteByte((byte)MessageId.RemoteNewIncomingConnection);
+        writer.WriteUInt32(3);
+        writer.WriteAddress(AddressAtServer(_second));
+        writer.WriteRakNetGuid(stranger);
+        writer.WriteUInt16(5);
+        writer.WriteAddress(AddressAtServer(_second));
+        writer.WriteByte(0);
+        var removal = AddressAndGuid(MessageId.RemoteDisconnectionNotification, AddressAtServer(_second), _second.RakNetGuid);
+        var lost = AddressAndGuid(MessageId.RemoteConnectionLost, AddressAtServer(_second), _second.RakNetGuid);
+        byte[][] truncated =
+        [
+            [(byte)MessageId.RemoteNewIncomingConnection],
+            [(byte)MessageId.RemoteNewIncomingConnection, 0, 0],
+            writer.Written.ToArray(),
+            [(byte)MessageId.RemoteDisconnectionNotification],
+            removal[..^1],
+            lost[..5],
+        ];
+        foreach (var message in truncated)
+            _server.Send(message, _first.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.Settle();
+
+        Assert.True(_firstGraph.TryGetConnectionList(_server.RakNetGuid, out var after));
+        Assert.Equal(before, after);
+        Assert.False(_firstGraph.ConnectionExists(_server.RakNetGuid, stranger));
+        // ConnectionGraph2.cpp:258-306: every message continues to the application.
+        Assert.Equal(1 + 3, RemoteMessages(_first).Count);
+        Assert.Equal(2, _mesh.Seen(_first).Count(e => e.Id == (byte)MessageId.RemoteDisconnectionNotification));
+        Assert.Single(_mesh.Seen(_first), e => e.Id == (byte)MessageId.RemoteConnectionLost);
+    }
+
     private List<SeenEvent> RemoteMessages(RakPeer peer) =>
         [.. _mesh.Seen(peer).Where(e => e.Id == (byte)MessageId.RemoteNewIncomingConnection)];
 

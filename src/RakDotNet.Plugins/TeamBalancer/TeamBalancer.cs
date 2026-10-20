@@ -32,8 +32,9 @@ public enum DefaultAssignmentAlgorithm
 /// and requests, so set the team size limits on every system that may become host. RakNet's behaviour is kept where it
 /// surprises: team numbers are checked against the limits with &gt; rather than &gt;=; a status update stops at the first
 /// member with neither a team nor a request; members moved to even teams or to a freed slot are picked at random; and a
-/// member removed from the host's list is replaced by the last. Deliberate difference: a team number past the limits, which
-/// RakNet would read beyond its lists for, is treated as full or ignored.
+/// member removed from the host's list is replaced by the last. Deliberate differences: a team number past the limits, which
+/// RakNet would read beyond its lists for, is treated as full or ignored; and a truncated message, where RakNet would read
+/// uninitialised values, is ignored, none of its members applied.
 /// </para>
 /// <para>Members may be called from any thread; hooks run on the dispatch step.</para>
 /// </remarks>
@@ -132,7 +133,7 @@ public sealed class TeamBalancer : IRakPlugin
             _lockTeams = lockTeams;
             if (_lockTeams)
                 return;
-            // TeamBalancer.cpp:80-97: TeamId loop counters, so members past 255 wrap as RakNet's do not reach them.
+            // TeamBalancer.cpp:80-97: RakNet's TeamId counters wrap and never end past 255 members; int counters here.
             for (var i = 0; i < _teamMembers.Count; i++)
             {
                 if (_teamMembers[i].RequestedTeam == UnassignedTeamId)
@@ -385,10 +386,17 @@ public sealed class TeamBalancer : IRakPlugin
     {
         if (!reader.TryReadByte(out var count))
             return;
+        // Every entry is read before any is applied, so a truncated update adds nothing.
+        var entries = new (ulong MemberId, byte CurrentTeam, byte RequestedTeam)[count];
         for (var i = 0; i < count; i++)
         {
-            if (!reader.TryReadUInt64(out var memberId) || !reader.TryReadByte(out var currentTeam) || !reader.TryReadByte(out var requestedTeam))
+            if (!reader.TryReadUInt64(out var id) || !reader.TryReadByte(out var current) || !reader.TryReadByte(out var requested))
                 return;
+            entries[i] = (id, current, requested);
+        }
+        foreach (var (memberId, team, requestedTeam) in entries)
+        {
+            var currentTeam = team;
             if (currentTeam != UnassignedTeamId && currentTeam > _teamLimits.Count)
                 return;
             if (requestedTeam != UnassignedTeamId && requestedTeam > _teamLimits.Count)

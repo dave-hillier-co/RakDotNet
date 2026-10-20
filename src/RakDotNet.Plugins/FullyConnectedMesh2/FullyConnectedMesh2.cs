@@ -68,7 +68,16 @@ public sealed record VerifiedJoinAccepted(bool ThisSystemAccepted, IReadOnlyList
 /// system listed, and a misread address leaves the previous one in place (FullyConnectedMesh2.cpp:757-773); the
 /// participant list removes by moving the last entry into the hole; and <see cref="GetHostOrder"/> drops participants
 /// whose FCM2 GUID another already has. A truncated message is ignored, where RakNet would read uninitialised or zero
-/// values, and the remote-connection list stops at the end of its message.
+/// values: none of it is applied, a truncated ID_FCM2_VERIFIED_JOIN_START or _CAPABLE is consumed, and a truncated
+/// ID_FCM2_VERIFIED_JOIN_ACCEPTED still reaches the application. The remote-connection list stops at the end of its
+/// message, connecting to the entries before it.
+/// </para>
+/// <para>
+/// As in RakNet, any connected system can start a verified join on this one and grow it without limit: each further
+/// ID_FCM2_VERIFIED_JOIN_START from that system adds the systems it lists that the join does not have, the join never
+/// drops members it marks <see cref="VerifiedJoinState.Unnecessary"/>, and each update may be answered with an
+/// ID_FCM2_VERIFIED_JOIN_CAPABLE listing every member. The join lasts until it is accepted, rejected or failed, or the
+/// connection to that system closes.
 /// </para>
 /// <para>Members may be called from any thread; hooks run on the dispatch step.</para>
 /// </remarks>
@@ -755,7 +764,7 @@ public sealed class FullyConnectedMesh2 : IRakPlugin
     {
         reader.IgnoreBytes(1);
         if (!reader.TryReadUInt16(out var listSize))
-            return PluginResult.Continue;
+            return PluginResult.Consume;
         var listed = new List<JoinMember>(listSize);
         for (var i = 0; i < listSize; i++)
         {
@@ -859,25 +868,18 @@ public sealed class FullyConnectedMesh2 : IRakPlugin
             var join = FindJoin(sender);
             if (join is null)
                 return;
-            if (!reader.TryReadUInt16(out var listSize))
+            // Both lists are read before either is acted on, so a truncated message changes nothing.
+            if (!TryReadGuidList(ref reader, out var notParticipating) || !TryReadGuidList(ref reader, out var reached))
                 return;
-            for (var i = 0; i < listSize; i++)
+            // The systems that are not participants.
+            foreach (var guid in notParticipating)
             {
-                // The systems that are not participants.
-                if (!reader.TryReadRakNetGuid(out var guid))
-                    return;
                 if (guid.IsAssigned)
                     peer.Close(guid, notify: true);
             }
-            if (!reader.TryReadUInt16(out listSize))
-                return;
-            for (var i = 0; i < listSize; i++)
-            {
-                // The participants this system reached.
-                if (!reader.TryReadRakNetGuid(out var guid))
-                    return;
+            // The participants this system reached.
+            foreach (var guid in reached)
                 AddParticipant(guid);
-            }
             AddParticipant(sender);
             _joinsInProgress.Remove(join);
         }
@@ -886,6 +888,21 @@ public sealed class FullyConnectedMesh2 : IRakPlugin
             // Another system joined.
             AddParticipant(systemToAdd);
         }
+    }
+
+    // A 16-bit count, then that many GUIDs. False when truncated.
+    private static bool TryReadGuidList(ref BitStreamReader reader, out List<RakNetGuid> guids)
+    {
+        guids = [];
+        if (!reader.TryReadUInt16(out var count))
+            return false;
+        for (var i = 0; i < count; i++)
+        {
+            if (!reader.TryReadRakNetGuid(out var guid))
+                return false;
+            guids.Add(guid);
+        }
+        return true;
     }
 
     // AddParticipantInternal (FullyConnectedMesh2.cpp:122-157): true when the system was not a participant.
