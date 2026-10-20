@@ -8,6 +8,7 @@
 #include "KeyGeneration.h"
 #include "PluginCommands.h"
 #include "SecurityCommands.h"
+#include "ServiceCommands.h"
 #include "TcpCommands.h"
 
 #include "GetTime.h"
@@ -330,6 +331,9 @@ namespace
             else if (console_.Dispatch(cmd, command, result))
             {
             }
+            else if (services_.Dispatch(cmd, command, result))
+            {
+            }
             else if (cmd == "shutdown")
             {
                 Shutdown(command);
@@ -617,6 +621,7 @@ namespace
         interop::PluginCommands plugins_;
         interop::TcpCommands tcp_;
         interop::ConsoleCommands console_;
+        interop::ServiceCommands services_;
     };
 }
 
