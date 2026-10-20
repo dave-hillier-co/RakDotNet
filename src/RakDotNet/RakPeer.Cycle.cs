@@ -130,7 +130,9 @@ public sealed partial class RakPeer
         _wake = new ManualResetEventSlim(false);
         foreach (var transport in _transports)
             transport.SetReadySignal(Wake);
-        _updateTimer = _time.CreateTimer(static state => ((RakPeer)state!).Wake(), this, UpdateInterval, UpdateInterval);
+        // Re-armed by every cycle, so a cycle follows the previous one by UpdateInterval unless something wakes the loop
+        // sooner: RakNet's quitAndDataEvents.WaitOnEvent(10) after each RunUpdateCycle (RakPeer.cpp:6357-6358).
+        _updateTimer = _time.CreateTimer(static state => ((RakPeer)state!).Wake(), this, UpdateInterval, Timeout.InfiniteTimeSpan);
         _loop = new Thread(LoopMain) { IsBackground = true, Name = "RakDotNet I/O" };
         try
         {
@@ -206,6 +208,9 @@ public sealed partial class RakPeer
                 return;
             var nowUs = NowUs;
             DrainCommands(nowUs);
+            // Read again: applying a burst of sends can take long enough that datagrams framed below would carry a stale
+            // send time, and their RTT samples and retransmission timers would run early.
+            nowUs = NowUs;
             if (_receivePaused && _queue.Count < _eventCapacity / 2)
                 _receivePaused = false;
             ReceiveDatagrams(nowUs);
@@ -214,6 +219,9 @@ public sealed partial class RakPeer
             ProcessCoreEvents(nowUs);
             PollConnections(nowUs);
             _activeSystemCount = _core.ActiveSystemCount;
+            // Before the observers, so the next timed cycle is already set when they learn this one ran. Stop sets
+            // Stopped under this lock before it disposes the timer, so the timer is not disposed here.
+            _updateTimer?.Change(UpdateInterval, Timeout.InfiniteTimeSpan);
             foreach (var observer in _lowLevel.Observers.Current)
                 observer.OnUpdateCycle();
             foreach (var observer in _plugins.Observers)

@@ -78,7 +78,7 @@ public class PingAndTimestampTests
         // RakPeer.cpp:6086-6091: after queuing ID_CONNECTED_PONG RakNet sets quitAndDataEvents, "so the ping goes out right
         // away" rather than on the next update tick. Here the clock runs but the update ticks come only from the test:
         // every 50 ms while connecting, so the handshake's round trip spans ticks, and none once connected, so only that
-        // wake can send the pong.
+        // wake can send the pong. Nothing else in this test arms a timer.
         var time = new HandTickedTimeProvider();
         using var server = RakPeer.Start(Options(time, maxIncoming: 4) with { Threading = PeerThreading.Background });
         using var client = RakPeer.Start(Options(time, maxIncoming: 0) with { Threading = PeerThreading.Background });
@@ -107,14 +107,16 @@ public class PingAndTimestampTests
         Assert.True(connection.LowestPing < handshake, "No pong arrived.");
     }
 
-    // The system clock, with periodic timers that fire only when Tick is called; one-shot timers never fire.
+    // The system clock, with timers that fire only when Tick is called: each armed timer fires once per tick, and a
+    // one-shot timer is disarmed by firing until it is changed again, as the update timer is after every cycle.
     private sealed class HandTickedTimeProvider : TimeProvider
     {
         private readonly List<HandTickedTimer> _timers = [];
 
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
-            var timer = new HandTickedTimer(callback, state, period != Timeout.InfiniteTimeSpan);
+            var timer = new HandTickedTimer(callback, state);
+            timer.Change(dueTime, period);
             lock (_timers)
                 _timers.Add(timer);
             return timer;
@@ -130,27 +132,38 @@ public class PingAndTimestampTests
         }
     }
 
-    private sealed class HandTickedTimer(TimerCallback callback, object? state, bool periodic) : ITimer
+    private sealed class HandTickedTimer(TimerCallback callback, object? state) : ITimer
     {
-        private volatile bool _stopped = !periodic;
+        private readonly Lock _gate = new();
+        private bool _armed;
+        private bool _periodic;
 
         public void Fire()
         {
-            if (!_stopped)
-                callback(state);
+            lock (_gate)
+            {
+                if (!_armed)
+                    return;
+                _armed = _periodic;
+            }
+            callback(state);
         }
 
         public bool Change(TimeSpan dueTime, TimeSpan period)
         {
-            _stopped = period == Timeout.InfiniteTimeSpan;
+            lock (_gate)
+            {
+                _armed = dueTime != Timeout.InfiniteTimeSpan;
+                _periodic = period != Timeout.InfiniteTimeSpan;
+            }
             return true;
         }
 
-        public void Dispose() => _stopped = true;
+        public void Dispose() => Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
 
         public ValueTask DisposeAsync()
         {
-            _stopped = true;
+            Dispose();
             return ValueTask.CompletedTask;
         }
     }
