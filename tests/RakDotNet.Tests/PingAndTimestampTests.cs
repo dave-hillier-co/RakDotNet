@@ -42,47 +42,202 @@ public class PingAndTimestampTests
     }
 
     [Fact]
+    public void Ping_takes_a_send_receipt_number()
+    {
+        using var peers = new ManualPeers();
+        var server = peers.Connect();
+        var before = peers.Client.PeekNextReceipt();
+
+        server.Ping();
+
+        // Ping goes through Send, which calls IncrementNextSendReceipt (RakPeer.cpp:2073-2076, 4103-4115, 1326-1330).
+        Assert.Equal(before.Value + 1, peers.Client.PeekNextReceipt().Value);
+    }
+
+    [Fact]
+    public async Task Ping_during_shutdown_takes_no_receipt_number()
+    {
+        using var peers = new ManualPeers();
+        var server = peers.Connect();
+        var shutdown = peers.Client.ShutdownAsync(TimeSpan.FromSeconds(1), cancellationToken: TestContext.Current.CancellationToken);
+        var before = peers.Client.PeekNextReceipt();
+
+        server.Ping();
+        var after = peers.Client.PeekNextReceipt();
+        peers.Time.Advance(TimeSpan.FromSeconds(2));
+        await shutdown;
+
+        // PingInternal returns while the peer is not active (RakPeer.cpp:4105-4106), and Send returns before
+        // IncrementNextSendReceipt once endThreads is set (RakPeer.cpp:1371-1372).
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
     public void An_ID_TIMESTAMP_message_arrives_in_the_receivers_clock()
     {
-        var time = new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero));
-        using var server = RakPeer.Start(Options(time, maxIncoming: 4));
-        time.Advance(TimeSpan.FromSeconds(5));
-        using var client = RakPeer.Start(Options(time, maxIncoming: 0));
-        var serverEvents = new List<SeenEvent>();
-        var clientEvents = new List<SeenEvent>();
-        var timestamps = new List<ulong>();
-        void Step()
-        {
-            time.Advance(TimeSpan.FromMilliseconds(1));
-            server.Update();
-            ManualPeers.Drain(server, serverEvents);
-            client.Update();
-            while (client.Events.TryRead(out var e))
-            {
-                if (e.HasTimestamp)
-                    timestamps.Add(e.Timestamp);
-                clientEvents.Add(SeenEvent.From(e));
-            }
-        }
+        using var clocks = new SkewedPeers();
+        var connection = clocks.Connect();
 
-        client.Connect(server.Sockets[0].LocalAddress);
-        for (var i = 0; i < 200 && !serverEvents.Any(e => e.Kind == PeerEventKind.Connected); i++)
-            Step();
-        var connection = serverEvents.Single(e => e.Kind == PeerEventKind.Connected).Connection!;
-
-        // The server started 5 s before the client, so its clock reads 5 s more.
+        // The server's clock reads 5 s more.
         Assert.InRange(connection.ClockDifferential, -5_010, -4_990);
         var message = new byte[1 + 8 + 1];
         message[0] = (byte)MessageId.Timestamp;
-        BinaryPrimitives.WriteUInt64BigEndian(message.AsSpan(1), server.GetTime());
+        BinaryPrimitives.WriteUInt64BigEndian(message.AsSpan(1), clocks.Server.GetTime());
         message[9] = (byte)MessageId.UserPacketEnum;
         connection.Send(message, Reliability.ReliableOrdered);
-        for (var i = 0; i < 50 && timestamps.Count == 0; i++)
-            Step();
+        for (var i = 0; i < 50 && clocks.Timestamps.Count == 0; i++)
+            clocks.Step();
 
         // Shifted once, by the sender's clock differential.
-        var received = Assert.Single(timestamps);
-        Assert.InRange((long)client.GetTime() - (long)received, 0, 20);
+        var received = Assert.Single(clocks.Timestamps);
+        Assert.InRange((long)clocks.Client.GetTime() - (long)received, 0, 20);
+    }
+
+    [Fact]
+    public void An_injected_ID_TIMESTAMP_packet_is_shifted_when_it_is_read()
+    {
+        using var clocks = new SkewedPeers();
+        var server = clocks.ClientSideConnection();
+        var differential = clocks.Client.TryGetConnection(server, out var connection) ? connection.ClockDifferential : 0;
+        Assert.NotEqual(0, differential);
+        var message = new byte[1 + 8 + 1];
+        message[0] = (byte)MessageId.Timestamp;
+        BinaryPrimitives.WriteUInt64BigEndian(message.AsSpan(1), 1_000_000);
+        message[9] = (byte)MessageId.UserPacketEnum;
+
+        clocks.Client.Inject(message, server, RakNetGuid.Unassigned);
+
+        // RakPeer::Receive shifts every ID_TIMESTAMP packet it pops, PushBackPacket ones included, by the clock
+        // differential of the active system at the packet's address (RakPeer.cpp:1548-1555, 3773-3799).
+        Assert.True(clocks.Client.Events.TryRead(out var e));
+        Assert.Equal((ulong)(1_000_000 - differential), e.Timestamp);
+    }
+
+    [Fact]
+    public void A_timestamp_read_after_its_senders_connection_ended_is_not_shifted()
+    {
+        using var clocks = new SkewedPeers();
+        var server = clocks.ClientSideConnection();
+        var message = new byte[1 + 8 + 1];
+        message[0] = (byte)MessageId.Timestamp;
+        BinaryPrimitives.WriteUInt64BigEndian(message.AsSpan(1), 1_000_000);
+        message[9] = (byte)MessageId.UserPacketEnum;
+        clocks.Client.Inject(message, server, RakNetGuid.Unassigned);
+
+        clocks.Client.Close(server, notify: false);
+        clocks.Client.Update();
+
+        // GetBestClockDifferential looks up only active systems (RakPeer.cpp:3793), and the shift happens at the read.
+        var timestamps = new List<ulong>();
+        while (clocks.Client.Events.TryRead(out var e))
+        {
+            if (e.HasTimestamp)
+                timestamps.Add(e.Timestamp);
+        }
+        Assert.Equal([1_000_000UL], timestamps);
+    }
+
+    [Fact]
+    public void A_received_timestamp_left_unread_until_its_senders_connection_ended_is_not_shifted()
+    {
+        using var clocks = new SkewedPeers();
+        var server = clocks.ClientSideConnection();
+        var sent = clocks.Server.GetTime();
+        var message = new byte[1 + 8 + 1];
+        message[0] = (byte)MessageId.Timestamp;
+        BinaryPrimitives.WriteUInt64BigEndian(message.AsSpan(1), sent);
+        message[9] = (byte)MessageId.UserPacketEnum;
+        Assert.True(clocks.Server.TryGetConnection(clocks.Client.RakNetGuid, out var toClient));
+        toClient.Send(message, Reliability.ReliableOrdered);
+        clocks.StepLeavingClientEventsUnread(50);
+
+        clocks.Client.Close(server, notify: false);
+        clocks.Client.Update();
+
+        // The packet waits in the queue unshifted; Receive shifts it only if its sender is still an active system when
+        // it is read (RakPeer.cpp:1548-1555, 3793).
+        var timestamps = new List<ulong>();
+        while (clocks.Client.Events.TryRead(out var e))
+        {
+            if (e.HasTimestamp)
+                timestamps.Add(e.Timestamp);
+        }
+        Assert.Equal([sent], timestamps);
+    }
+
+    /// <summary>Two Manual-mode peers on separate fake clocks, the server's 5 s ahead, as two processes would be.</summary>
+    private sealed class SkewedPeers : IDisposable
+    {
+        private readonly FakeTimeProvider _serverTime = new(new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero));
+        private readonly FakeTimeProvider _clientTime = new(new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero));
+        private readonly List<SeenEvent> _serverEvents = [];
+        private readonly List<SeenEvent> _clientEvents = [];
+
+        public SkewedPeers()
+        {
+            Server = RakPeer.Start(Options(_serverTime, maxIncoming: 4));
+            _serverTime.Advance(TimeSpan.FromSeconds(5));
+            Client = RakPeer.Start(Options(_clientTime, maxIncoming: 0));
+        }
+
+        public RakPeer Server { get; }
+
+        public RakPeer Client { get; }
+
+        public List<ulong> Timestamps { get; } = [];
+
+        public void Step()
+        {
+            _serverTime.Advance(TimeSpan.FromMilliseconds(1));
+            _clientTime.Advance(TimeSpan.FromMilliseconds(1));
+            Server.Update();
+            ManualPeers.Drain(Server, _serverEvents);
+            Client.Update();
+            while (Client.Events.TryRead(out var e))
+            {
+                if (e.HasTimestamp)
+                    Timestamps.Add(e.Timestamp);
+                _clientEvents.Add(SeenEvent.From(e));
+            }
+        }
+
+        /// <summary>Steps both peers without reading the client's events.</summary>
+        public void StepLeavingClientEventsUnread(int steps)
+        {
+            for (var i = 0; i < steps; i++)
+            {
+                _serverTime.Advance(TimeSpan.FromMilliseconds(1));
+                _clientTime.Advance(TimeSpan.FromMilliseconds(1));
+                Server.Update();
+                ManualPeers.Drain(Server, _serverEvents);
+                Client.Update();
+                Thread.Sleep(1);
+            }
+        }
+
+        /// <summary>Connects and returns the server's connection to the client.</summary>
+        public RakConnection Connect()
+        {
+            Client.Connect(Server.Sockets[0].LocalAddress);
+            for (var i = 0; i < 200 && !_serverEvents.Any(e => e.Kind == PeerEventKind.Connected); i++)
+                Step();
+            return _serverEvents.Single(e => e.Kind == PeerEventKind.Connected).Connection!;
+        }
+
+        /// <summary>Connects and returns the server's address, with the client's events drained.</summary>
+        public SystemAddress ClientSideConnection()
+        {
+            Connect();
+            for (var i = 0; i < 200 && !_clientEvents.Any(e => e.Kind == PeerEventKind.Connected); i++)
+                Step();
+            return Server.Sockets[0].LocalAddress;
+        }
+
+        public void Dispose()
+        {
+            Client.Dispose();
+            Server.Dispose();
+        }
     }
 
     private static RakPeerOptions Options(TimeProvider time, int maxIncoming) => new()

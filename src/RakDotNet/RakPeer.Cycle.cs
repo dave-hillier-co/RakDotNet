@@ -29,6 +29,7 @@ public sealed partial class RakPeer
     private readonly Dictionary<SystemAddress, int> _remoteSockets = [];
     private readonly Dictionary<ulong, RakConnection> _byGuid = [];
     private readonly Dictionary<SystemAddress, RakConnection> _byAddress = [];
+    private readonly List<RakConnection> _live = [];
     private readonly Dictionary<uint, ReceiptRecord> _receipts = [];
     private readonly Dictionary<ulong, bool> _closedLocally = [];
     private readonly List<uint> _scratchReceipts = [];
@@ -41,6 +42,8 @@ public sealed partial class RakPeer
     private ITimer? _updateTimer;
     private volatile bool _receivePaused;
     private volatile int _activeSystemCount;
+    private int _syncedSlotsVersion;
+    private bool _tableDirty;
 
     private bool InDispatchOnThisThread => Volatile.Read(ref _dispatchThread) == Environment.CurrentManagedThreadId;
 
@@ -77,12 +80,14 @@ public sealed partial class RakPeer
             {
                 ResumeReceivingIfDrained();
                 var generation = Volatile.Read(ref segment.Generation);
+                ShiftIncomingTimestamp(segment);
                 var view = new PeerEvent(segment, generation);
                 // ReceiptAbandoned is not a RakNet packet, so RakNet's plugins never see it (decision 11.4).
                 if (segment.Kind != PeerEventKind.ReceiptAbandoned)
                 {
-                    CallConnectionCallbacks(_plugins.Ordinary, view, segment);
-                    CallConnectionCallbacks(_plugins.ReliabilityLayer, view, segment);
+                    var callbackConnection = CallbackConnection(segment);
+                    CallConnectionCallbacks(_plugins.Ordinary, view, segment, callbackConnection);
+                    CallConnectionCallbacks(_plugins.ReliabilityLayer, view, segment, callbackConnection);
                     if (IsConsumed(_plugins.Ordinary, view) || IsConsumed(_plugins.ReliabilityLayer, view))
                     {
                         if (!segment.IsOwned)
@@ -316,7 +321,7 @@ public sealed partial class RakPeer
             _byAddress.Remove(connection.Address);
         connection.MoveTo(address);
         _byAddress[address] = connection;
-        PublishTable();
+        _tableDirty = true;
     }
 
     private void ApplyConnect(PendingConnect attempt, long nowUs)
@@ -416,15 +421,22 @@ public sealed partial class RakPeer
         }
     }
 
+    // SendImmediate with broadcast (RakPeer.cpp:4335-4370): every active slot with an address but the excluded one, in
+    // slot order, whatever its connect mode.
     private void ApplyBroadcast(in PeerCommand command, long nowUs)
     {
         try
         {
-            foreach (var connection in _table.All)
+            var slots = _core.Slots;
+            for (var index = 0; index < slots.Count; index++)
             {
-                if (connection.State != ConnectionState.Connected || Matches(connection, command.Target))
+                if (slots[index] is not { IsActive: true } system || Matches(system, command.Target))
                     continue;
-                SendTo(connection, command, nowUs);
+                var connection = EnsureConnection(system, nowUs);
+                var coreReceipt = _core.SendToSlot(system, command.Payload.AsSpan(0, command.ByteLength), command.BitLength,
+                                                   command.Reliability, command.Priority, command.Channel, nowUs);
+                if (command.Reliability.HasAckReceipt())
+                    _receipts[coreReceipt] = new ReceiptRecord(command.Receipt, connection, command.State as TrackedSend, command.Version);
             }
         }
         finally
@@ -617,18 +629,18 @@ public sealed partial class RakPeer
     private void OnConnected(IPEndPoint remote, ulong guid, ReadOnlySpan<byte> data, bool isIncoming, SystemAddress external, long nowUs)
     {
         SystemAddress address = remote;
+        // The connection was made when the system took its slot; events are handled in order, so an entry under this
+        // GUID is the one this packet completes. A slot opened and closed between two cycles has none yet.
         if (!_byGuid.TryGetValue(guid, out var connection))
         {
-            connection = new RakConnection(this, new RakNetGuid(guid), address, isIncoming, _sockets[SocketOf(address)], external, nowUs);
+            connection = new RakConnection(this, new RakNetGuid(guid), address, isIncoming, _sockets[SocketOf(address)], external, nowUs, ConnectionState.Connected);
             if (_core.TryGetRemoteSystem(guid, out var system))
-            {
                 connection.System = system;
-                connection.Refresh(system, ConnectionState.Connected);
-            }
-            _byGuid[guid] = connection;
-            _byAddress[address] = connection;
-            PublishTable();
+            Track(connection);
         }
+        connection.MarkConnected(isIncoming, external);
+        if (connection.System is { IsActive: true } slot)
+            connection.Refresh(slot, ConnectionState.Connected);
         if (!ExternalAddress.IsAssigned && external.IsAssigned)
             _externalAddress = new SystemAddressBox(external);
 
@@ -684,14 +696,22 @@ public sealed partial class RakPeer
             EndConnection(connection);
     }
 
-    /// <summary>Copies the core's slots into the connection objects, and notices connections that ended silently.</summary>
+    /// <summary>
+    /// Gives every newly assigned slot its connection, copies the core's slots into the connection objects, notices
+    /// connections whose slot closed without an event, and publishes the table when anything a query reads changed.
+    /// </summary>
     private void PollConnections(long nowUs)
     {
-        foreach (var connection in _table.All)
+        if (_core.SlotsVersion != _syncedSlotsVersion)
         {
-            var guid = connection.RakNetGuid.Value;
-            if (!_byGuid.ContainsKey(guid))
-                continue;
+            var active = _core.ActiveSystems;
+            for (var index = 0; index < active.Count; index++)
+                EnsureConnection(active[index], nowUs);
+        }
+
+        for (var index = _live.Count - 1; index >= 0; index--)
+        {
+            var connection = _live[index];
             // The slot the connection was made on, kept so the poll costs no lookup; the core deactivates a slot when it
             // forgets the system and never reuses the object.
             if (connection.System is not { IsActive: true } system)
@@ -702,7 +722,7 @@ public sealed partial class RakPeer
             }
             connection.Refresh(system, (ConnectionState)PeerCore.GetConnectionState(system));
         }
-        if (ConnectedChanged())
+        if (_tableDirty || _core.SlotsVersion != _syncedSlotsVersion || ConnectedChanged())
             PublishTable();
 
         lock (_attemptsGate)
@@ -721,6 +741,39 @@ public sealed partial class RakPeer
                 : ConnectionState.Connecting;
         }
         _scratchAttempts.Clear();
+    }
+
+    /// <summary>
+    /// The connection of an active slot, made when the slot is first seen. Called only when every core event before
+    /// this point has been handled, so an older entry under the same GUID belongs to a slot that has closed and is ended.
+    /// </summary>
+    private RakConnection EnsureConnection(RemoteSystem system, long nowUs)
+    {
+        if (_byGuid.TryGetValue(system.Guid, out var existing))
+        {
+            if (ReferenceEquals(existing.System, system))
+                return existing;
+            AbandonReceipts(existing);
+            EndConnection(existing);
+        }
+        SystemAddress address = system.Address;
+        var connection = new RakConnection(this, new RakNetGuid(system.Guid), address, !system.WeInitiatedTheConnection,
+                                           _sockets[SocketOf(address)], system.MyExternalAddress, nowUs,
+                                           (ConnectionState)PeerCore.GetConnectionState(system))
+        {
+            System = system,
+        };
+        connection.Refresh(system, connection.State);
+        Track(connection);
+        return connection;
+    }
+
+    private void Track(RakConnection connection)
+    {
+        _byGuid[connection.RakNetGuid.Value] = connection;
+        _byAddress[connection.Address] = connection;
+        _live.Add(connection);
+        _tableDirty = true;
     }
 
     private void AbandonReceipts(RakConnection connection)
@@ -761,8 +814,9 @@ public sealed partial class RakPeer
             _byGuid.Remove(guid);
         if (_byAddress.TryGetValue(connection.Address, out var byAddress) && ReferenceEquals(byAddress, connection))
             _byAddress.Remove(connection.Address);
+        _live.Remove(connection);
         _closedLocally.Remove(guid);
-        PublishTable();
+        _tableDirty = true;
     }
 
     /// <summary>Whether a connection entered or left Connected since the table was published.</summary>
@@ -785,7 +839,29 @@ public sealed partial class RakPeer
         return false;
     }
 
-    private void PublishTable() => _table = new ConnectionTable([.. _byGuid.Values.OrderBy(c => c.SystemIndex)]);
+    /// <summary>Publishes the slots and the connection of each active one, in activeSystemList order.</summary>
+    private void PublishTable()
+    {
+        var active = _core.ActiveSystems;
+        var all = new List<RakConnection>(active.Count);
+        foreach (var system in active)
+        {
+            if (_byGuid.TryGetValue(system.Guid, out var connection) && ReferenceEquals(connection.System, system))
+                all.Add(connection);
+        }
+        var slots = _core.Slots;
+        var views = new SlotView[slots.Count];
+        for (var index = 0; index < slots.Count; index++)
+        {
+            if (slots[index] is { } slot)
+                views[index] = new SlotView(slot.Address, new RakNetGuid(slot.Guid));
+            else
+                views[index] = new SlotView(SystemAddress.Unassigned, RakNetGuid.Unassigned);
+        }
+        _table = new ConnectionTable([.. all], views);
+        _syncedSlotsVersion = _core.SlotsVersion;
+        _tableDirty = false;
+    }
 
     private RakConnection? Find(AddressOrGuid target)
     {
@@ -794,9 +870,9 @@ public sealed partial class RakPeer
         return target.Address.IsAssigned ? _byAddress.GetValueOrDefault(target.Address) : null;
     }
 
-    private static bool Matches(RakConnection connection, AddressOrGuid target) =>
-        (target.RakNetGuid.IsAssigned && connection.RakNetGuid == target.RakNetGuid)
-        || (target.Address.IsAssigned && connection.Address == target.Address);
+    private static bool Matches(RemoteSystem system, AddressOrGuid target) =>
+        (target.RakNetGuid.IsAssigned && system.Guid == target.RakNetGuid.Value)
+        || (target.Address.IsAssigned && (SystemAddress)system.Address == target.Address);
 
     private EventSegment NewSegment(ReadOnlySpan<byte> data, ulong guid, SystemAddress address, RakConnection? connection)
     {
@@ -880,8 +956,41 @@ public sealed partial class RakPeer
         _ => null,
     };
 
+    /// <summary>
+    /// RakPeer::Receive (RakPeer.cpp:1548-1555, ShiftIncomingTimestamp and GetBestClockDifferential at 3773-3799): every
+    /// ID_TIMESTAMP packet long enough to hold a time, pushed-back ones included, has the time shifted as it is read, by
+    /// the clock differential of the active slot at the packet's address, or 0.
+    /// </summary>
+    private void ShiftIncomingTimestamp(EventSegment segment)
+    {
+        if (segment.Length < 1 + sizeof(ulong) || segment.Data[0] != (byte)MessageId.Timestamp)
+            return;
+        if (!_table.ByAddress.TryGetValue(segment.Address, out var connection))
+            return;
+        var time = segment.WritableData[1..];
+        BinaryPrimitives.WriteUInt64BigEndian(time, unchecked(BinaryPrimitives.ReadUInt64BigEndian(time) - (ulong)connection.ClockDifferential));
+    }
+
+    /// <summary>
+    /// The connection the connection callbacks get. CallPluginCallbacks keys on the first byte alone, so a packet with
+    /// no slot behind it, such as a pushed-back ID_NEW_INCOMING_CONNECTION, still calls them with its address and GUID
+    /// (RakPeer.cpp:6411-6428).
+    /// </summary>
+    private RakConnection? CallbackConnection(EventSegment segment)
+    {
+        if (segment.Connection is { } connection)
+            return connection;
+        if (segment.Length == 0 || _plugins.Ordinary.Length + _plugins.ReliabilityLayer.Length == 0)
+            return null;
+        var id = (MessageId)segment.Data[0];
+        if (id is not (MessageId.DisconnectionNotification or MessageId.ConnectionLost or MessageId.NewIncomingConnection or MessageId.ConnectionRequestAccepted))
+            return null;
+        return RakConnection.Unlisted(this, segment.RakNetGuid, segment.Address, id == MessageId.NewIncomingConnection,
+                                      _sockets[Math.Clamp(segment.SocketIndex, 0, _sockets.Length - 1)], NowUs);
+    }
+
     // CallPluginCallbacks (RakPeer.cpp:6409-6461), keyed on Data[0].
-    private static void CallConnectionCallbacks(IRakPlugin[] plugins, PeerEvent view, EventSegment segment)
+    private static void CallConnectionCallbacks(IRakPlugin[] plugins, PeerEvent view, EventSegment segment, RakConnection? connection)
     {
         if (plugins.Length == 0 || segment.Length == 0)
             return;
@@ -890,14 +999,14 @@ public sealed partial class RakPeer
         {
             switch (id)
             {
-                case MessageId.DisconnectionNotification when segment.Connection is { } closed:
-                    plugin.OnDisconnected(closed, DisconnectReason.DisconnectionNotification);
+                case MessageId.DisconnectionNotification when connection is not null:
+                    plugin.OnDisconnected(connection, DisconnectReason.DisconnectionNotification);
                     break;
-                case MessageId.ConnectionLost when segment.Connection is { } lost:
-                    plugin.OnDisconnected(lost, DisconnectReason.ConnectionLost);
+                case MessageId.ConnectionLost when connection is not null:
+                    plugin.OnDisconnected(connection, DisconnectReason.ConnectionLost);
                     break;
-                case MessageId.NewIncomingConnection or MessageId.ConnectionRequestAccepted when segment.Connection is { } connected:
-                    plugin.OnConnected(connected, id == MessageId.NewIncomingConnection);
+                case MessageId.NewIncomingConnection or MessageId.ConnectionRequestAccepted when connection is not null:
+                    plugin.OnConnected(connection, id == MessageId.NewIncomingConnection);
                     break;
                 default:
                     if (FailureOf(id) is { } failure)

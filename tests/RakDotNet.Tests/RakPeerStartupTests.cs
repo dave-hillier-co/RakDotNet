@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using Microsoft.Extensions.Time.Testing;
 using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Tests;
@@ -125,5 +126,35 @@ public class RakPeerStartupTests
         Assert.True(peer.IsLocalAddress(IPAddress.Loopback));
         Assert.All(peer.LocalAddresses, a => Assert.True(peer.IsLocalAddress(a)));
         Assert.False(peer.IsLocalAddress(IPAddress.Parse("192.0.2.1")));
+    }
+
+    [Fact]
+    public void The_local_IP_list_is_ipList()
+    {
+        using var peer = RakPeer.Start(LoopbackOptions);
+        var assigned = peer.InternalAddresses.TakeWhile(a => a.IsAssigned).Select(a => a.ToIPEndPoint().Address).ToList();
+
+        // GetNumberOfAddresses counts ipList up to its first unassigned entry and GetLocalIP reads it
+        // (RakPeer.cpp:2586-2622), so it is sorted, limited and changed by SetInternalID.
+        Assert.Equal(assigned, peer.LocalAddresses);
+
+        var replacement = new SystemAddress(IPAddress.Parse("192.0.2.9"), peer.Sockets[0].LocalAddress.Port);
+        peer.SetInternalAddress(replacement, 0);
+
+        Assert.Equal(IPAddress.Parse("192.0.2.9"), peer.LocalAddresses[0]);
+        Assert.True(peer.IsLocalAddress(IPAddress.Parse("192.0.2.9")));
+    }
+
+    [Fact]
+    public void Peers_sharing_a_time_provider_share_RakNets_clock()
+    {
+        var time = new FakeTimeProvider(new DateTimeOffset(2026, 10, 19, 0, 0, 0, TimeSpan.Zero));
+        using var first = RakPeer.Start(LoopbackOptions with { Threading = PeerThreading.Manual, TimeProvider = time });
+        time.Advance(TimeSpan.FromSeconds(5));
+        using var second = RakPeer.Start(LoopbackOptions with { Threading = PeerThreading.Manual, TimeProvider = time });
+
+        // GetTimeUS subtracts one process-wide initialTime, taken on the first call (GetTime.cpp:183-189).
+        Assert.Equal(first.GetTime(), second.GetTime());
+        Assert.True(first.GetTime() >= 5_000);
     }
 }
