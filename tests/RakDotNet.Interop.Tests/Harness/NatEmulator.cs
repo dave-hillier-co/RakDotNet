@@ -16,7 +16,7 @@ public enum NatType
     /// <summary>One mapping per inside socket; passes in what comes from an address and port the mapping has sent to.</summary>
     PortRestricted,
 
-    /// <summary>A mapping per inside socket and destination, ports taken in sequence; filters as port restricted.</summary>
+    /// <summary>A mapping per inside socket and destination, on every third port; filters as port restricted.</summary>
     Symmetric,
 }
 
@@ -47,8 +47,10 @@ public sealed record NatRouterRecord(bool Outbound, IPEndPoint Inside, IPEndPoin
 /// compares those hosts, which lets NatTypeDetectionServer's S1P2 count as S1P1's address and S2P3 as another.
 /// </para>
 /// <para>
-/// A router binds a block of consecutive ports up front and maps in order through it, so a symmetric router's ports
-/// are predictable, as NatPunchthroughClient's port prediction assumes. A datagram with a time-to-live of 1 dies at the
+/// A router binds a block of consecutive ports up front and maps in order through it. A symmetric router leaves two
+/// ports between its mappings, so NatPunchthroughClient's port prediction (the reported port and the next
+/// MAX_PREDICTIVE_PORT_RANGE, 2) never reaches the next one: otherwise whether punchthrough got through would depend on
+/// how many internal addresses the hosts report, as each is given a mapping before the external punch. A datagram with a time-to-live of 1 dies at the
 /// router; one with 2 opens or refreshes its mapping and goes no further, as SendTTL means it to. Mappings never expire.
 /// </para>
 /// </remarks>
@@ -59,7 +61,7 @@ public sealed class NatEmulator : IAsyncDisposable
     private readonly Dictionary<IPEndPoint, object> _hosts = [];
     private bool _disposed;
 
-    /// <summary>Ports in each router's block: the most mappings one router can make.</summary>
+    /// <summary>Ports in each router's block: the most mappings one router can make, a third of that when symmetric.</summary>
     public int PortsPerRouter { get; init; } = 64;
 
     public IReadOnlyList<NatRouter> Routers
@@ -131,6 +133,9 @@ public sealed class NatRouter : IAsyncDisposable
     public const int HeaderSize = 7;
 
     private const int FirstBlockPort = 20000;
+
+    // NatPunchthroughClient's MAX_PREDICTIVE_PORT_RANGE (2) plus one.
+    private const int SymmetricPortSpacing = 3;
     private const int LastBlockPort = 48000;
     private const int MaxDatagramSize = 65536 + HeaderSize;
     private const int MaxRecords = 20_000;
@@ -167,7 +172,7 @@ public sealed class NatRouter : IAsyncDisposable
     /// <summary>Where the hosts behind the router send, and what they receive from.</summary>
     public IPEndPoint GatewayEndPoint { get; }
 
-    /// <summary>The first port of the router's block; mappings take it and the ports after it in order.</summary>
+    /// <summary>The first port of the router's block; mappings take it and the ports after it in order, every third port when symmetric.</summary>
     public int FirstPort { get; }
 
     /// <summary>The external addresses the router has mapped, in the order it mapped them.</summary>
@@ -176,7 +181,7 @@ public sealed class NatRouter : IAsyncDisposable
         get
         {
             lock (_gate)
-                return [.. _mappingByIndex.Take(_nextIndex).Select(m => m!.External)];
+                return [.. _mappingByIndex.Take(_nextIndex).OfType<Mapping>().Select(m => m.External)];
         }
     }
 
@@ -354,7 +359,8 @@ public sealed class NatRouter : IAsyncDisposable
             return existing;
         if (_nextIndex >= _block.Length)
             return null;
-        var index = _nextIndex++;
+        var index = _nextIndex;
+        _nextIndex += Type == NatType.Symmetric ? SymmetricPortSpacing : 1;
         var mapping = new Mapping(inside, _block[index], (IPEndPoint)_block[index].LocalEndPoint!);
         _mappingByIndex[index] = mapping;
         _mappings.Add(key, mapping);

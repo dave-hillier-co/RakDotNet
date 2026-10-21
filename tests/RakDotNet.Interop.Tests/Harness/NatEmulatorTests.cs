@@ -82,7 +82,7 @@ public sealed class NatEmulatorTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_symmetric_router_maps_each_destination_to_the_next_port()
+    public async Task A_symmetric_router_maps_each_destination_past_the_ports_punchthrough_predicts()
     {
         var router = _emulator.AddRouter(NatType.Symmetric);
         var inside = await InsideAsync(router);
@@ -97,7 +97,8 @@ public sealed class NatEmulatorTests : IAsyncLifetime
         var (_, againToFirst) = await ReceiveAsync(first);
 
         Assert.Equal(router.FirstPort, toFirst.Port);
-        Assert.Equal(router.FirstPort + 1, toSecond.Port);
+        // NatPunchthroughClient tries the reported port and the next MAX_PREDICTIVE_PORT_RANGE (2) ports.
+        Assert.Equal(router.FirstPort + 3, toSecond.Port);
         Assert.Equal(toFirst, againToFirst);
         // Each mapping filters as port restricted.
         second.SendTo([4], toFirst);

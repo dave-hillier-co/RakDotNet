@@ -22,7 +22,10 @@ public enum NatBehaviour
 /// sends leaves from a mapping the router binds on <see cref="PublicAddress"/>, ports taken in sequence.
 /// </summary>
 /// <remarks>
-/// Cone behaviours keep one mapping per inside socket; symmetric keeps one per inside socket and destination. A
+/// Cone behaviours keep one mapping per inside socket; symmetric keeps one per inside socket and destination, each at
+/// least three ports past the one before, beyond the two ports NatPunchthroughClient predicts past the reported one
+/// (MAX_PREDICTIVE_PORT_RANGE), so whether punchthrough gets through does not depend on how many internal addresses the
+/// peers report, as each is given a mapping before the external punch. A
 /// mapping passes back what comes from anywhere (full cone), from an address it sent to (address restricted), or from
 /// an address and port it sent to (port restricted, symmetric). A datagram sent with a time-to-live of 1 dies at the
 /// router, and one of 2 opens its mapping but goes no further, as SendTTL intends. What reaches an inside socket
@@ -31,7 +34,10 @@ public enum NatBehaviour
 internal sealed class InMemoryNat(InMemoryNetwork network, IPAddress publicAddress, NatBehaviour behaviour) : IDatagramTransportFactory
 {
     private readonly Lock _gate = new();
+    // NatPunchthroughClient's MAX_PREDICTIVE_PORT_RANGE (2) plus one.
+    private const int SymmetricPortSpacing = 3;
     private readonly Dictionary<(Inside Inside, SystemAddress Destination), Mapping> _mappings = [];
+    private int _lastSymmetricPort;
 
     public IPAddress PublicAddress { get; } = publicAddress;
 
@@ -66,7 +72,7 @@ internal sealed class InMemoryNat(InMemoryNetwork network, IPAddress publicAddre
             var key = (inside, Behaviour == NatBehaviour.Symmetric ? destination : SystemAddress.Unassigned);
             if (!_mappings.TryGetValue(key, out var existing))
             {
-                if (!network.TryBind(new SocketBinding(new IPEndPoint(PublicAddress, 0)), out var endpoint, out _, out _))
+                if (!TryBindMapping(out var endpoint))
                     return;
                 existing = new Mapping(this, inside, endpoint);
                 endpoint.SetReadySignal(existing.Pump);
@@ -77,6 +83,27 @@ internal sealed class InMemoryNat(InMemoryNetwork network, IPAddress publicAddre
         }
         if (ttl != 2)
             mapping.Endpoint.TrySend(datagram, destination);
+    }
+
+    // Caller holds _gate.
+    private bool TryBindMapping([NotNullWhen(true)] out IDatagramTransport? endpoint)
+    {
+        if (Behaviour != NatBehaviour.Symmetric || _lastSymmetricPort == 0)
+        {
+            if (!network.TryBind(new SocketBinding(new IPEndPoint(PublicAddress, 0)), out endpoint, out _, out _))
+                return false;
+        }
+        else
+        {
+            endpoint = null;
+            for (var port = _lastSymmetricPort + SymmetricPortSpacing; port <= IPEndPoint.MaxPort && endpoint is null; port++)
+                network.TryBind(new SocketBinding(new IPEndPoint(PublicAddress, port)), out endpoint, out _, out _);
+            if (endpoint is null)
+                return false;
+        }
+        if (Behaviour == NatBehaviour.Symmetric)
+            _lastSymmetricPort = endpoint.LocalAddress.Port;
+        return true;
     }
 
     private bool Admits(Mapping mapping, SystemAddress source)
