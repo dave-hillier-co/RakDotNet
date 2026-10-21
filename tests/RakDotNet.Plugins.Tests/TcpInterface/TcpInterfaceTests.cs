@@ -129,6 +129,20 @@ public sealed class TcpInterfaceTests : IDisposable
     }
 
     [Fact]
+    public void Closing_a_connection_ends_the_other_sides_stream_gracefully()
+    {
+        // CloseConnection ends in closesocket (TCPInterface.cpp:593-605 via RemoteClient::SetActive), which sends a FIN,
+        // so the other side reads the end of the stream rather than a reset.
+        using var remote = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { ReceiveTimeout = (int)Poll.Timeout.TotalMilliseconds };
+        remote.Connect(ServerAddress.ToIPEndPoint());
+        var remoteAtServer = Poll.Address(_server.HasNewIncomingConnection, "the new connection");
+
+        _server.CloseConnection(remoteAtServer);
+
+        Assert.Equal(0, remote.Receive(new byte[16]));
+    }
+
+    [Fact]
     public void A_connection_attempt_to_a_closed_port_fails()
     {
         var closedPort = ClosedPort();

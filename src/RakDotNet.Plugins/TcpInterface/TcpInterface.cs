@@ -889,6 +889,15 @@ public class TcpInterface : IPluginHost, IDisposable
             SslTargetHost = null;
             Ssl?.Dispose();
             Ssl = null;
+            // closesocket sends a FIN. Disposing a .NET socket while its receive is pending resets the connection
+            // instead, unless the socket was shut down first.
+            try
+            {
+                Socket?.Shutdown(SocketShutdown.Both);
+            }
+            catch (SocketException)
+            {
+            }
             Socket?.Dispose();
             Socket = null;
             Rewake();
