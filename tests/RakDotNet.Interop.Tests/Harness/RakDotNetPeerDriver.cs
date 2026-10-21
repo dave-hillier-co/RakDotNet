@@ -371,6 +371,7 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
         }
         await _pump.ConfigureAwait(false);
         _packets.Writer.TryComplete();
+        StopServices();
     }
 
     /// <summary>Shuts down as interop-peer does at stdin EOF: Shutdown(100), notifying connected systems.</summary>

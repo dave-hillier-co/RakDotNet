@@ -133,6 +133,18 @@ public sealed partial class RakDotNetPeerDriver : IServicesDriver
         return Task.FromResult(poll);
     }
 
+    // The services' sockets close with the driver, as the native peer's do with its process.
+    private void StopServices()
+    {
+        _rackspaceTcp?.Dispose();
+        _rackspaceTcp = null;
+        _rackspace = null;
+        _rackspaceRecorder = null;
+        _dynDns?.Dispose();
+        _dynDns = null;
+        _dynDnsStarted = false;
+    }
+
     private void ApplyRedirects(IReadOnlyList<ServiceRedirect> redirects)
     {
         foreach (var redirect in redirects)
