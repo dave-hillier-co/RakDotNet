@@ -10,7 +10,7 @@ public sealed class PacketConsoleLoggerTests : IDisposable
     private readonly PluginMesh _mesh = new();
     private readonly RecordingTransport _transport = new();
     private readonly ConsoleServer _console = new();
-    private readonly LogCommandParser _logCommandParser = new();
+    private readonly Plugins.LogCommandParser _logCommandParser = new();
     private readonly PacketConsoleLogger _logger = new();
 
     public PacketConsoleLoggerTests()

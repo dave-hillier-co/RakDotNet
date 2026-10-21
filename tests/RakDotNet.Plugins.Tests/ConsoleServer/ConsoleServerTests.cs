@@ -22,7 +22,7 @@ public sealed class ConsoleServerTests
     private readonly RecordingTransport _transport = new();
     private readonly ConsoleServer _console = new() { Prompt = "> " };
     private readonly EchoParser _echo = new EchoParser().WithCommand(2, "Pair").WithCommand(CommandParser.VariableNumberOfParameters, "Any");
-    private readonly LogCommandParser _logger = new();
+    private readonly Plugins.LogCommandParser _logger = new();
 
     public ConsoleServerTests()
     {

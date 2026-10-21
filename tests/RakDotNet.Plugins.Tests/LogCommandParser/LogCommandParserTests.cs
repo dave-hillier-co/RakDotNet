@@ -1,13 +1,14 @@
+using RakDotNet.Plugins.Tests.RemoteConsole;
 using static RakDotNet.Plugins.Tests.RemoteConsole.RecordingTransport;
 
-namespace RakDotNet.Plugins.Tests.RemoteConsole;
+namespace RakDotNet.Plugins.Tests.LogCommandParser;
 
 /// <summary>LogCommandParser through a console: channels, subscriptions and log lines (LogCommandParser.cpp).</summary>
 public sealed class LogCommandParserTests
 {
     private readonly RecordingTransport _transport = new();
     private readonly ConsoleServer _console = new();
-    private readonly LogCommandParser _logger = new();
+    private readonly Plugins.LogCommandParser _logger = new();
 
     public LogCommandParserTests()
     {
@@ -76,7 +77,7 @@ public sealed class LogCommandParserTests
     [Fact]
     public void Help_lists_the_channels_or_none()
     {
-        var empty = new LogCommandParser();
+        var empty = new Plugins.LogCommandParser();
 
         _logger.SendHelp(_transport, Alice);
         empty.SendHelp(_transport, Bob);
