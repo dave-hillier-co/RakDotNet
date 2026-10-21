@@ -200,6 +200,13 @@ public readonly ref struct PeerEvent
         throw new InvalidOperationException($"Rewriting the ID to {id} would change the kind of the event.");
     }
 
+    /// <summary>
+    /// Packet::guid = <paramref name="rakNetGuid"/>: the rewrite a plugin makes to an event it passes on, which later
+    /// plugins and the reader then see, as Router2 names the endpoint of a failed forwarded connection attempt
+    /// (Router2.cpp:493). The event's connection and address are unchanged.
+    /// </summary>
+    public void RewriteGuid(RakNetGuid rakNetGuid) => Segment.RakNetGuid = rakNetGuid;
+
     /// <summary>An unpooled copy of <see cref="Data"/>.</summary>
     public byte[] ToArray() => Segment.Data.ToArray();
 

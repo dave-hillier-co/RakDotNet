@@ -307,6 +307,67 @@ The `cloudInfo` records, where a recorded key has `primaryKey` as hex, since a `
 
 Get responses and notifications also reach the driver as `packet` events; the requests a `CloudServer` consumes do not.
 
+### NAT commands
+
+The NAT commands live in `tools/interop-peer/src/NatCommands.cpp`. `natGateway` puts the process behind a NAT router of
+the harness (see [NAT gateway](#nat-gateway)); the others attach and drive RakNet's NAT plugins, and every one but its
+plugin's attach command fails with `ok:false` until that plugin is attached. Addresses are `host` ("127.0.0.1") and
+`port` fields.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `natGateway` | `host` ("127.0.0.1"), `port` (0 leaves the router) | | puts the process behind the router whose gateway is at the address |
+| `natTypeDetectionClientAttach` | | | `AttachPlugin` of a `NatTypeDetectionClient`; again is a no-op |
+| `natTypeDetectionClientDetect` | `host`, `port` (the connected server) | | `DetectNATType` |
+| `natTypeDetectionServerAttach` | | | `AttachPlugin` of a `NatTypeDetectionServer`; again is a no-op |
+| `natTypeDetectionServerStartup` | `ip2`, `ip3`, `ip4` (each "127.0.0.1") | `addresses`: where S1P2, S2P3, S3P4 and S4P5 are bound, in that order | `Startup`, then the plugin's protected sockets' `GetBoundAddress` |
+| `natPunchthroughServerAttach` | | | `AttachPlugin` of a `NatPunchthroughServer`; again is a no-op |
+| `natPunchthroughClientAttach` | | | `AttachPlugin` of a `NatPunchthroughClient`; again is a no-op |
+| `natPunchthroughClientConfigure` | any of `timeBetweenPunchAttemptsInternal`, `timeBetweenPunchAttemptsExternal`, `udpSendsPerPortInternal`, `udpSendsPerPortExternal`, `internalIpWaitAfterAttempts`, `maxPredictivePortRange`, `externalIpWaitBetweenPorts`, `externalIpWaitAfterFirstTtl`, `externalIpWaitAfterAllAttempts`, `maximumNumberOfInternalIdsToCheck` (milliseconds or counts), `retryOnFailure` (bool) | | sets those fields of `GetPunchthroughConfiguration()` |
+| `natPunchthroughOpen` | `target` (guid), `host`, `port` (the facilitator) | `result` (bool) | `OpenNAT` |
+| `natPunchthroughFindPortStride` | `host`, `port` (the facilitator) | | `FindRouterPortStride` |
+
+The plugins' results reach the driver as `packet` events. The peer sets no `NatPunchthroughDebugInterface`:
+`NatPunchthroughClient` formats some of its messages with `%I64d`, which only Windows' `printf` takes, and elsewhere
+they read the wrong arguments. A `NatTypeDetectionServer` or `NatTypeDetectionClient` is never freed, because
+`NatTypeDetectionServer::Shutdown` deletes sockets whose receive threads still run.
+
+### Relaying commands
+
+The relaying commands live in `tools/interop-peer/src/RelayCommands.cpp`. `udpForwarder*` drive a `UDPForwarder` of
+the process's own; the others attach and drive RakNet's relaying plugins, and every one but its plugin's attach command
+fails with `ok:false` until that plugin is attached. Addresses are `"a.b.c.d:port"` fields here.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `udpForwarderStartup` | `maxEntries` (absent keeps it) | | creates the process's `UDPForwarder` once, `SetMaxForwardEntries`, `Startup` |
+| `udpForwarderStart` | `source`, `destination`, `timeoutMs`, `forceHost` ("" binds every address) | `result` (`UDPForwarderResult` name, e.g. `UDPFORWARDER_SUCCESS`), `port` | `StartForwarding` |
+| `udpForwarderStop` | `source`, `destination` | | `StopForwarding` |
+| `udpForwarderInfo` | | `maxEntries`, `usedEntries` | `GetMaxForwardEntries`, `GetUsedForwardEntries` |
+| `udpForwarderShutdown` | | | `Shutdown` |
+| `udpProxyCoordinatorAttach` | `password` ("") | | `AttachPlugin` of a `UDPProxyCoordinator` once, then `SetRemoteLoginPassword` |
+| `udpProxyServerAttach` | `publicIp` (""), `maxForwardEntries` (absent keeps it) | | `AttachPlugin` of a `UDPProxyServer` once with the result handler, then `SetServerPublicIP` and its forwarder's `SetMaxForwardEntries` |
+| `udpProxyServerLogin` | `password`, `coordinator` (absent is `GetInternalID(UNASSIGNED_SYSTEM_ADDRESS, 0)`, this peer, as NATCompleteServer logs in) | `result` (bool) | `LoginToCoordinator` |
+| `udpProxyClientAttach` | | | `AttachPlugin` of a `UDPProxyClient` with the result handler; again is a no-op |
+| `udpProxyClientRequest` | `coordinator`, `target` (guid) or `targetAddress`, `timeoutMs`, `source` (absent is `UNASSIGNED_SYSTEM_ADDRESS`), `serverSelection` (hex, "") | `result` (bool) | `RequestForwarding` by GUID or by address |
+| `udpProxyCallbacks` | | `callbacks`: every result handler call so far, in order, as `{name, proxyIp, proxyPort, coordinator, source, target, targetGuid}` for the client's and `{name, password}` for the server's | `UDPProxyClientResultHandler`, `UDPProxyServerResultHandler` |
+| `router2Attach` | `maxForwardingRequests` (absent keeps it) | | `AttachPlugin` of a `Router2` once, then `SetMaximumForwardingRequests` |
+| `router2EstablishRouting` | `target` (guid) | | `EstablishRouting` |
+| `relayAttach` | `acceptAddParticipantRequests` (false) | | `AttachPlugin` of a `RelayPlugin` once, then `SetAcceptAddParticipantRequests` |
+| `relayAddParticipantOnServer` | `key`, `target` (guid) | `result` (`RelayPluginEnums` name, e.g. `RPE_ADD_CLIENT_SUCCESS`) | `AddParticipantOnServer` |
+| `relayRemoveParticipantOnServer` | `target` (guid) | | `RemoveParticipantOnServer` |
+| `relayAddParticipantRequest` | `key`, `server` (guid) | | `AddParticipantRequestFromClient` |
+| `relayRemoveParticipantRequest` | `server` (guid) | | `RemoveParticipantRequestFromClient` |
+| `relaySendToParticipant` | `server` (guid), `key`, `data` (hex), `bits` (all of `data`), `priority` (`HIGH_PRIORITY`), `reliability` (`RELIABLE_ORDERED`), `channel` (0) | | `SendToParticipant` of the first `bits` of `data`, most significant bit first |
+| `relaySendGroupMessage` | `server` (guid), `data`, `bits`, `priority`, `reliability`, `channel` as above | | `SendGroupMessage` |
+| `relayJoinGroup` | `server` (guid), `group` | | `JoinGroupRequest` |
+| `relayLeaveGroup` | `server` (guid) | | `LeaveGroup` |
+| `relayGetGroupList` | `server` (guid) | | `GetGroupList` |
+
+An unassigned address in a callback is `"UNASSIGNED_SYSTEM_ADDRESS"`, as `SystemAddress::ToString` writes it. Router2's
+and RelayPlugin's results reach the driver as `packet` events. The peer sets no `Router2DebugInterface`: Router2 formats
+its messages with `%I64d`, as `NatPunchthroughClient` does.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
@@ -326,6 +387,29 @@ Other events:
 |---|---|---|
 | `ready` | `raknetVersion`, `protocolVersion` | process start |
 | `log` | `message` | optional diagnostics the driver may display |
+
+## NAT gateway
+
+`tests/RakDotNet.Interop.Tests/Harness/NatEmulator.cs` runs NAT routers on 127.0.0.1. A host behind one sends every
+datagram to the router's gateway address, prefixed with a 7-byte header, and receives from the gateway datagrams with
+the same header:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | The IP time-to-live the datagram was sent with, or 0 for the default. Host to router only; 0 from the router. |
+| 1 | 4 | Host to router: the destination's IPv4 address. Router to host: the source's. Network order. |
+| 5 | 2 | The destination's or source's port, big-endian. |
+| 7 | | The datagram. |
+
+The host reports a datagram from the gateway as coming from the header's address and drops everything else it
+receives, as nothing outside routes to a private address; a socket's datagrams to its own address pass untouched,
+because RakNet sends to itself to test a socket and to unblock its receive thread. The router maps the destination,
+dropping a datagram with a time-to-live of 1 and mapping without forwarding one of 2, as `SendTTL` intends.
+
+After `natGateway`, `interop-peer` does this for every UDP socket in the process: `src/NatGateway.cpp` replaces
+`sendto` and `recvfrom`, which RakNet calls through `sendto__` and `recvfrom__`, and reads the time-to-live with
+`getsockopt(IP_TTL)`. A RakDotNet peer does it through `NatGatewayTransportFactory`, given as its transport; the
+`RakDotNetPeerDriver` takes `natGateway` only before `startup`, as the transport is chosen when the peer starts.
 
 ## Secure build
 

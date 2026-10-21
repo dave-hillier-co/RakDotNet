@@ -1,0 +1,180 @@
+#include "NatCommands.h"
+
+#include "NatFields.h"
+#include "NatGateway.h"
+#include "PluginCommands.h"
+
+#include "NatPunchthroughClient.h"
+#include "NatPunchthroughServer.h"
+#include "NatTypeDetectionClient.h"
+#include "NatTypeDetectionServer.h"
+#include "RakMemoryOverride.h"
+#include "RakPeerInterface.h"
+
+#include <arpa/inet.h>
+
+#include <cstdio>
+#include <limits>
+#include <vector>
+
+using nlohmann::json;
+using nlohmann::ordered_json;
+
+namespace interop
+{
+    // NatTypeDetectionServer keeps its sockets protected; the harness needs their addresses to know which share a host.
+    class ObservableNatTypeDetectionServer : public RakNet::NatTypeDetectionServer
+    {
+    public:
+        std::vector<RakNet::SystemAddress> SocketAddresses() const
+        {
+            std::vector<RakNet::SystemAddress> addresses;
+            for (RakNet::RakNetSocket2* socket : {s1p2, s2p3, s3p4, s4p5})
+            {
+                if (socket != nullptr)
+                    addresses.push_back(socket->GetBoundAddress());
+            }
+            return addresses;
+        }
+    };
+
+    using namespace natfields;
+
+    NatCommands::NatCommands(RakNet::RakPeerInterface* peer) : peer_(peer) {}
+
+    NatCommands::~NatCommands()
+    {
+        // The peer is destroyed first; it never frees plugins, so they are freed here. The NAT type detection plugins
+        // are left to the process exit: CreateNonblockingBoundSocket starts a receive thread per socket and
+        // NatTypeDetectionServer::Shutdown deletes three of its sockets without stopping theirs, so freeing it crashes.
+        if (punchthroughClient_ != nullptr)
+            RakNet::NatPunchthroughClient::DestroyInstance(punchthroughClient_);
+        if (punchthroughServer_ != nullptr)
+            RakNet::NatPunchthroughServer::DestroyInstance(punchthroughServer_);
+    }
+
+    bool NatCommands::Dispatch(const std::string& cmd, const json& command, ordered_json& result)
+    {
+        if (cmd == "natGateway")
+        {
+            unsigned short port = PortField(command, "port");
+            if (port == 0)
+            {
+                ClearNatGateway();
+                return true;
+            }
+            std::string host = Optional<std::string>(command, "host", "127.0.0.1");
+            in_addr address;
+            if (inet_pton(AF_INET, host.c_str(), &address) != 1)
+                throw PluginCommandError("field 'host' is not an IPv4 address");
+            SetNatGateway(address.s_addr, htons(port));
+        }
+        else if (cmd == "natTypeDetectionClientAttach")
+        {
+            if (typeDetectionClient_ == nullptr)
+            {
+                typeDetectionClient_ = RakNet::NatTypeDetectionClient::GetInstance();
+                peer_->AttachPlugin(typeDetectionClient_);
+            }
+        }
+        else if (cmd == "natTypeDetectionClientDetect")
+        {
+            RequireTypeDetectionClient().DetectNATType(AddressFields(command));
+        }
+        else if (cmd == "natTypeDetectionServerAttach")
+        {
+            if (typeDetectionServer_ == nullptr)
+            {
+                typeDetectionServer_ = RakNet::OP_NEW<ObservableNatTypeDetectionServer>(_FILE_AND_LINE_);
+                peer_->AttachPlugin(typeDetectionServer_);
+            }
+        }
+        else if (cmd == "natTypeDetectionServerStartup")
+        {
+            ObservableNatTypeDetectionServer& server = RequireTypeDetectionServer();
+            std::string ip2 = Optional<std::string>(command, "ip2", "127.0.0.1");
+            std::string ip3 = Optional<std::string>(command, "ip3", "127.0.0.1");
+            std::string ip4 = Optional<std::string>(command, "ip4", "127.0.0.1");
+            server.Startup(ip2.c_str(), ip3.c_str(), ip4.c_str());
+            ordered_json addresses = ordered_json::array();
+            for (const RakNet::SystemAddress& address : server.SocketAddresses())
+                addresses.push_back(AddressText(address));
+            result["addresses"] = addresses;
+        }
+        else if (cmd == "natPunchthroughServerAttach")
+        {
+            if (punchthroughServer_ == nullptr)
+            {
+                punchthroughServer_ = RakNet::NatPunchthroughServer::GetInstance();
+                peer_->AttachPlugin(punchthroughServer_);
+            }
+        }
+        else if (cmd == "natPunchthroughClientAttach")
+        {
+            if (punchthroughClient_ == nullptr)
+            {
+                // No debug interface: NatPunchthroughClient formats some messages with %I64d, which only Windows'
+                // printf takes; elsewhere they read the wrong arguments and crash the peer.
+                punchthroughClient_ = RakNet::NatPunchthroughClient::GetInstance();
+                peer_->AttachPlugin(punchthroughClient_);
+            }
+        }
+        else if (cmd == "natPunchthroughClientConfigure")
+        {
+            Configure(command);
+        }
+        else if (cmd == "natPunchthroughOpen")
+        {
+            result["result"] = RequirePunchthroughClient().OpenNAT(GuidField(command, "target"), AddressFields(command));
+        }
+        else if (cmd == "natPunchthroughFindPortStride")
+        {
+            RequirePunchthroughClient().FindRouterPortStride(AddressFields(command));
+        }
+        else
+        {
+            return false;
+        }
+        return true;
+    }
+
+    void NatCommands::Configure(const json& command)
+    {
+        RakNet::PunchthroughConfiguration& pc = *RequirePunchthroughClient().GetPunchthroughConfiguration();
+        const long long maxInt = std::numeric_limits<int>::max();
+        SetIfPresent(command, "timeBetweenPunchAttemptsInternal", pc.TIME_BETWEEN_PUNCH_ATTEMPTS_INTERNAL, 0, maxInt);
+        SetIfPresent(command, "timeBetweenPunchAttemptsExternal", pc.TIME_BETWEEN_PUNCH_ATTEMPTS_EXTERNAL, 0, maxInt);
+        SetIfPresent(command, "udpSendsPerPortInternal", pc.UDP_SENDS_PER_PORT_INTERNAL, 1, maxInt);
+        SetIfPresent(command, "udpSendsPerPortExternal", pc.UDP_SENDS_PER_PORT_EXTERNAL, 1, maxInt);
+        SetIfPresent(command, "internalIpWaitAfterAttempts", pc.INTERNAL_IP_WAIT_AFTER_ATTEMPTS, 0, maxInt);
+        SetIfPresent(command, "maxPredictivePortRange", pc.MAX_PREDICTIVE_PORT_RANGE, 0, maxInt);
+        SetIfPresent(command, "externalIpWaitBetweenPorts", pc.EXTERNAL_IP_WAIT_BETWEEN_PORTS, 0, maxInt);
+        SetIfPresent(command, "externalIpWaitAfterFirstTtl", pc.EXTERNAL_IP_WAIT_AFTER_FIRST_TTL, 0, maxInt);
+        SetIfPresent(command, "externalIpWaitAfterAllAttempts", pc.EXTERNAL_IP_WAIT_AFTER_ALL_ATTEMPTS, 0, maxInt);
+        SetIfPresent(command, "maximumNumberOfInternalIdsToCheck", pc.MAXIMUM_NUMBER_OF_INTERNAL_IDS_TO_CHECK, 0, MAXIMUM_NUMBER_OF_INTERNAL_IDS);
+        auto retry = command.find("retryOnFailure");
+        if (retry != command.end() && !retry->is_null())
+            pc.retryOnFailure = retry->get<bool>();
+    }
+
+    RakNet::NatTypeDetectionClient& NatCommands::RequireTypeDetectionClient()
+    {
+        if (typeDetectionClient_ == nullptr)
+            throw PluginCommandError("no NatTypeDetectionClient is attached; send natTypeDetectionClientAttach first");
+        return *typeDetectionClient_;
+    }
+
+    ObservableNatTypeDetectionServer& NatCommands::RequireTypeDetectionServer()
+    {
+        if (typeDetectionServer_ == nullptr)
+            throw PluginCommandError("no NatTypeDetectionServer is attached; send natTypeDetectionServerAttach first");
+        return *typeDetectionServer_;
+    }
+
+    RakNet::NatPunchthroughClient& NatCommands::RequirePunchthroughClient()
+    {
+        if (punchthroughClient_ == nullptr)
+            throw PluginCommandError("no NatPunchthroughClient is attached; send natPunchthroughClientAttach first");
+        return *punchthroughClient_;
+    }
+}

@@ -965,6 +965,8 @@ public sealed partial class RakPeer : IPluginHost, IAsyncDisposable, IDisposable
 
     internal TimeSpan PluginUpdateInterval => _options.PluginUpdateInterval;
 
+    internal IDatagramTransportFactory TransportFactory => _options.Transport;
+
     internal bool IsStreamClosed => _streamClosed;
 
     internal int QueuedEventCount => _queue.Count;

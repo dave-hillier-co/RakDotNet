@@ -61,6 +61,7 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
                 MaxConnections = options.MaxConnections,
                 MaxIncomingConnections = options.MaxIncoming,
                 Bindings = [new SocketBinding(new IPEndPoint(IPAddress.Parse(options.Host), options.Port))],
+                Transport = TransportFactory,
                 // A driver stands for a process of its own, and RakNet's clock starts with the process (GetTime.cpp:183-189);
                 // peers on one TimeProvider share a clock, so each driver gets its own.
                 TimeProvider = new ProcessClock(),
@@ -381,6 +382,7 @@ public sealed partial class RakDotNetPeerDriver : IPeerDriver
             return;
         }
         await ShutdownAsync(100, CancellationToken.None).ConfigureAwait(false);
+        _udpForwarder?.Dispose();
     }
 
     /// <summary>

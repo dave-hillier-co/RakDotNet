@@ -277,3 +277,35 @@ public enum MessageId : byte
     /// <summary>ID_USER_PACKET_ENUM</summary>
     UserPacketEnum = 134,
 }
+
+/// <summary>
+/// RakNet's OutOfBandIdentifiers (MessageIdentifiers.h:23-37): the byte after ID_OUT_OF_BAND_INTERNAL in the payload of
+/// an out-of-band message, used by the NAT and Router2 plugins. Values are positional in the C++ enum.
+/// </summary>
+public enum OutOfBandId : byte
+{
+    /// <summary>ID_NAT_ESTABLISH_UNIDIRECTIONAL</summary>
+    NatEstablishUnidirectional = 0,
+    /// <summary>ID_NAT_ESTABLISH_BIDIRECTIONAL</summary>
+    NatEstablishBidirectional = 1,
+    /// <summary>ID_NAT_TYPE_DETECT</summary>
+    NatTypeDetect = 2,
+    /// <summary>ID_ROUTER_2_REPLY_TO_SENDER_PORT</summary>
+    Router2ReplyToSenderPort = 3,
+    /// <summary>ID_ROUTER_2_REPLY_TO_SPECIFIED_PORT</summary>
+    Router2ReplyToSpecifiedPort = 4,
+    /// <summary>ID_ROUTER_2_MINI_PUNCH_REPLY</summary>
+    Router2MiniPunchReply = 5,
+    /// <summary>ID_ROUTER_2_MINI_PUNCH_REPLY_BOUNCE</summary>
+    Router2MiniPunchReplyBounce = 6,
+    /// <summary>ID_XBOX_360_VOICE</summary>
+    Xbox360Voice = 7,
+    /// <summary>ID_XBOX_360_GET_NETWORK_ROOM</summary>
+    Xbox360GetNetworkRoom = 8,
+    /// <summary>ID_XBOX_360_RETURN_NETWORK_ROOM</summary>
+    Xbox360ReturnNetworkRoom = 9,
+    /// <summary>ID_NAT_PING</summary>
+    NatPing = 10,
+    /// <summary>ID_NAT_PONG</summary>
+    NatPong = 11,
+}

@@ -218,6 +218,38 @@ public class PluginTests
     }
 
     [Fact]
+    public void A_plugin_that_rewrites_the_guid_passes_the_packet_on_with_it()
+    {
+        // Router2.cpp:493 sets packet->guid in OnFailedConnectionAttempt; later plugins and the reader see it.
+        using var peers = new ManualPeers();
+        var seenByLater = new List<RakNetGuid>();
+        peers.Client.Plugins.Attach(new RecordingPlugin("a", [])
+        {
+            Consume = e =>
+            {
+                e.RewriteGuid(new RakNetGuid(0x1234));
+                return false;
+            },
+        });
+        peers.Client.Plugins.Attach(new RecordingPlugin("b", [])
+        {
+            Consume = e =>
+            {
+                seenByLater.Add(e.RakNetGuid);
+                return false;
+            },
+        });
+
+        peers.Client.SendLoopback([0x86, 1]);
+        peers.Client.Update();
+        Assert.True(peers.Client.Events.TryRead(out var e));
+
+        Assert.Equal(new RakNetGuid(0x1234), e.RakNetGuid);
+        Assert.Equal([new RakNetGuid(0x1234)], seenByLater);
+        Assert.Equal([0x86, 1], e.ToArray());
+    }
+
+    [Fact]
     public void Rewriting_the_id_into_another_kind_of_event_is_refused()
     {
         using var peers = new ManualPeers();

@@ -59,6 +59,13 @@ public sealed class RakPeerLowLevel
     /// </summary>
     public void ChangeSystemAddress(RakNetGuid rakNetGuid, SystemAddress address) => _peer.ChangeSystemAddress(rakNetGuid, address);
 
+    /// <summary>
+    /// The factory the peer bound its sockets with (<see cref="RakPeerOptions.Transport"/>). Plugins that open sockets of
+    /// their own, as NatTypeDetectionClient and NatTypeDetectionServer do with CreateNonblockingBoundSocket
+    /// (NatTypeDetectionCommon.cpp:107-160), bind them here so they share the peer's network.
+    /// </summary>
+    public IDatagramTransportFactory TransportFactory => _peer.TransportFactory;
+
     /// <summary>SetIncomingDatagramEventHandler.</summary>
     public IncomingDatagramFilter? IncomingDatagramFilter
     {

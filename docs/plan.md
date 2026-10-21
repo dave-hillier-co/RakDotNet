@@ -82,6 +82,7 @@ RakNet's own tests (`Samples/Tests`) run both peers in one process against RakNe
 - `IPeerDriver`: one C# interface with `NativePeerDriver` (spawns `interop-peer`) and `RakDotNetPeerDriver`.
 - Every scenario runs as a matrix: native-native (validates the harness and gives the baseline), C#-native, native-C#, C#-C#. A scenario with three or more peers makes the first peer one kind and the rest the other, so across the four combinations every pair of kinds talks in both roles; peer-to-peer topologies connect the peers to each other directly, without the proxy, because each connects to addresses the others report.
 - A C# UDP proxy sits between the peers. It records datagrams (golden vectors, see [golden-vectors.md](golden-vectors.md)) and injects seeded loss, reordering, duplication and delay.
+- A C# NAT emulator puts peers behind full cone, address restricted, port restricted and symmetric routers on loopback, so NAT type detection and punchthrough run deterministically on one machine. A peer reaches its router through a gateway header ([interop-protocol.md](interop-protocol.md)): `interop-peer` replaces `sendto` and `recvfrom` for it, a RakDotNet peer uses a transport that adds it.
 - RakNet is fetched by CMake `FetchContent` pinned to upstream commit `1a169895a900c9fc4841c556e16514182b75faf8`, since `reference/` is not committed. Our own CMake compiles `Source/*.cpp` directly; RakNet's CMake files are never configured.
 - RakNet needs two compiler workarounds under modern clang, applied as flags without patching its sources: it is compiled as `gnu++98`, and with `-fno-strict-float-cast-overflow` because `CCRakNetSlidingWindow` casts `-1.0` to an unsigned integer as an "RTT unknown" sentinel, which clang otherwise compiles to a trap.
 
@@ -117,6 +118,12 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | FileListTransfer | Files sent whole with their contexts, referenced files read and sent a chunk at a time with acknowledgements, split message progress of a large file |
 | DirectoryDeltaTransfer, `DirectoryDeltaTransferTest` | A subdirectory downloaded into another with only the missing or changed files sent, with and without an incremental reader on the uploader, and a file named outside the output directory |
 | CloudTest, CloudClient, CloudServer | Two servers that added each other answering gets with their own rows then the other's, paging through both, a client on one server subscribed to a client on the other told of its posts and releases until it unsubscribes, and a directory server listing its clients and its own load with a filter on who may post it |
+| NATCompleteClient, NATCompleteServer: NAT type detection | A client behind no router and behind each kind of router is told its kind; a client that never runs the test is asked twice, then told symmetric |
+| NATCompleteClient, NATCompleteServer: NAT punchthrough | Punchthrough between routers of each kind that allow it, then a connection through both; failure where they do not, with and without a retry; an unknown recipient, an unresponsive one, one that leaves the facilitator |
+| NATCompleteClient, NATCompleteServer: UDP proxy | Clients behind symmetric routers, after punchthrough fails, connect through a proxy server that logs into a coordinator on the same peer; logins without, with the wrong and with the right password; no servers, an unknown recipient, a request in progress, every server busy |
+| NATCompleteClient: Router2, Router2 | Routing through a router both systems are connected to, then a connection through it; rerouting through another when the router drops; no router connected to the endpoint |
+| UDPForwarder | A connection through the forwarder's port; RakNet's results for invalid, existing and excess entries; an entry removed after its timeout |
+| RelayPluginTest | Participants added on request when the server accepts them; a message to a participant by name; groups joined, messaged, listed and left, and left on disconnection |
 
 ## Milestones
 

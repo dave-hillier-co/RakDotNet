@@ -1,13 +1,15 @@
 // interop-peer: one RakNet RakPeerInterface driven by JSON Lines on stdin and stdout.
 // The protocol is specified in docs/interop-protocol.md.
 
-#include "Hex.h"
-#include "Names.h"
-#include "PacketEvent.h"
-#include "KeyGeneration.h"
 #include "CloudCommands.h"
 #include "FileCommands.h"
+#include "Hex.h"
+#include "KeyGeneration.h"
+#include "Names.h"
+#include "NatCommands.h"
+#include "PacketEvent.h"
 #include "PluginCommands.h"
+#include "RelayCommands.h"
 #include "ReplicationCommands.h"
 #include "SecurityCommands.h"
 #include "TeamCommands.h"
@@ -159,7 +161,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_), files_(peer_), cloud_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_), files_(peer_), cloud_(peer_), nat_(peer_), relay_(peer_) {}
 
         ~InteropPeer()
         {
@@ -340,6 +342,12 @@ namespace
             {
             }
             else if (cloud_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (nat_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (relay_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -632,6 +640,8 @@ namespace
         interop::TeamCommands teams_;
         interop::FileCommands files_;
         interop::CloudCommands cloud_;
+        interop::NatCommands nat_;
+        interop::RelayCommands relay_;
     };
 }
 
