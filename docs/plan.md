@@ -147,7 +147,7 @@ Each milestone has an exit criterion that is a passing test. Milestones build a 
    3. Topology and teams: ConnectionGraph2, FullyConnectedMesh2, TeamManager, TeamBalancer. RakNet 4.081 has no FullyConnectedMesh source, only a stale feature switch; its sample uses FullyConnectedMesh2.
    4. NAT traversal and relaying: NatPunchthroughClient/Server, NatTypeDetectionClient/Server, UDPProxyClient/Server/Coordinator, UDPForwarder, Router2, RelayPlugin.
    5. Files and cloud: FileOperations, FileListTransfer, DirectoryDeltaTransfer, CloudClient, CloudServer.
-   6. TCP, HTTP and console: TCPInterface, PacketizedTCP, HTTPConnection, HTTPConnection2, ConsoleServer, RakNetTransport, TelnetTransport, LogCommandParser, RakNetCommandParser.
+   6. TCP, HTTP and console: TCPInterface, PacketizedTCP, HTTPConnection, HTTPConnection2, ConsoleServer, RakNetTransport2, TelnetTransport, LogCommandParser, RakNetCommandParser.
    7. External services: EmailSender, DynDNS, Rackspace.
 
 ## Platforms and CI
