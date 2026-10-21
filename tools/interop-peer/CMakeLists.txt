@@ -51,6 +51,12 @@ check_cxx_compiler_flag(-fno-strict-float-cast-overflow INTEROP_HAS_FLOAT_CAST_O
 if(INTEROP_HAS_FLOAT_CAST_OVERFLOW_FLAG)
   target_compile_options(raknet_static PRIVATE -fno-strict-float-cast-overflow)
 endif()
+# TCPInterface's thread takes accept()'s -1 for a new socket (TCPInterface.cpp:1064-1066), as it gets when Stop closes the
+# listening socket under it, and passes it to FD_SET on its next pass (TCPInterface.cpp:1038). glibc's fortified FD_SET
+# aborts the process on that descriptor; Ubuntu's compilers fortify by default, so RakNet is compiled without it.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(raknet_static PRIVATE -U_FORTIFY_SOURCE)
+endif()
 target_link_libraries(raknet_static PUBLIC Threads::Threads)
 
 function(interop_peer_settings target)
