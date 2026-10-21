@@ -88,6 +88,7 @@ add_library(interop_logic STATIC
   src/ServiceRedirects.cpp
   src/TcpCommands.cpp
   src/TeamCommands.cpp
+  src/ThreadPriority.cpp
   src/TopologyCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)
 target_link_libraries(interop_logic PUBLIC raknet_static interop_keys nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})

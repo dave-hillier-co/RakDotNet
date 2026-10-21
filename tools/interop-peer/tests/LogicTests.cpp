@@ -7,9 +7,16 @@
 #include "SecurityCommands.h"
 
 #include "MessageIdentifiers.h"
+#include "RakThread.h"
 
+#include <pthread.h>
+#include <sched.h>
+
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <functional>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -177,6 +184,40 @@ namespace
         nlohmann::ordered_json event = interop::DescribePacket(data, sizeof(data), 1, "127.0.0.1:1", 0);
         CHECK(event["messageId"] == ID_TIMESTAMP);
         CHECK(!event.contains("timestamp"));
+    }
+
+    std::atomic<int> createdThreadPriority{-1};
+
+    RAK_THREAD_DECLARATION(ReportPriority)
+    {
+        (void)arguments;
+        int policy = 0;
+        sched_param parameters{};
+        pthread_getschedparam(pthread_self(), &policy, &parameters);
+        createdThreadPriority = parameters.sched_priority;
+        return 0;
+    }
+
+    int PriorityOfThreadCreatedWith(int raknetPriority)
+    {
+        createdThreadPriority = -1;
+        CHECK(RakNet::RakThread::Create(ReportPriority, nullptr, raknetPriority) == 0);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (createdThreadPriority == -1 && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return createdThreadPriority;
+    }
+
+    // RakNet passes Windows thread priorities to pthreads: 0 (THREAD_PRIORITY_NORMAL) for the receive threads of
+    // NatTypeDetection's sockets, and 1000 for RakPeer's threads on POSIX (RakPeer.cpp:385-397). macOS applies them as
+    // scheduling priorities, so those receive threads run at the lowest priority and starve on a busy machine.
+    TEST(RakNet_threads_run_at_the_default_priority_whatever_priority_RakNet_asks_for)
+    {
+        int policy = 0;
+        sched_param parameters{};
+        pthread_getschedparam(pthread_self(), &policy, &parameters);
+        CHECK(PriorityOfThreadCreatedWith(0) == parameters.sched_priority);
+        CHECK(PriorityOfThreadCreatedWith(1000) == parameters.sched_priority);
     }
 }
 

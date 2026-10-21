@@ -85,6 +85,7 @@ RakNet's own tests (`Samples/Tests`) run both peers in one process against RakNe
 - A C# NAT emulator puts peers behind full cone, address restricted, port restricted and symmetric routers on loopback, so NAT type detection and punchthrough run deterministically on one machine. A peer reaches its router through a gateway header ([interop-protocol.md](interop-protocol.md)): `interop-peer` replaces `sendto` and `recvfrom` for it, a RakDotNet peer uses a transport that adds it.
 - RakNet is fetched by CMake `FetchContent` pinned to upstream commit `1a169895a900c9fc4841c556e16514182b75faf8`, since `reference/` is not committed. Our own CMake compiles `Source/*.cpp` directly; RakNet's CMake files are never configured.
 - RakNet needs two compiler workarounds under modern clang, applied as flags without patching its sources: it is compiled as `gnu++98`, and with `-fno-strict-float-cast-overflow` because `CCRakNetSlidingWindow` casts `-1.0` to an unsigned integer as an "RTT unknown" sentinel, which clang otherwise compiles to a trap.
+- RakNet hands Windows thread priorities to pthreads (0 for UDPForwarder's and NatTypeDetection's threads, 1000 for RakPeer's). Linux ignores them; macOS runs the threads at those priorities, which starves the priority-0 threads on a busy machine. `interop-peer` replaces `pthread_attr_setschedparam` so every RakNet thread runs at the default priority on both platforms, as `tools/interop-peer/src/ThreadPriority.cpp` explains.
 
 ### Pass criterion
 
