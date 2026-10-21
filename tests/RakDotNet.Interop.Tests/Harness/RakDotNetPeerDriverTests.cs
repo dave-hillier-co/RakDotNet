@@ -23,6 +23,34 @@ public sealed partial class RakDotNetPeerDriverTests
     }
 
     [Fact]
+    public async Task Shutting_down_closes_the_Rackspace_connection()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var server = (IPEndPoint)listener.LocalEndpoint;
+        await using var driver = RakDotNetPeerDriver.Launch();
+        await driver.AuthenticateRackspaceAsync(
+            new RackspaceAuthentication("auth.example.com", "user", "key", [new ServiceRedirect("auth.example.com", server)]), Token);
+        using var accepted = await listener.AcceptSocketAsync(Token);
+
+        await driver.ShutdownAsync(0, Token);
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        var buffer = new byte[4096];
+        try
+        {
+            while (await accepted.ReceiveAsync(buffer, System.Net.Sockets.SocketFlags.None, timeout.Token) > 0)
+            {
+            }
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            // A reset is a close too.
+        }
+    }
+
+    [Fact]
     public void A_packet_is_reported_with_its_sender_and_data()
     {
         // RakPeer.cpp:4693-4699: a pong is the ID, the time as a 4-byte big-endian TimeMS, then the response.

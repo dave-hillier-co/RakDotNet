@@ -72,6 +72,7 @@ set_target_properties(interop_keys PROPERTIES CXX_STANDARD 98 CXX_STANDARD_REQUI
 # Translation logic (hex, enum names, packet events, plugin and security commands), shared by the peer and its tests.
 add_library(interop_logic STATIC
   src/CloudCommands.cpp
+  src/ConsoleCommands.cpp
   src/FileCommands.cpp
   src/Hex.cpp
   src/Names.cpp
@@ -83,6 +84,9 @@ add_library(interop_logic STATIC
   src/ReplicaManager3Commands.cpp
   src/ReplicationCommands.cpp
   src/SecurityCommands.cpp
+  src/ServiceCommands.cpp
+  src/ServiceRedirects.cpp
+  src/TcpCommands.cpp
   src/TeamCommands.cpp
   src/TopologyCommands.cpp)
 target_include_directories(interop_logic PUBLIC src)

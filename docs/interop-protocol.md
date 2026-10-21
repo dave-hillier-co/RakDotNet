@@ -368,6 +368,94 @@ An unassigned address in a callback is `"UNASSIGNED_SYSTEM_ADDRESS"`, as `System
 and RelayPlugin's results reach the driver as `packet` events. The peer sets no `Router2DebugInterface`: Router2 formats
 its messages with `%I64d`, as `NatPunchthroughClient` does.
 
+### TCP commands
+
+TCP commands drive a `TCPInterface` or `PacketizedTCP` next to the peer, independent of `startup`, and `HTTPConnection` and
+`HTTPConnection2` on it. They live in `tools/interop-peer/src/TcpCommands.cpp`. Every command but `tcpStart` and
+`httpFormat` fails with `ok:false` until `tcpStart` has created the interface. Addresses are `"a.b.c.d:port"`, and an empty
+or absent address is `UNASSIGNED_SYSTEM_ADDRESS`.
+
+A thread polls the interface every millisecond as RakNet's samples do and records what it reports, in order, until
+`tcpPoll` collects it. Each poll calls `HasNewIncomingConnection` and `HasCompletedConnectionAttempt` until they report
+nothing, then `Receive` until it returns nothing, then `HasFailedConnectionAttempt` and `HasLostConnection`. Once
+`httpConnectionStart` has run, each poll instead passes every packet to `HTTPConnection::ProcessTCPPacket` and then calls
+its `Update`, which takes the connection events itself, as Samples/PHPDirectoryServer2 does.
+
+A native peer built for POSIX returns `httpFormat` requests cut at 511 bytes, as RakString's printf-style `Set` cuts its
+output there (`RakString.cpp:1376-1386`); RakDotNet, like RakNet on Windows, returns them whole.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `tcpStart` | `packetized` (false), `port` (0), `maxIncoming` (0), `maxConnections` (0), `host` (bind address; absent binds every address) | `started` (bool), `port` (the listening port, 0 when not listening) | `GetInstance` of `TCPInterface` or `PacketizedTCP` on first use, then `Start`; the port is read from the listening socket |
+| `tcpStop` | | | `Stop` |
+| `tcpConnect` | `host`, `port`, `block` (false) | `address` (empty for `UNASSIGNED_SYSTEM_ADDRESS`) | `Connect` |
+| `tcpSend` | `address`, `data` (hex), `broadcast` (false) | | `Send` |
+| `tcpSendList` | `address`, `parts` (array of hex strings), `broadcast` (false) | `result` (bool) | `SendList` |
+| `tcpClose` | `address` | | `CloseConnection` |
+| `tcpInfo` | `address` (optional) | `started`, `connections` (addresses), `connectionCount`, and with `address` `outgoingBytes` | `WasStarted`, `GetConnectionList`, `GetConnectionCount`, `GetOutgoingDataBufferSize` |
+| `tcpPoll` | | `events`: array of `{kind,address}`, with `data` (hex) when `kind` is `packet`; `kind` is `newIncomingConnection`, `completedConnectionAttempt`, `failedConnectionAttempt`, `lostConnection` or `packet` | what the polling recorded since the last `tcpPoll` |
+| `httpFormat` | `method` (`GET`, `POST`, `PUT` or `DELETE`), `uri`, `contentType` (""), `body` (""), `extraHeaders` ("") | `request` (hex) | `RakString::FormatForGET`, `FormatForPOST`, `FormatForPUT`, `FormatForDELETE` |
+| `httpConnectionStart` | `host`, `port` (80) | | `HTTPConnection::Init` on the interface |
+| `httpConnectionGet` | `path` | | `Get` |
+| `httpConnectionPost` | `path`, `data`, `contentType` (`application/x-www-form-urlencoded`) | | `Post` |
+| `httpConnectionPoll` | | `busy`, `state` (`GetState`), `serverAddress`, `results` (hex of each `Read`), `badResponses` (array of `{code,data}`, `data` hex) | `IsBusy`, `GetState`, `GetServerAddress`, `HasRead` and `Read`, `HasBadResponse` |
+| `http2Attach` | | | `AttachPlugin` of an `HTTPConnection2` to the interface; again is a no-op |
+| `http2Transmit` | `request` (hex, sent as a C string), `host`, `port` (80), `useAddress` (absent) | `result` (bool) | `TransmitRequest` |
+| `http2Poll` | | `busy`, `responses` (array of `{stringTransmitted,hostTransmitted,response,hostReceived,contentOffset}`, `stringTransmitted` and `response` hex) | `IsBusy`, `GetResponse` until it returns false |
+
+An address given to `tcpSend`, `tcpSendList`, `tcpClose` or `tcpInfo` is replaced by the matching entry of
+`GetConnectionList`, which carries the slot index RakNet keeps in a `SystemAddress`: `CloseConnection` of an address
+without one frees the slot at that index, out of range (`TCPInterface.cpp:593-605`). `Stop` closes the socket of every
+slot, and a slot never used has socket 0 (`TCPInterface.cpp:298-304`), so `tcpStop` saves the peer's stdin, descriptor
+0, around the call and restores it.
+
+### Console commands
+
+Console commands put a `ConsoleServer` on the peer, set up as `Samples/CommandConsoleServer` sets one up, with
+`RakNetTransport2` attached to the peer or a `TelnetTransport` of its own. They live in
+`tools/interop-peer/src/ConsoleCommands.cpp`. `consoleStart` needs a started peer, and the other commands fail with
+`ok:false` until it has created a `LogCommandParser`. The console is updated by a plugin attached after it, so
+`ConsoleServer::Update` runs each time `RakPeer::Receive` updates its plugins, under the lock every command holds. A
+console client over `RakNetTransport2` is any peer: it connects, sends `ID_TRANSPORT_STRING`, the line and a zero byte,
+and receives each reply as an `ID_TRANSPORT_STRING` packet. A telnet client is a `tcpStart` and `tcpConnect` to the
+reported port.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `consoleStart` | `transport` (`raknet` or `telnet`), `port` (0, for telnet), `prompt` ("", none), `channels` (array of names, []), `rakNetParser` (true), `logParser` (true) | `port` (the telnet listening port, 0 for `raknet`) | `AddCommandParser` of a `RakNetCommandParser` and a `LogCommandParser`, `AttachPlugin` of a `RakNetTransport2` for `raknet`, `SetTransportProvider`, `SetPrompt`, `SetRakPeerInterface`, `AddChannel` for each channel |
+| `consoleLog` | `channel`, `text` | | `LogCommandParser::WriteLog(channel, "%s", text)` |
+| `packetConsoleLoggerAttach` | | | `AttachPlugin` of a `PacketConsoleLogger` after `SetLogCommandParser`; again is a no-op |
+
+`TelnetTransport` keeps its `TCPInterface` protected, and `TCPInterface` its listening socket, so the port is read
+through a subclass and a pointer to the protected member. `LogCommandParser` keeps the channel name pointers it is given, so the
+peer keeps every name it passes alive.
+
+### External service commands
+
+External service commands run RakNet's `EmailSender`, `DynDNS` and `Rackspace` against servers the test runs, usually
+another peer's `tcpStart` interface answering with scripted text. They live in `tools/interop-peer/src/ServiceCommands.cpp`
+and need no `startup`. `emailSend` blocks until `EmailSender::Send` returns, so the reply comes when the email is sent or
+has failed. `DynDNS` and `Rackspace` are moved on only by `dynDnsUpdate` and `rackspacePoll`.
+
+`DynDNS` connects to checkip.dyndns.org and members.dyndns.org on port 80, and `Rackspace` to its hosts on port 443, so
+`dynDnsStart` and `rackspaceAuthenticate` take `redirects`: an array of `{"host", "toHost", "toPort"}`, and each
+connection either makes to `host` goes to `toHost:toPort` instead. Redirects last for the life of the peer. The native peer
+compiles a second copy of RakNet's `DynDNS.cpp` and `Rackspace.cpp` (`ServiceRedirects.cpp`), unchanged except that each
+`TCPInterface::Connect` they make passes through the redirects and the classes are renamed; RakNet's sources are untouched.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `emailSend` | `host`, `port`, `body`, `sender`, `recipient`, `senderName`, `recipientName`, `subject`, `password` (each absent or null is a null pointer), `attachments` (array of `{"name", "data"}`, data in hex, []) | `result` (null on success, else the error text) | `FileList::AddFile` of each attachment as Samples/SendEmail adds one, then `EmailSender::Send` with doPrintf false |
+| `dynDnsStart` | `dnsHost`, `newIp` (absent or null for none), `usernameAndPassword`, `redirects` ([]) | | `DynDNS::UpdateHostIPAsynch`, creating the `DynDNS` on first use |
+| `dynDnsUpdate` | | `running`, `completed`, `myPublicIp`; once completed also `resultCode` (`DynDnsResultCode` as an integer), `description`, `successful` | `Update`, then `IsRunning`, `IsCompleted`, `GetMyPublicIP`, `GetCompletedResultCode`, `GetCompletedDescription`, `WasResultSuccessful` |
+| `rackspaceAuthenticate` | `url`, `user`, `key`, `maxConnections` (1, used on first use), `redirects` ([]) | `address` (empty for `UNASSIGNED_SYSTEM_ADDRESS`) | on first use a `TCPInterface` started with `Start(0, 0, maxConnections)` and a `Rackspace` with a recording `RackspaceEventCallback_Default`, as Samples/RackspaceConsole sets them up; then `Authenticate` |
+| `rackspaceOperation` | `op` (the `Rackspace` method name, such as `ListServers` or `CreateServer`), `args` (array of strings in parameter order, []) | | that method |
+| `rackspacePoll` | | `results` (array of `{"callback", "eventType", "eventName", "html"}`, html in hex), `failures` (array of `{"operationType", "url"}`) | one pass of Samples/RackspaceConsole's loop: `Receive` until nothing, each packet to `OnReceive`, then one `HasLostConnection` to `OnClosedConnection`; then the callbacks made since the last poll, by name through `ExecuteDefault`, with `EventTypeToString`, and `OnConnectionAttemptFailure` |
+
+`EmailSender` stops its interface when `Send` returns and `DynDNS` when an update completes, and `TCPInterface::Stop`
+closes descriptor 0 for every slot without a socket (TCPInterface.cpp:298-304, 1266-1278). The peer keeps a duplicate of
+stdin while those calls run and puts it back after them.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:

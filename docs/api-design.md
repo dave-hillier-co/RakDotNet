@@ -217,7 +217,8 @@ RakNet keeps two plugin lists: plugins whose `UsesReliabilityLayer()` is false (
 | `OnInternalPacket` | `INetworkObserver.OnFrame(in FrameInfo)`, on send, resend and receive, where ReliabilityLayer.cpp calls it |
 | `OnAck` | `INetworkObserver.OnAck`, for each message number of an acknowledged datagram |
 | `OnPushBackPacket` | `IRakPlugin.OnInjected` |
-| `GetRakPeerInterface` / `SetRakPeerInterface` / `SetTCPInterface` | the `IPluginHost` passed to `OnAttached`; `host.Peer` |
+| `GetRakPeerInterface` / `SetRakPeerInterface` | the `IPluginHost` passed to `OnAttached`; `host.Peer` |
+| `SetTCPInterface`, and the hooks `TCPInterface` calls | `ITcpPlugin` in `RakDotNet.Plugins`, attached with `TcpInterface.AttachPlugin`; its hooks take the address, as a TCP connection has no GUID or `RakConnection`, and `OnAttached` gets the `TcpInterface`, an `IPluginHost` whose `Peer` is null |
 | `GetMyGUIDUnified` | `host.RakNetGuid` |
 | `SendUnified` / `SendListUnified` | `host.Send` / `host.Broadcast` with any `OutgoingMessage` |
 | `AllocatePacketUnified` / `PushBackPacketUnified` / `DeallocPacketUnified` | `host.Inject` / `OwnedPeerEvent.Dispose`; `generatedLocally: true` for a packet whose `wasGeneratedLocally` the plugin sets |

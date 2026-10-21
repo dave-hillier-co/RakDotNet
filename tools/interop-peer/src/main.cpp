@@ -2,6 +2,7 @@
 // The protocol is specified in docs/interop-protocol.md.
 
 #include "CloudCommands.h"
+#include "ConsoleCommands.h"
 #include "FileCommands.h"
 #include "Hex.h"
 #include "KeyGeneration.h"
@@ -12,6 +13,8 @@
 #include "RelayCommands.h"
 #include "ReplicationCommands.h"
 #include "SecurityCommands.h"
+#include "ServiceCommands.h"
+#include "TcpCommands.h"
 #include "TeamCommands.h"
 #include "TopologyCommands.h"
 
@@ -161,7 +164,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_), files_(peer_), cloud_(peer_), nat_(peer_), relay_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_), files_(peer_), cloud_(peer_), nat_(peer_), relay_(peer_), console_(peer_) {}
 
         ~InteropPeer()
         {
@@ -348,6 +351,15 @@ namespace
             {
             }
             else if (relay_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (tcp_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (console_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (services_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -642,6 +654,9 @@ namespace
         interop::CloudCommands cloud_;
         interop::NatCommands nat_;
         interop::RelayCommands relay_;
+        interop::TcpCommands tcp_;
+        interop::ConsoleCommands console_;
+        interop::ServiceCommands services_;
     };
 }
 

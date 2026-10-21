@@ -65,10 +65,14 @@ public readonly ref struct OutgoingMessage
 
     public int BitLength => _bitLength;
 
-    internal int ByteLength => (_bitLength + 7) / 8;
+    /// <summary>The bytes the message occupies, its last byte counted when partial (GetNumberOfBytesUsed).</summary>
+    public int ByteLength => (_bitLength + 7) / 8;
 
-    /// <summary>Copies the message into <paramref name="destination"/>, which holds at least <see cref="ByteLength"/> bytes.</summary>
-    internal void CopyTo(Span<byte> destination)
+    /// <summary>
+    /// Copies the message into <paramref name="destination"/>, which holds at least <see cref="ByteLength"/> bytes: how a
+    /// plugin host other than <see cref="RakPeer"/> reads what it is asked to send.
+    /// </summary>
+    public void CopyTo(Span<byte> destination)
     {
         if (_isSequence)
             _parts.CopyTo(destination);
