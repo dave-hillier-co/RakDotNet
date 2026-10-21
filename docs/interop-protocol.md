@@ -111,6 +111,77 @@ Every filter set that `messageFilterAllow`, `messageFilterAllowRpc4`, `messageFi
 
 TwoWayAuthentication's results reach the driver as `packet` events.
 
+### Replication commands
+
+The object replication and RPC commands live in `tools/interop-peer/src/ReplicationCommands.cpp`. RandSync, the NetworkIDManager, the GridSectorizer and the VariableDeltaSerializer are created on first use and need no attach; every RPC4 command but `rpc4Attach` fails with `ok:false` until RPC4 is attached. Bit strings are hex with a bit count, most significant bit of each byte first, as a BitStream holds them; a missing count means every bit of the bytes. NetworkIDs are decimal strings, as GUIDs are.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `rakNetRandom` | `seed`, `count` (0), `floatCount` (0), `fillBytes` (absent) | `values` (the `RandomMT` results), `floatBits` (the `FrandomMT` results as their 32 bits), and with `fillBytes` `fill` (hex) and `afterFill` (the next `RandomMT`) | a new `RakNetRandom`: `SeedMT`, then `RandomMT`, `FrandomMT` and `FillBufferMT` in that order |
+| `randSyncSeed` | `seed`, `skip` (absent) | | `RakNetRandomSync::SeedMT`, with `skip` its two-argument form |
+| `randSyncNext` | `count` (1), `float` (false) | `values` (numbers, or float bits with `float`) | `RandomMT` or `FrandomMT` |
+| `randSyncSerializeConstruction` | | `data` (hex) | `SerializeConstruction` |
+| `randSyncDeserializeConstruction` | `data` (hex) | `result` (bool) | `DeserializeConstruction` |
+| `randSyncSerialize` | | `data` (hex) | `Serialize` |
+| `randSyncDeserialize` | `data` (hex, at least 4 bytes) | | `Deserialize` |
+| `randSyncSetCallCount` | `callCount` | | `SetCallCount` |
+| `randSyncInfo` | | `seed`, `callCount` | `GetSeed`, `GetCallCount` |
+| `networkIdObjectNew` | `handle` (an integer naming the object) | | a `NetworkIDObject` with no manager |
+| `networkIdObjectSetManager` | `handle`, `attach` (true) | | `SetNetworkIDManager` of the peer's manager, or of none |
+| `networkIdObjectSetId` | `handle`, `networkId` | | `SetNetworkID` |
+| `networkIdObjectSetParent` | `handle`, `parent` (a handle; absent for none) | | `SetParent` |
+| `networkIdObjectDelete` | `handle` | | the destructor |
+| `networkIdObjectInfo` | `handle` | `networkId`, `hasManager` | `GetNetworkID`, `GetNetworkIDManager` |
+| `networkIdLookup` | `networkId` | `handle` and `object` (handles or null) | `GET_BASE_OBJECT_FROM_ID`, `GET_OBJECT_FROM_ID` |
+| `networkIdClear` | | | `Clear` |
+| `gridInit` | `maxCellWidth`, `maxCellHeight` (positive), `minX`, `minY`, `maxX`, `maxY` | | `GridSectorizer::Init` |
+| `gridAdd` | `entry` (a positive integer), `minX`, `minY`, `maxX`, `maxY` (a non-empty rectangle) | | `AddEntry` |
+| `gridGet` | `minX`, `minY`, `maxX`, `maxY` | `entries` (in the order returned) | `GetEntries` |
+| `gridClear` | | | `Clear` |
+| `deltaSerialize` | `groups` (array, below), `preSerializeTick` (false) | `groups`, an array of `{data,bits,receipt,sent}` | `OnPreSerializeTick`, then per group `Begin*Serialize`, `SerializeVariable` of each int and `EndSerialize`, all on one `SerializationContext` |
+| `deltaPreSerializeTick` | | | `OnPreSerializeTick` |
+| `deltaReceipt` | `target` (guid), `receipt`, `arrived` | | `OnMessageReceipt` |
+| `deltaRemoveSystem` | `target` (guid) | | `RemoveRemoteSystemVariableHistory` |
+| `deltaDeserialize` | `data` (hex), `count` | `variables`, an array of `{changed,value}` (`value` null when unchanged) | `DeserializeVariable` of an int, `count` times |
+| `rpc4Attach` | | | `AttachPlugin` of an `RPC4`; again is a no-op |
+| `rpc4RegisterFunction` | `name` | `result` (bool), `handler` (null when refused) | `RegisterFunction` |
+| `rpc4RegisterSlot` | `name`, `priority` (0), `interrupt` (false) | `handler` | `RegisterSlot`; with `interrupt` the slot calls `InterruptSignal` |
+| `rpc4RegisterBlocking` | `name`, `returnData` (hex, absent for none), `returnBits` | `result` (bool), `handler` (null when refused) | `RegisterBlockingFunction` of a function that writes `returnData` |
+| `rpc4RegisterLocalCallback` | `name`, `messageId` | | `RegisterLocalCallback` |
+| `rpc4UnregisterFunction`, `rpc4UnregisterBlocking`, `rpc4UnregisterSlot` | `name` | `result` (bool) | `UnregisterFunction`, `UnregisterBlockingFunction`, `UnregisterSlot` |
+| `rpc4UnregisterLocalCallback` | `name`, `messageId` | `result` (bool) | `UnregisterLocalCallback` |
+| `rpc4Call` | `name`, `parameters` (hex, absent for none), `bits`, `target` (guid; may be omitted with `broadcast`), `broadcast` (false), `reliability` (`RELIABLE_ORDERED`), `priority` (`HIGH_PRIORITY`), `channel` (0) | | `Call` |
+| `rpc4Signal` | the fields of `rpc4Call`, `invokeLocal` (false) | | `Signal` |
+| `rpc4CallLoopback` | `name`, `parameters`, `bits` | | `CallLoopback` |
+| `rpc4CallBlocking` | the fields of `rpc4Call` but `broadcast`; `target` required | `result` (bool), `returnData` (hex), `returnBits` | `CallBlocking`, which reads packets itself until the return arrives, holding the peer's lock |
+| `rpc4Info` | | `invocations`, an array of `{handler,name,guid,address,local,parameters,bits}` in call order | what the registered functions recorded |
+
+A `deltaSerialize` group has `mode` (`UNRELIABLE_ACKED`, `UNIQUE` or `IDENTICAL`), `values` (ints), `target` (guid, for `UNRELIABLE_ACKED` and `UNIQUE`), `receipt` (for `UNRELIABLE_ACKED`), `first` (`BeginIdenticalSerialize`'s first-serialize flag, false) and optionally `sendTo` (guid). With `sendTo` an `UNRELIABLE_ACKED` group takes its receipt from `IncrementNextSendReceipt`, and a group that wrote anything is sent as `messageId` (`ID_USER_PACKET_ENUM`) then its bits, `HIGH_PRIORITY` on channel 0, with `reliability` (by default `UNRELIABLE_WITH_ACK_RECEIPT` for `UNRELIABLE_ACKED` and `RELIABLE_ORDERED` otherwise) and that receipt.
+
+Each RPC4 registration is a function of its own, numbered by `handler` in registration order, which records the packet's GUID, its address (empty when unassigned) and `wasGeneratedLocally`, and the unread bits of the parameter stream; the stream's read position is left as it was.
+
+### ReplicaManager3 commands
+
+The ReplicaManager3 commands live in `tools/interop-peer/src/ReplicaManager3Commands.cpp`. They drive a ReplicaManager3
+with the replicas of `Samples/ReplicaManager3` (`ClientCreatible_ClientSerialized`, `ServerCreated_ClientSerialized`,
+`ClientCreatible_ServerSerialized`, `ServerCreated_ServerSerialized`, `P2PReplica`, each with the sample's four int
+variables and VariableDeltaSerializer) and the `User` of `Samples/ReplicatedLogin`. The topology replaces the samples'
+global: a sample replica is on a server unless the topology is `CLIENT`, and a User only when it is `SERVER`. Every
+command but `rm3Attach` fails with `ok:false` until the plugin is attached. NetworkIDs and GUIDs are decimal strings.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `rm3Attach` | `topology` (`SERVER`; `CLIENT`, `SERVER` or `P2P`), `autoSerializeMs` (30; negative is never), `groupDownloads` (true) | | `AttachPlugin` of the sample's ReplicaManager3 with a NetworkIDManager of its own, `SetNetworkIDManager`, `SetAutoSerializeInterval`; its connections return `groupDownloads` from `QueryGroupDownloadMessages`. A second plugin passes ID_SND_RECEIPT_ACKED and ID_SND_RECEIPT_LOSS to the replicas this system created, as the sample's loop does. Again is a no-op |
+| `rm3Create` | `kinds` (array of class names), `username` (""), `userGuid` (for a User) | `networkIds` | `Reference` of a new replica of each kind, all in this one call, as the sample's 'C' does |
+| `rm3Set` | `networkId`, and any of `var1` to `var4` (sample replicas), `score` and `username` (a User) | | sets the variables, as the sample's 'R' does with random values |
+| `rm3DestroyMine` | | `destroyed` | the sample's 'D': `GetReplicasCreatedByMe`, `BroadcastDestructionList`, then deletes each |
+| `rm3Destroy` | `networkId` | | ReplicatedLogin's `DeleteUserWithGuid`: `BroadcastDestruction`, `Dereference`, then deletes it |
+| `rm3Info` | | `replicas` (below), `connections`, an array of `{guid,validated,downloadComplete,constructed}` (`constructed` the NetworkIDs of `GetConstructedReplicas`), `destructions`, an array of `{networkId,kind,text,deletingGuid}` that `DeserializeDestruction` read (`text` empty for a User), `allDownloadsCompleted` | `GetReferencedReplicaList`, `GetConnectionAtIndex`, `GetAllConnectionDownloadsCompleted` |
+
+Each of `replicas`, in `GetReferencedReplicaList` order, has `networkId`, `creatingGuid` and `kind`; a sample replica
+adds `var1` to `var4` and `constructionText`, the string its `DeserializeConstruction` read (empty for a replica created
+here); a User adds `score`, `username` and `userGuid`.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
