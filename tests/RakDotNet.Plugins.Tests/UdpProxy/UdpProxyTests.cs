@@ -232,6 +232,70 @@ public sealed class UdpProxyTests : IDisposable
     }
 
     [Fact]
+    public void A_ping_reply_counting_more_servers_than_it_carries_stores_nothing()
+    {
+        // The first server is out of entries, so the request succeeds only if the second is still in the order.
+        var (_, first) = LogInServer();
+        first.MaxForwardEntries = 1;
+        for (var i = 1; i <= 2; i++)
+            first.Forwarder!.StartForwarding(SystemAddress.Parse($"192.0.2.{i}:1", null), SystemAddress.Parse($"192.0.2.{i}:2", null), ForwardingTimeout);
+        LogInServer();
+        var requester = _mesh.Add("10.0.0.2");
+        _mesh.Connect(requester, _coordinator);
+        var source = _coordinator.GetAddressFromGuid(requester.RakNetGuid);
+        var target = SystemAddress.Parse("192.0.2.100:1000", null);
+
+        using var request = new BitStream();
+        request.WriteByte((byte)MessageId.UdpProxyGeneral);
+        request.WriteByte((byte)UdpProxyMessage.ForwardingRequestFromClientToCoordinator);
+        request.WriteAddress(SystemAddress.Unassigned);
+        request.WriteBool(true);
+        request.WriteAddress(target);
+        request.WriteUInt32(10_000);
+        request.WriteBool(false);
+        requester.Send(request.Written.ToArray(), Coordinator, Reliability.ReliableOrdered);
+        // 65535 servers and none of them in the message: RakNet stores 65535 pings of 0, which order the servers to
+        // the same sum and so drop the second.
+        using var reply = new BitStream();
+        reply.WriteByte((byte)MessageId.UdpProxyGeneral);
+        reply.WriteByte((byte)UdpProxyMessage.PingServersReplyFromClientToCoordinator);
+        reply.WriteAddress(source);
+        reply.WriteAddress(target);
+        reply.WriteUInt16(ushort.MaxValue);
+        requester.Send(reply.Written.ToArray(), Coordinator, Reliability.ReliableOrdered);
+
+        static bool IsResult(SeenEvent e) => e.Id == (byte)MessageId.UdpProxyGeneral && e.Data[1] is (byte)UdpProxyMessage.ForwardingSucceeded or (byte)UdpProxyMessage.AllServersBusy;
+        _mesh.RunUntil(() => _mesh.Seen(requester).Any(IsResult), "a result");
+
+        Assert.Equal((byte)UdpProxyMessage.ForwardingSucceeded, _mesh.Seen(requester).Single(IsResult).Data[1]);
+    }
+
+    [Fact]
+    public void A_ping_request_naming_no_server_is_passed_on_and_keeps_nothing()
+    {
+        var (client, plugin, _) = AddClient("10.0.0.2", "198.51.100.1");
+        var stranger = _mesh.Add("192.0.2.50");
+        _mesh.Connect(client, stranger);
+        var clientAddress = stranger.GetAddressFromGuid(client.RakNetGuid);
+
+        // From any connected peer, as the client does not check who sends it.
+        using var request = new BitStream();
+        request.WriteByte((byte)MessageId.UdpProxyGeneral);
+        request.WriteByte((byte)UdpProxyMessage.PingServersFromCoordinatorToClient);
+        request.WriteAddress(clientAddress);
+        request.WriteAddress(clientAddress);
+        request.WriteRakNetGuid(client.RakNetGuid);
+        request.WriteUInt16(0);
+        for (var i = 0; i < 3; i++)
+            stranger.Send(request.Written.ToArray(), client.RakNetGuid, Reliability.ReliableOrdered);
+        static bool IsPingRequest(SeenEvent e) => e.Id == (byte)MessageId.UdpProxyGeneral && e.Data[1] == (byte)UdpProxyMessage.PingServersFromCoordinatorToClient;
+        _mesh.RunUntil(() => _mesh.Seen(client).Count(IsPingRequest) == 3, "the requests");
+        _mesh.Run(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(0, plugin.PingServerGroupCount);
+    }
+
+    [Fact]
     public void A_server_that_leaves_passes_its_requests_to_the_next_and_with_none_left_all_are_busy()
     {
         var (serverPeer, _) = LogInServer();

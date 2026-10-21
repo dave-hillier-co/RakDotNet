@@ -24,7 +24,9 @@ namespace RakDotNet.Plugins;
 /// It also answers ID_NAT_REQUEST_BOUND_ADDRESSES with the peer's socket addresses, and an out-of-band ID_NAT_PING with
 /// an ID_NAT_PONG holding the port in the ping and the port it came from, which lets a client behind a NAT that assigns
 /// ports in sequence learn the stride. RakNet's quirks are kept, among them that the reply goes from the first socket
-/// whichever socket the ping reached, and that a request naming the sender itself starts an attempt with itself.
+/// whichever socket the ping reached, that a request naming the sender itself starts an attempt with itself, and that
+/// ID_NAT_PING is also consumed as the first byte of any packet (NatPunchthroughServer.cpp:262-265). Its value, 10, is
+/// that of ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY, so the application on the facilitator never sees that failure.
 /// </para>
 /// <para>Members may be called from any thread; hooks run on the dispatch step.</para>
 /// </remarks>
@@ -157,6 +159,9 @@ public sealed class NatPunchthroughServer : IRakPlugin
                     return PluginResult.Consume;
                 case MessageId.NatRequestBoundAddresses:
                     RespondBoundAddresses(peer, e.Address);
+                    return PluginResult.Consume;
+                // ID_NAT_PING on the first byte, which is ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY.
+                case (MessageId)OutOfBandId.NatPing:
                     return PluginResult.Consume;
                 case MessageId.OutOfBandInternal:
                     if (data.Length >= 2 && data[1] == (byte)OutOfBandId.NatPing)

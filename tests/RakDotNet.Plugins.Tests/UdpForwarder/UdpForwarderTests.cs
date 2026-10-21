@@ -1,4 +1,6 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.Time.Testing;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Testing;
@@ -259,6 +261,27 @@ public sealed class UdpForwarderTests : IDisposable
         mesh.RunUntil(() => mesh.Seen(server).Any(e => e.Id == (byte)MessageId.UserPacketEnum), "the message through the forwarder");
     }
 
+    [Fact]
+    public void An_entry_whose_socket_fails_is_removed_and_the_others_keep_forwarding()
+    {
+        var factory = new FailingTransportFactory(_network);
+        using var forwarder = new Plugins.UdpForwarder(factory, _time, PeerThreading.Manual);
+        forwarder.Startup();
+        var source = Bind("10.0.0.1");
+        var destination = Bind("10.0.0.2");
+        forwarder.StartForwarding(Address("10.0.0.5", 1), Address("10.0.0.6", 1), Timeout);
+        var working = forwarder.StartForwarding(source.LocalAddress, destination.LocalAddress, Timeout);
+        var forwardingAddress = new SystemAddress(IPAddress.Loopback, working.ForwardingPort);
+
+        factory.Bound[0].Fail = true;
+        source.TrySend([1, 2, 3], forwardingAddress);
+        forwarder.Update();
+
+        Assert.Equal(1, forwarder.UsedForwardEntries);
+        Assert.True(factory.Bound[0].IsDisposed);
+        AssertReceived(destination, [1, 2, 3], forwardingAddress);
+    }
+
     public void Dispose()
     {
         _forwarder.Dispose();
@@ -294,4 +317,44 @@ public sealed class UdpForwarderTests : IDisposable
 internal sealed class ForwarderPump(Plugins.UdpForwarder forwarder) : IRakPlugin
 {
     void IRakPlugin.OnUpdate() => forwarder.Update();
+}
+
+/// <summary>Binds through an <see cref="InMemoryNetwork"/>, with sockets that can be made to fail as a real socket does.</summary>
+internal sealed class FailingTransportFactory(InMemoryNetwork network) : IDatagramTransportFactory
+{
+    public List<FailingTransport> Bound { get; } = [];
+
+    public bool TryBind(SocketBinding binding, [NotNullWhen(true)] out IDatagramTransport? transport, out StartupError startupError, out SocketError socketError)
+    {
+        transport = null;
+        if (!network.TryBind(binding, out var inner, out startupError, out socketError))
+            return false;
+        var failing = new FailingTransport(inner);
+        Bound.Add(failing);
+        transport = failing;
+        return true;
+    }
+}
+
+/// <summary>Once <see cref="Fail"/> is set, receiving throws as UdpDatagramTransport rethrows a fatal socket error.</summary>
+internal sealed class FailingTransport(IDatagramTransport inner) : IDatagramTransport
+{
+    public bool Fail { get; set; }
+
+    public bool IsDisposed { get; private set; }
+
+    public SystemAddress LocalAddress => inner.LocalAddress;
+
+    public bool TryReceive(Span<byte> buffer, out int length, out SystemAddress remote) =>
+        Fail ? throw new SocketException((int)SocketError.NetworkDown) : inner.TryReceive(buffer, out length, out remote);
+
+    public bool TrySend(ReadOnlySpan<byte> datagram, in SystemAddress remote, int ttl = 0) => inner.TrySend(datagram, remote, ttl);
+
+    public void SetReadySignal(Action signal) => inner.SetReadySignal(signal);
+
+    public void Dispose()
+    {
+        IsDisposed = true;
+        inner.Dispose();
+    }
 }

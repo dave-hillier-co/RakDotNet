@@ -236,6 +236,29 @@ public sealed class Router2Tests : IDisposable
         Assert.False(forwarder.IsRunning);
     }
 
+    [Fact]
+    public void An_unsolicited_forwarding_established_reaches_the_application_and_lists_nothing()
+    {
+        _mesh.Connect(_a, _b);
+        _mesh.Settle();
+        var established = new byte[11];
+        var writer = new BitStreamWriter(established);
+        writer.WriteByte((byte)MessageId.Router2ForwardingEstablished);
+        writer.WriteRakNetGuid(_c.RakNetGuid);
+        writer.WriteUInt16(1234);
+
+        // No EstablishRouting: the second is not taken as forwarding re-established, as a listed connection would be.
+        _b.Send(established, _a.RakNetGuid, Reliability.ReliableOrdered);
+        _b.Send(established, _a.RakNetGuid, Reliability.ReliableOrdered);
+        _mesh.RunUntil(() => _mesh.Seen(_a).Count(e => e.Id == (byte)MessageId.Router2ForwardingEstablished) == 2, "both messages");
+        Assert.DoesNotContain(_mesh.Seen(_a), e => e.Id == (byte)MessageId.Router2Rerouted);
+
+        // Nor is a direct connection to that GUID taken as one through a router.
+        var connection = _mesh.Connect(_a, _c);
+        _mesh.Settle();
+        Assert.Equal(_a.DefaultTimeout, connection.Timeout);
+    }
+
     // Samples/Router2: A to B and C, B to C, D to B and C; then the pings settle.
     private void ConnectAsInTheSample()
     {

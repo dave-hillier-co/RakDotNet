@@ -1,3 +1,4 @@
+using System.Net;
 using RakDotNet.Protocol.Wire;
 using RakDotNet.Protocol.Wire.Messages;
 
@@ -284,6 +285,25 @@ public sealed class NatPunchthroughTests : IDisposable
         Assert.Equal((byte)MessageId.NatPunchthroughSucceeded, atSender.Id);
         Assert.DoesNotContain(messages, m => m.Contains("TESTING_INTERNAL_IPS", StringComparison.Ordinal));
         Assert.Contains(messages, m => m.StartsWith("Send with TTL 2 to", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_failure_sharing_the_nat_ping_id_is_consumed_as_RakNet_consumes_it()
+    {
+        // A server that requires security in its second reply but not its first, which a system without the server's
+        // key reports as ID_REMOTE_SYSTEM_REQUIRES_PUBLIC_KEY (RakPeer.cpp:4914-4930).
+        Assert.True(_mesh.Network.TryBind(new SocketBinding(new IPEndPoint(IPAddress.Parse("192.0.2.10"), 0)), out var server, out _, out _));
+        using var serverSocket = server;
+        _facilitator.Connect(server.LocalAddress, new ConnectOptions { AttemptCount = 2, AttemptInterval = TimeSpan.FromMilliseconds(100) });
+        using var reply = new BitStream();
+        reply.Write(new OpenConnectionReply2(0x0102030405060708, new IPEndPoint(IPAddress.Parse(FacilitatorAddress), 1), 1200, RequiresSecurity: true,
+                                             Answer: new byte[OpenConnectionReply2.AnswerLength]));
+        Assert.True(server.TrySend(reply.Written, _facilitator.Sockets[0].LocalAddress));
+
+        // NatPunchthroughServer.cpp:262-265 consumes ID_NAT_PING, which is 10 and so this ID, from the first byte of
+        // every packet.
+        _mesh.RunUntil(() => _mesh.Seen(_facilitator).Any(e => e.Id == (byte)MessageId.ConnectionAttemptFailed), "the attempt to fail");
+        Assert.DoesNotContain(_mesh.Seen(_facilitator), e => e.Id == (byte)MessageId.RemoteSystemRequiresPublicKey);
     }
 
     [Fact]

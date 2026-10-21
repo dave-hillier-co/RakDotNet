@@ -56,6 +56,11 @@ namespace RakDotNet.Plugins;
 /// Times are RakNet::TimeMS, 32 bits, on the peer's clock.
 /// </para>
 /// <para>
+/// One deviation: an ID_ROUTER_2_FORWARDING_ESTABLISHED for an endpoint with no connection request, where RakNet
+/// indexes its request list with -1 (Router2.cpp:1265-1285), is passed to the application and lists no forwarded
+/// connection, so a peer sending them for invented GUIDs cannot grow that list.
+/// </para>
+/// <para>
 /// The debug interface is two delegates. The forwarder binds through the peer's transport factory, so it is created
 /// when the plugin is attached with <see cref="MaximumForwardingRequests"/> above 0, or when that is set while attached.
 /// </para>
@@ -858,14 +863,16 @@ public sealed class Router2 : IRakPlugin
         }
 
         // Moved from the requests to the forwarded connections. RakNet indexes the request list with -1 when there is
-        // none; here the connection is listed without failure reporting.
+        // none; here an unsolicited message lists nothing, so a peer cannot grow the list with invented GUIDs, and is
+        // passed to the application as RakNet passes it.
         var connectionRequestIndex = GetConnectionRequestIndex(endpointGuid);
-        var returnConnectionLostOnFailure = false;
-        if (connectionRequestIndex >= 0)
+        if (connectionRequestIndex < 0)
         {
-            returnConnectionLostOnFailure = _connectionRequests[connectionRequestIndex].ReturnConnectionLostOnFailure;
-            RemoveAtIndexFast(_connectionRequests, connectionRequestIndex);
+            DiagnosticMessage?.Invoke("Got ID_ROUTER_2_FORWARDING_ESTABLISHED with no connection request, returning it to user");
+            return false;
         }
+        var returnConnectionLostOnFailure = _connectionRequests[connectionRequestIndex].ReturnConnectionLostOnFailure;
+        RemoveAtIndexFast(_connectionRequests, connectionRequestIndex);
         _forwardedConnectionList.Add(new ForwardedConnection
         {
             EndpointGuid = endpointGuid,

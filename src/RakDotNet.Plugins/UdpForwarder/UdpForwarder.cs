@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using RakDotNet.Protocol.Wire;
 
 namespace RakDotNet.Plugins;
@@ -27,6 +28,10 @@ namespace RakDotNet.Plugins;
 /// Sockets are bound through an <see cref="IDatagramTransportFactory"/>, as for a <see cref="RakPeer"/>. A socket
 /// bound by <see cref="UdpTransportFactory"/> sends itself a test datagram, which RakNet's raw sockets do not; datagrams
 /// from the socket's own address are therefore not forwarded.
+/// </para>
+/// <para>
+/// An entry whose socket fails with a <see cref="SocketException"/> is removed and its socket closed; the other entries
+/// keep forwarding.
 /// </para>
 /// <para>Members may be called from any thread.</para>
 /// </remarks>
@@ -277,8 +282,23 @@ public sealed class UdpForwarder : IDisposable
                 }
             }
 
-            foreach (var entry in _forwardList)
-                ReceiveFrom(curTime, entry);
+            for (var i = 0; i < _forwardList.Count;)
+            {
+                var entry = _forwardList[i];
+                try
+                {
+                    ReceiveFrom(curTime, entry);
+                    i++;
+                }
+                catch (SocketException)
+                {
+                    // RakNet prints the error and carries on (UDPForwarder.cpp:233-246), and the entry, forwarding
+                    // nothing, times out. A transport that has failed fails every receive, so its entry is removed now
+                    // and the rest keep forwarding, on the forwarder's thread too.
+                    entry.Socket.Dispose();
+                    _forwardList.RemoveAt(i);
+                }
+            }
         }
     }
 

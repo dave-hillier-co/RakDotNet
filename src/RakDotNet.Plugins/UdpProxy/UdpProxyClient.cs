@@ -22,7 +22,9 @@ namespace RakDotNet.Plugins;
 /// ID_UNCONNECTED_PONG from a server being pinged is consumed, and ID_UDP_PROXY_PING_SERVERS_FROM_COORDINATOR_TO_CLIENT
 /// is passed on to the application. One is not: RakNet reads the server count of that message where the coordinator
 /// wrote the target's GUID (UDPProxyClient.cpp:285-292), so it pings up to 65535 addresses read past the message's end
-/// from uninitialised memory; this client reads the GUID first, as the coordinator wrote it. Every message is MEDIUM_PRIORITY and RELIABLE_ORDERED on
+/// from uninitialised memory; this client reads the GUID first, as the coordinator wrote it. Nor is its keeping of a
+/// ping group for that message when it names no server, which nothing ever removes (UDPProxyClient.cpp:133-150,
+/// 277-303); this client keeps none. Every message is MEDIUM_PRIORITY and RELIABLE_ORDERED on
 /// channel 0; times are RakNet::TimeMS, 32 bits, on the peer's clock.
 /// </para>
 /// <para>Members may be called from any thread; hooks and the result handler run on the dispatch step.</para>
@@ -38,6 +40,16 @@ public sealed class UdpProxyClient : IRakPlugin
 
     /// <summary>SetResultHandler: receives the outcome of every request. Requests are refused while it is null.</summary>
     public IUdpProxyClientResultHandler? ResultHandler { get; set; }
+
+    /// <summary>The ping groups waiting for servers to answer.</summary>
+    internal int PingServerGroupCount
+    {
+        get
+        {
+            lock (_gate)
+                return _pingServerGroups.Count;
+        }
+    }
 
     private RakPeer Peer => _host?.Peer ?? throw new InvalidOperationException("The UdpProxyClient is not attached to a RakPeer.");
 
@@ -217,7 +229,10 @@ public sealed class UdpProxyClient : IRakPlugin
             group.ServersToPing.Add(new ServerWithPing(UnresponsivePingTimeMs, serverAddress));
             peer.PingUnconnected(serverAddress);
         }
-        _pingServerGroups.Add(group);
+        // RakNet keeps a group with no servers, which Update never ends, so each such message from any connected peer
+        // would be kept until shutdown. With no server to ping there is nothing to report, so none is kept.
+        if (group.ServersToPing.Count > 0)
+            _pingServerGroups.Add(group);
     }
 
     private void OnResult(RakPeer peer, UdpProxyMessage message, BitStreamReader reader, SystemAddress coordinator)

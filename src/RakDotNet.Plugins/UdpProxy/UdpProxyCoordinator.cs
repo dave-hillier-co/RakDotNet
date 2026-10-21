@@ -26,6 +26,11 @@ namespace RakDotNet.Plugins;
 /// the order is only decided by the 3 s timeout, and servers whose round trips sum to the same value as an earlier one
 /// are dropped from the order. A server that disconnects is still offered to the requests it was serving.
 /// </para>
+/// <para>
+/// One deviation bounds what a peer can make the coordinator store: a ping reply names at most as many servers as the
+/// request asked about, a reply whose entries run out is read only as far as they go, and a request stores at most two
+/// replies' worth of pings. RakNet inserts every entry a reply counts, read or not (UDPProxyCoordinator.cpp:439-484).
+/// </para>
 /// <para>Members may be called from any thread; hooks run on the dispatch step.</para>
 /// </remarks>
 public sealed class UdpProxyCoordinator : IRakPlugin
@@ -337,10 +342,15 @@ public sealed class UdpProxyCoordinator : IRakPlugin
             return;
         reader.TryReadUInt16(out var serversToPingSize);
         var fromSender = client == senderClientAddress;
-        for (var idx = 0; idx < serversToPingSize; idx++)
+        // Deviation: RakNet inserts serversToPingSize entries whether or not they were read, so one short message
+        // naming 65535 servers costs quadratic time and memory. Here a reply names at most the servers asked about,
+        // stops at the first entry that is not there, and adds nothing once the two systems' replies are stored.
+        var asked = fw.RemainingServersToTry.Count;
+        var count = Math.Min(serversToPingSize, asked);
+        for (var idx = 0; idx < count && fw.SourceServerPings.Count < 2 * asked; idx++)
         {
-            reader.TryReadSystemAddress(out var serverAddress);
-            reader.TryReadUInt16(out var ping);
+            if (!reader.TryReadSystemAddress(out var serverAddress) || !reader.TryReadUInt16(out var ping))
+                break;
             var swp = new ServerWithPing(ping, serverAddress);
             // The position is found in the sender's list or the target's, and the reply is inserted into the
             // sender's either way.
