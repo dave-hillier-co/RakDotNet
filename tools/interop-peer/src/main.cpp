@@ -8,6 +8,8 @@
 #include "PluginCommands.h"
 #include "ReplicationCommands.h"
 #include "SecurityCommands.h"
+#include "TeamCommands.h"
+#include "TopologyCommands.h"
 
 #include "GetTime.h"
 #include "MessageIdentifiers.h"
@@ -155,7 +157,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_) {}
 
         ~InteropPeer()
         {
@@ -324,6 +326,12 @@ namespace
             {
             }
             else if (replication_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (topology_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (teams_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -612,6 +620,8 @@ namespace
         std::atomic<bool> stop_{false};
         interop::PluginCommands plugins_;
         interop::ReplicationCommands replication_;
+        interop::TopologyCommands topology_;
+        interop::TeamCommands teams_;
     };
 }
 

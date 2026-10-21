@@ -182,6 +182,70 @@ Each of `replicas`, in `GetReferencedReplicaList` order, has `networkId`, `creat
 adds `var1` to `var4` and `constructionText`, the string its `DeserializeConstruction` read (empty for a replica created
 here); a User adds `score`, `username` and `userGuid`.
 
+#### Topology commands
+
+ConnectionGraph2 and FullyConnectedMesh2 commands live in `tools/interop-peer/src/TopologyCommands.cpp`, with the same rules: every command of a plugin except its attach command fails until it is attached. Commands that take a packet rebuild it from the fields of the `packet` event the driver received: `data` (hex), `guid` and `address`.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `cg2Attach` | `autoProcess` (true) | | `AttachPlugin` of a `ConnectionGraph2` after `SetAutoProcessNewConnections`; again is a no-op |
+| `cg2SetAutoProcess` | `enabled` | | `SetAutoProcessNewConnections` |
+| `cg2AddParticipant` | `target` (guid) | | `AddParticipant` with `GetSystemAddressFromGuid(target)` |
+| `cg2Info` | | `participants` (array of `{guid,connections}` in `GetParticipantList` order, `connections` an array of `{guid,address,ping}`), `lowestAveragePingSystem` | `GetParticipantList`, `GetConnectionListForRemoteSystem` (up to 64 per participant), `GetPingBetweenSystems`, `GetLowestAveragePingSystem` |
+| `fcm2Attach` | `autoParticipate` (true), `connectOnNewRemote` (true), `password` (hex, ""), `vjsUserData` (hex, ""), `vjcUserData` (hex, "") | | `AttachPlugin` of a `FullyConnectedMesh2` subclass whose `WriteVJSUserData` and `WriteVJCUserData` write the given bytes (nothing when empty), after `SetAutoparticipateConnections` and `SetConnectOnNewRemoteConnection`; again is a no-op |
+| `fcm2AddParticipant` | `target` (guid) | | `AddParticipant` |
+| `fcm2ResetHostCalculation` | | | `ResetHostCalculation` |
+| `fcm2Clear` | | | `Clear` |
+| `fcm2Info` | | `hostSystem`, `isHostSystem`, `connectedHost` (`UNASSIGNED_RAKNET_GUID` as `"18446744073709551615"`), `isConnectedHost`, `connectedHostAddress` (empty when unassigned), `participants`, `hostOrder`, `totalConnectionCount` | `GetHostSystem`, `IsHostSystem`, `GetConnectedHost`, `IsConnectedHost`, `GetConnectedHostAddr`, `GetParticipantList`, `GetHostOrder`, `GetTotalConnectionCount` |
+| `fcm2StartVerifiedJoin` | `target` (guid) | | `StartVerifiedJoin` |
+| `fcm2RespondOnVerifiedJoinCapable` | `data`, `guid`, `address`, `accept`, `additionalData` (hex, ""; none when empty) | | `RespondOnVerifiedJoinCapable` |
+| `fcm2VerifiedJoinRequired` | `host` (guid) | `systems` (array of `{guid,address,userData,userDataBits}`, `userData` the hex of the user data bytes) | `GetVerifiedJoinRequiredProcessingList` |
+| `fcm2VerifiedJoinAccepted` | `data`, `guid`, `address` | `thisSystemAccepted`, `systemsAccepted`, `additionalData` (hex) | `GetVerifiedJoinAcceptedAdditionalData` |
+| `fcm2ConnectToRemoteNewIncomingConnections` | `data`, `guid`, `address` | | `ConnectToRemoteNewIncomingConnections` |
+
+The plugins' messages, ID_FCM2_NEW_HOST and the verified join messages that reach the application included, reach the driver as `packet` events.
+
+#### Team commands
+
+TeamManager and TeamBalancer commands live in `tools/interop-peer/src/TeamCommands.cpp`, with the same rules. A world is named by `worldId` (0 to 254), and teams and members by their NetworkID as a decimal string in `team`, `teamToJoin`, `teamToLeave` and `member`. The peer makes and owns a `TM_Team` or `TM_TeamMember` for each one it references or deserialises; a command naming one the world does not have fails. TeamBalancer team numbers are integers, 255 being `UNASSIGNED_TEAM_ID`.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `tmAttach` | `topology` (`"TM_PEER_TO_PEER"`, or `"TM_CLIENT_SERVER"`) | | `AttachPlugin` of a `TeamManager` after `SetTopology`; again is a no-op |
+| `tmSetAutoManageConnections` | `enabled` | | `TeamManager::SetAutoManageConnections`, which reaches only the worlds already added |
+| `tmAddWorld` | `worldId` | | `AddWorld`; fails for a world in use |
+| `tmSetHost` | `worldId`, `host` (guid) | | `TM_World::SetHost` |
+| `tmAddParticipant` / `tmRemoveParticipant` | `worldId`, `target` (guid) | | `AddParticipant` / `RemoveParticipant` |
+| `tmReferenceTeam` | `worldId`, `team`, `applyBalancing` (true) | | `ReferenceTeam` of a new `TM_Team` |
+| `tmReferenceTeamMember` | `worldId`, `member` | | `ReferenceTeamMember` of a new `TM_TeamMember` |
+| `tmDereferenceTeam` | `worldId`, `team`, `noTeamId` | | `DereferenceTeam` |
+| `tmDereferenceTeamMember` | `worldId`, `member` | | `DereferenceTeamMember` |
+| `tmRequestTeam` | `worldId`, `member`, `selection` (a `JoinTeamType` name such as `JOIN_SPECIFIC_TEAM`), `team` for a specific team, `noTeamId` for none | `result` (bool) | `RequestTeam` with `TeamSelection::AnyAvailable`, `SpecificTeam` or `NoTeam` |
+| `tmRequestTeamSwitch` | `worldId`, `member`, `teamToJoin`, `teamToLeave` (omitted is every team) | `result` (bool) | `RequestTeamSwitch` |
+| `tmCancelTeamRequest` | `worldId`, `member`, `team` (omitted is every team) | `result` (bool) | `CancelTeamRequest` |
+| `tmLeaveTeam` | `worldId`, `member`, `team`, `noTeamId` | `result` (bool) | `TM_TeamMember::LeaveTeam` |
+| `tmLeaveAllTeams` | `worldId`, `member`, `noTeamId` | `result` (bool) | `LeaveAllTeams` |
+| `tmSetMemberLimit` | `worldId`, `team`, `limit`, `noTeamId` | `result` (bool) | `TM_Team::SetMemberLimit` |
+| `tmSetJoinPermissions` | `worldId`, `team`, `permissions` (the `ALLOW_JOIN_*` bits) | `result` (bool) | `SetJoinPermissions` |
+| `tmSetBalanceTeams` | `worldId`, `enabled`, `noTeamId` | `result` (bool) | `SetBalanceTeams` |
+| `tmSerializeTeam` | `worldId`, `team` | `data` (hex) | `TM_Team::SerializeConstruction` |
+| `tmSerializeTeamMember` | `worldId`, `member` | `data` (hex) | `TM_TeamMember::SerializeConstruction` |
+| `tmDeserializeTeam` | `data` (hex) | `result` (bool) | `TM_Team::DeserializeConstruction` into the team its world already has with the construction's NetworkID, otherwise a new one |
+| `tmDeserializeTeamMember` | `data` (hex) | `result` (bool) | `TM_TeamMember::DeserializeConstruction` into a new member |
+| `tmInfo` | `worldId` | `host`, `balanceTeams`, `participants`, `teams` (array of `{team,members,memberLimit,memberLimitSetting,joinPermissions,balancingApplies}` in world order), `members` (array of `{member,teams,lastTeams,noTeamId,requestedTeams,requestedTeam}` in world order, `requestedTeam` the `JoinTeamType` name of `GetRequestedTeam`) | `GetHost`, `GetBalanceTeams`, `GetParticipantList`, `GetTeamByIndex`, `GetTeamMembers`, `GetMemberLimit`, `GetMemberLimitSetting`, `GetJoinPermissions`, `GetBalancingApplies`, `GetTeamMemberByIndex`, `GetCurrentTeams`, `GetLastTeams`, `GetNoTeamId`, `GetRequestedSpecificTeams`, `GetRequestedTeam` |
+| `tbAttach` | | | `AttachPlugin` of a `TeamBalancer`; again is a no-op |
+| `tbSetTeamSizeLimit` | `team` (0 to 254), `limit` | | `SetTeamSizeLimit` |
+| `tbSetDefaultAssignmentAlgorithm` | `algorithm` (`"SMALLEST_TEAM"` or `"FILL_IN_ORDER"`) | | `SetDefaultAssignmentAlgorithm` |
+| `tbSetForceEvenTeams` | `force` | | `SetForceEvenTeams` |
+| `tbSetLockTeams` | `lock` | | `SetLockTeams` |
+| `tbRequestSpecificTeam` | `member`, `team` | | `RequestSpecificTeam` |
+| `tbCancelRequestSpecificTeam` | `member` | | `CancelRequestSpecificTeam` |
+| `tbRequestAnyTeam` | `member` | | `RequestAnyTeam` |
+| `tbGetMyTeam` | `member` | `team` | `GetMyTeam` |
+| `tbDeleteMember` | `member` | | `DeleteMember` |
+
+The ID_TEAM_BALANCER_* messages that reach the application, including those a plugin pushes itself, reach the driver as `packet` events.
+
 ## Events
 
 Every packet returned by `Receive()` is reported, including RakNet's internal notifications:
