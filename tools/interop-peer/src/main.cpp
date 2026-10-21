@@ -5,6 +5,8 @@
 #include "Names.h"
 #include "PacketEvent.h"
 #include "KeyGeneration.h"
+#include "CloudCommands.h"
+#include "FileCommands.h"
 #include "PluginCommands.h"
 #include "ReplicationCommands.h"
 #include "SecurityCommands.h"
@@ -157,7 +159,7 @@ namespace
     class InteropPeer
     {
     public:
-        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_) {}
+        explicit InteropPeer(Output& output) : output_(output), peer_(RakNet::RakPeerInterface::GetInstance()), plugins_(peer_), replication_(peer_), topology_(peer_), teams_(peer_), files_(peer_), cloud_(peer_) {}
 
         ~InteropPeer()
         {
@@ -332,6 +334,12 @@ namespace
             {
             }
             else if (teams_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (files_.Dispatch(cmd, command, result))
+            {
+            }
+            else if (cloud_.Dispatch(cmd, command, result))
             {
             }
             else if (cmd == "shutdown")
@@ -622,6 +630,8 @@ namespace
         interop::ReplicationCommands replication_;
         interop::TopologyCommands topology_;
         interop::TeamCommands teams_;
+        interop::FileCommands files_;
+        interop::CloudCommands cloud_;
     };
 }
 

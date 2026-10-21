@@ -114,6 +114,9 @@ Interop is judged by behaviour, not by identical traffic. Every datagram must be
 | FCMVerifiedJoinSimultaneous | A verified join accepted, rejected and failed on an unreachable participant, with user data; verified joins started for three clients at once ending in one mesh |
 | TeamManager | Static teams and each user serialised to every system of a mesh; requests for any team filling the emptiest, a full team refusing and keeping the request until a place frees, a cancelled request; a team switch, a lowered member limit and balancing moving members; the next host resolving requests after the host leaves; a client-server host relaying each client's changes |
 | TeamBalancer (no sample; derived from its header) | Any-team requests by smallest team and in order, a switch to a full team waiting for a swap, locked teams refusing a switch until unlocked, asking for no team, a waiting member moving in when a member disconnects, a new host told each system's members |
+| FileListTransfer | Files sent whole with their contexts, referenced files read and sent a chunk at a time with acknowledgements, split message progress of a large file |
+| DirectoryDeltaTransfer, `DirectoryDeltaTransferTest` | A subdirectory downloaded into another with only the missing or changed files sent, with and without an incremental reader on the uploader, and a file named outside the output directory |
+| CloudTest, CloudClient, CloudServer | Two servers that added each other answering gets with their own rows then the other's, paging through both, a client on one server subscribed to a client on the other told of its posts and releases until it unsubscribes, and a directory server listing its clients and its own load with a filter on who may post it |
 
 ## Milestones
 

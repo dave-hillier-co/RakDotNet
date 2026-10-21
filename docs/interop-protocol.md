@@ -182,7 +182,7 @@ Each of `replicas`, in `GetReferencedReplicaList` order, has `networkId`, `creat
 adds `var1` to `var4` and `constructionText`, the string its `DeserializeConstruction` read (empty for a replica created
 here); a User adds `score`, `username` and `userGuid`.
 
-#### Topology commands
+### Topology commands
 
 ConnectionGraph2 and FullyConnectedMesh2 commands live in `tools/interop-peer/src/TopologyCommands.cpp`, with the same rules: every command of a plugin except its attach command fails until it is attached. Commands that take a packet rebuild it from the fields of the `packet` event the driver received: `data` (hex), `guid` and `address`.
 
@@ -205,7 +205,7 @@ ConnectionGraph2 and FullyConnectedMesh2 commands live in `tools/interop-peer/sr
 
 The plugins' messages, ID_FCM2_NEW_HOST and the verified join messages that reach the application included, reach the driver as `packet` events.
 
-#### Team commands
+### Team commands
 
 TeamManager and TeamBalancer commands live in `tools/interop-peer/src/TeamCommands.cpp`, with the same rules. A world is named by `worldId` (0 to 254), and teams and members by their NetworkID as a decimal string in `team`, `teamToJoin`, `teamToLeave` and `member`. The peer makes and owns a `TM_Team` or `TM_TeamMember` for each one it references or deserialises; a command naming one the world does not have fails. TeamBalancer team numbers are integers, 255 being `UNASSIGNED_TEAM_ID`.
 
@@ -245,6 +245,67 @@ TeamManager and TeamBalancer commands live in `tools/interop-peer/src/TeamComman
 | `tbDeleteMember` | `member` | | `DeleteMember` |
 
 The ID_TEAM_BALANCER_* messages that reach the application, including those a plugin pushes itself, reach the driver as `packet` events.
+
+### File commands
+
+The file commands attach a `FileListTransfer` and a `DirectoryDeltaTransfer` and drive them. They live in `tools/interop-peer/src/FileCommands.cpp`. Every command but an attach command fails with `ok:false` until its plugin is attached. Paths are the peer's own file system paths, so the driver and the peer share a machine.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `fileListTransferAttach` | | | `AttachPlugin` of a `FileListTransfer`, with `AddCallback` of a `FileListProgress` that records the sends; again is a no-op |
+| `fileListTransferStartThreads` | `count` (1) | | `StartIncrementalReadThreads` |
+| `fileListTransferSetupReceive` | `sender` (guid), `allocateIriDataChunk` (true) | `setId` (65535 on failure) | `SetupReceive` of a new recording handler, `deleteHandler` false; the handler sets `allocateIrIDataChunkAutomatically` on every progress |
+| `fileListTransferSend` | `target` (guid), `setId`, `files` (array, below), `priority` (`HIGH_PRIORITY`), `channel` (0), `incremental` (false), `chunkSize` (16777216) | | `Send` of a `FileList` built from `files`, with an `IncrementalReadInterface` when `incremental` |
+| `fileListTransferCancelReceive` | `setId` | | `CancelReceive` |
+| `fileListTransferInfo` | `setId` (absent), `target` (guid, absent) | `files`, `progress`, `completed`, `dereferenced`, `pushes`, `pushesComplete`, `sendAborted`, and `handlerActive` when `setId` is given, `pendingFiles` when `target` is | `IsHandlerActive`, `GetPendingFilesToAddress`, and what the callbacks recorded, in the order they ran |
+| `ddtAttach` | | | `AttachPlugin` of a `DirectoryDeltaTransfer`, after `fileListTransferAttach`'s plugin when none is attached, then `SetFileListTransferPlugin`; again is a no-op |
+| `ddtSetApplicationDirectory` | `path` | | `SetApplicationDirectory` |
+| `ddtAddUploads` | `subdir` | `filesForUpload` | `AddUploadsFromSubdirectory`, `GetNumberOfFilesForUpload` |
+| `ddtClearUploads` | | | `ClearUploads` |
+| `ddtSetIncrementalRead` | `chunkSize` (0 = none) | | `SetDownloadRequestIncrementalReadInterface` with an `IncrementalReadInterface`, or null for 0 |
+| `ddtDownload` | `subdir`, `outputSubdir`, `prependAppDir` (true), `target` (guid), `priority` (`HIGH_PRIORITY`), `channel` (0) | `setId` | `DownloadFromSubdirectory` with a recording handler and no `FileListProgress` |
+
+Each element of `files` is `{name, data, path, reference, fileLength, context}`: `name` is required; `path` defaults to `name`; with `reference` (false) the file is added as a reference, `AddFile(name, path, 0, fileLength, fileLength, context, true)`, where `fileLength` defaults to `GetFileLength(path)`; otherwise `data` (hex, "") is added with `fileLength` defaulting to its length. `context` is `{op, extraData1, extraData2, extraData3}`, each 0 when absent.
+
+The `fileListTransferInfo` records:
+
+- `files`, from `OnFile`: `setId`, `fileIndex`, `fileName`, `byteLengthOfThisFile`, `bytesDownloadedForThisFile`, `numberOfFilesInThisSet`, `byteLengthOfThisSet`, `bytesDownloadedForThisSet`, `context`, `senderGuid`, `hasData`, and when it has data `hash` (`SuperFastHash` of the file's bytes) and, for files of up to 1024 bytes, `data` (hex).
+- `progress`, from `OnFileProgress`: `setId`, `fileIndex`, `fileName`, `partCount`, `partTotal`, `dataChunkLength`, `iriWriteOffset`, `bytesDownloadedForThisFile`, `bytesDownloadedForThisSet`, `hasIriDataChunk`, and when it is set `iriHash` (`SuperFastHash` of `dataChunkLength` bytes of it).
+- `completed`, from `OnDownloadComplete`: `setId`, `numberOfFilesInThisSet`, `byteLengthOfThisSet`, `senderGuid`. The handler returns false, ending itself.
+- `dereferenced`: the set IDs of `fileListTransferSetupReceive` handlers given `OnDereference`, in order.
+- `pushes`, from `OnFilePush`: `fileName`, `fileLengthBytes`, `offset`, `bytesBeingSent`, `done`, `setId`.
+- `pushesComplete`, the set IDs from `OnFilePushesComplete`; `sendAborted`, the addresses from `OnSendAborted`.
+
+A `ddtDownload` handler records `files`, `progress` and `completed` the same way. File messages the plugins consume never reach the driver as `packet` events.
+
+### Cloud commands
+
+The cloud commands attach a `CloudClient` and a `CloudServer` and drive them. They live in `tools/interop-peer/src/CloudCommands.cpp`. Every command but an attach command fails with `ok:false` until its plugin is attached. A key is `{primaryKey, secondaryKey}`, with `primaryKey` a string and `secondaryKey` (0) a u32; `keys` is an array of them.
+
+| `cmd` | Fields (defaults) | Reply fields | RakNet call |
+|---|---|---|---|
+| `cloudClientAttach` | | | `AttachPlugin` of a `CloudClient`, then of a plugin that passes `ID_CLOUD_GET_RESPONSE` to `OnGetReponse` and `ID_CLOUD_SUBSCRIPTION_NOTIFICATION` to `OnSubscriptionNotification` with a recording callback, and continues processing; again is a no-op |
+| `cloudServerAttach` | | | `AttachPlugin` of a `CloudServer`; again is a no-op |
+| `cloudPost` | `target` (guid), `key`, `data` (hex, "") | | `Post` |
+| `cloudRelease` | `target` (guid), `keys` | | `Release` |
+| `cloudGet` | `target` (guid), `keys`, `startingRowIndex` (0), `maxRowsToReturn` (0), `subscribe` (false), `specificSystems` (array of guids, absent) | | `Get` of a `CloudQuery`; with `specificSystems`, the overload taking a list of GUIDs |
+| `cloudUnsubscribe` | `target` (guid), `keys`, `specificSystems` (array of guids, absent) | | `Unsubscribe`; with `specificSystems`, the overload taking a list of GUIDs |
+| `cloudServerAddServer` | `guid` | | `AddServer` |
+| `cloudServerRemoveServer` | `guid` | | `RemoveServer` |
+| `cloudServerSetMaxUploadBytesPerClient` | `bytes` | | `SetMaxUploadBytesPerClient` |
+| `cloudServerForceExternalAddress` | `host` (IPv4 text), `port` | | `ForceExternalSystemAddress` |
+| `cloudServerSetFilter` | `rejectPostPrimaryKey` (""), `exemptGuid` (guid, absent) | | `RemoveAllQueryFilters`, then `AddQueryFilter` of Samples/CloudServer's `CloudServerHelperFilter`: a post under `rejectPostPrimaryKey` is rejected unless it comes from `exemptGuid`; everything else is allowed, and every call is recorded |
+| `cloudInfo` | | `gets`, `notifications`, `filterCalls`, `remoteServers` (guids), `localIp` | What the callback and the filter recorded, in the order they ran, `GetRemoteServers`, and `GetLocalIP(0)` |
+
+`CloudServer.cpp` defines no `GetInstance`, so the server is created with `new`.
+
+The `cloudInfo` records, where a recorded key has `primaryKey` as hex, since a `RakString` need not be UTF-8, and a row is a key with `data` (hex), `serverAddress` and `clientAddress` (written as `packet` events write addresses), `serverGuid` and `clientGuid`:
+
+- `gets`, from `OnGet`: the query's `keys`, `startingRowIndex`, `maxRowsToReturn` and `querySubscribe`, the result's `subscribeToResults`, and `rows`.
+- `notifications`, from `OnSubscriptionNotification`: `wasUpdated` and `row`.
+- `filterCalls`: `op` (`post`, `release`, `get` or `unsubscribe`), `clientGuid`, `clientAddress`, then `key` and `data` (hex) for a post, `keys` otherwise, and `specificSystems` for a get or an unsubscribe.
+
+Get responses and notifications also reach the driver as `packet` events; the requests a `CloudServer` consumes do not.
 
 ## Events
 
