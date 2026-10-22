@@ -169,11 +169,14 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
+        # Results are useful when the organisation has artifact storage; a full quota must not fail the build.
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmarks-${{ matrix.key }}
           path: ${{ runner.temp }}/BenchmarkDotNet.Artifacts
           if-no-files-found: ignore
+          retention-days: 7
 
   native-aot:
     name: NativeAOT sample (${{ matrix.name }})

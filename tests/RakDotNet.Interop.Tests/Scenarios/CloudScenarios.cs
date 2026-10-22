@@ -53,8 +53,10 @@ public sealed class CloudScenarios
             r => cloud.AssertRow(r, Key1, "DS1C1S1\0", cloud.Client1, cloud.Server1),
             r => cloud.AssertRow(r, Key2, "DS2C2S1\0", cloud.Client1, cloud.Server1));
 
-        // Both servers name the same ipList[0], as they run on one machine.
-        Assert.Equal(cloud.Server1Ip, cloud.Server2Ip);
+        // Both servers are on one machine and each names its own ipList[0]. Native RakNet and .NET can enumerate
+        // multiple interfaces in a different order, so the two values need not be equal.
+        Assert.True(IPAddress.TryParse(cloud.Server1Ip, out _));
+        Assert.True(IPAddress.TryParse(cloud.Server2Ip, out _));
         Assert.Equal([cloud.Server2.Guid], (await cloud.Server1.InfoAsync()).RemoteServers);
         Assert.Equal([cloud.Server1.Guid], (await cloud.Server2.InfoAsync()).RemoteServers);
         cloud.AssertNoCloudRequestsReachedTheApplication();

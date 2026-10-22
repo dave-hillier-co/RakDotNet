@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using RakDotNet.Interop.Tests.Harness;
 using RakDotNet.Protocol.Wire;
 
@@ -93,6 +94,7 @@ public sealed class SecurityScenarios
     {
         // Encryption.cpp PrintPacketHeader, ID_PUBLIC_KEY_MISMATCH: "Wrong public key passed to Connect()". The attempt stays
         // queued, so every reply reports it again (RakPeer.cpp:4788-4801).
+        SkipNativeClientFailurePathOnX64(client);
         var (session, serverKeys) = await StartSecureServerAsync(client, server);
         await using var owned = session;
         var otherKey = (await session.Client.GenerateKeysAsync(Token)).PublicKey;
@@ -106,6 +108,7 @@ public sealed class SecurityScenarios
     {
         // With PKM_INSECURE_CONNECTION remote_public_key is never set (RakPeer.cpp:3197-3205), so a LIBCAT_SECURITY client
         // never matches a secure server's key.
+        SkipNativeClientFailurePathOnX64(client);
         var (session, serverKeys) = await StartSecureServerAsync(client, server);
         await using var owned = session;
 
@@ -117,6 +120,7 @@ public sealed class SecurityScenarios
     public async Task A_secure_client_is_told_an_insecure_server_lacks_security(PeerKind client, PeerKind server)
     {
         // Encryption.cpp PrintPacketHeader, ID_OUR_SYSTEM_REQUIRES_SECURITY (RakPeer.cpp:4824-4838).
+        SkipNativeClientFailurePathOnX64(client);
         await using var session = await InteropSession.StartSecureAsync(client, server, cancellationToken: Token);
         var key = (await session.Server.GenerateKeysAsync(Token)).PublicKey;
 
@@ -234,6 +238,14 @@ public sealed class SecurityScenarios
             data[i] = Marker[(i - 1) % Marker.Length];
         }
         return data;
+    }
+
+    // RakNet 4.081's handshake-failure path faults on x64 with SIGFPE (a division fault); arm64 returns zero from
+    // the same division, so the native peer survives there. The C# client still exercises the path on x64.
+    private static void SkipNativeClientFailurePathOnX64(PeerKind client)
+    {
+        if (client == PeerKind.Native && RuntimeInformation.ProcessArchitecture == Architecture.X64)
+            Assert.Skip("Native RakNet 4.081 raises SIGFPE on this failure path on x64.");
     }
 
     // A server with InitializeSecurity on, its key pair made by the server's own implementation.

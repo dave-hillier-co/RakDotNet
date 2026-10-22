@@ -42,7 +42,7 @@ public sealed class ReplicaManager3Scenarios
         var clientIds = SampleKinds.Zip(await clientRm3.CreateReplicasAsync(SampleKinds, cancellationToken: Token)).ToDictionary();
 
         // The server constructs all four to the client; the client only those clients may create (ClientCreatible_*).
-        var atClient = await WaitForAsync(clientRm3, i => i.Replicas.Count == 8 && i.Connections.All(c => c.DownloadComplete), "the client to have its four and the server's four");
+        var atClient = await WaitForAsync(clientRm3, i => i.Replicas.Count == 8 && i.Connections.All(c => c.DownloadComplete && c.Constructed.Count == 6), "the client to have its four and the server's four");
         var atServer = await WaitForAsync(serverRm3, i => i.Replicas.Count == 6 && i.Connections.All(c => c.DownloadComplete), "the server to have its four and two of the client's");
         foreach (var kind in SampleKinds)
         {

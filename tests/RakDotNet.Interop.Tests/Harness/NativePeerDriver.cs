@@ -567,6 +567,11 @@ public sealed partial class NativePeerDriver : IPeerDriver
             await _process.WaitForExitAsync().ConfigureAwait(false);
             // stderr may still be draining; give it a moment so failures carry the peer's last words.
             await _stderrLoop.WaitAsync(TimeSpan.FromSeconds(1)).ContinueWith(_ => { }, TaskScheduler.Default).ConfigureAwait(false);
+            if (_disposed == 0)
+            {
+                Console.Error.WriteLine(
+                    $"native peer exited unexpectedly with code {_process.ExitCode}.{Environment.NewLine}stderr:{Environment.NewLine}{StandardError}");
+            }
             _exited = true;
             FailPending();
             _packets.Writer.TryComplete();
