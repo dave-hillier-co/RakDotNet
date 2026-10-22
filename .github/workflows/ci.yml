@@ -23,29 +23,38 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - name: Linux
+            key: linux
+            runner: ubuntu-latest
+          # The organisation's Mac mini. The labels keep the macOS job off any
+          # other self-hosted runner added to the group later.
+          - name: macOS ARM64
+            key: macos-arm64
+            runner: [self-hosted, macOS, ARM64]
     env:
       RAKNET_SOURCE_DIR: ${{ github.workspace }}/.raknet
       RAKDOTNET_INTEROP_PEER: ${{ github.workspace }}/tools/interop-peer/build/interop-peer
       RAKDOTNET_INTEROP_PEER_SECURE: ${{ github.workspace }}/tools/interop-peer/build/interop-peer-secure
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
 
       - name: Restore RakNet from cache
         id: raknet-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .raknet
-          key: raknet-${{ env.RAKNET_COMMIT }}
+          key: raknet-${{ runner.os }}-${{ env.RAKNET_COMMIT }}
 
       - name: Fetch RakNet at the pinned commit
         if: steps.raknet-cache.outputs.cache-hit != 'true'
@@ -57,10 +66,10 @@ jobs:
       # The runner image is part of the key: a cached CMake build is tied to the compiler that configured it.
       - name: Name the native build cache
         id: native-key
-        run: echo "key=interop-peer-$ImageOS-$ImageVersion-$RAKNET_COMMIT-${{ hashFiles('tools/interop-peer/**') }}" >> "$GITHUB_OUTPUT"
+        run: echo "key=interop-peer-${{ runner.os }}-${{ runner.arch }}-$ImageOS-$ImageVersion-$RAKNET_COMMIT-${{ hashFiles('tools/interop-peer/**') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore the native build from cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: tools/interop-peer/build
           key: ${{ steps.native-key.outputs.key }}
@@ -78,27 +87,34 @@ jobs:
         run: dotnet test --solution RakDotNet.slnx -c Release --no-build
 
   benchmarks:
-    name: Benchmarks (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: Benchmarks (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - name: Linux
+            key: linux
+            runner: ubuntu-latest
+          - name: macOS ARM64
+            key: macos-arm64
+            runner: [self-hosted, macOS, ARM64]
     env:
       RAKNET_SOURCE_DIR: ${{ github.workspace }}/.raknet
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
 
       - name: Restore RakNet from cache
         id: raknet-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .raknet
-          key: raknet-${{ env.RAKNET_COMMIT }}
+          key: raknet-${{ runner.os }}-${{ env.RAKNET_COMMIT }}
 
       - name: Fetch RakNet at the pinned commit
         if: steps.raknet-cache.outputs.cache-hit != 'true'
@@ -110,10 +126,10 @@ jobs:
       # The runner image is part of the key: a cached CMake build is tied to the compiler that configured it.
       - name: Name the native build cache
         id: native-key
-        run: echo "key=interop-peer-$ImageOS-$ImageVersion-$RAKNET_COMMIT-${{ hashFiles('tools/interop-peer/**') }}" >> "$GITHUB_OUTPUT"
+        run: echo "key=interop-peer-${{ runner.os }}-${{ runner.arch }}-$ImageOS-$ImageVersion-$RAKNET_COMMIT-${{ hashFiles('tools/interop-peer/**') }}" >> "$GITHUB_OUTPUT"
 
       - name: Restore the native build from cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: tools/interop-peer/build
           key: ${{ steps.native-key.outputs.key }}
@@ -137,23 +153,30 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: benchmarks-${{ matrix.os }}
+          name: benchmarks-${{ matrix.key }}
           path: ${{ runner.temp }}/BenchmarkDotNet.Artifacts
           if-no-files-found: ignore
 
   native-aot:
-    name: NativeAOT sample (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: NativeAOT sample (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - name: Linux
+            key: linux
+            runner: ubuntu-latest
+          - name: macOS ARM64
+            key: macos-arm64
+            runner: [self-hosted, macOS, ARM64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
 
