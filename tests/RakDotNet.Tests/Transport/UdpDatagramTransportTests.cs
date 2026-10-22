@@ -97,14 +97,15 @@ public sealed class UdpDatagramTransportTests : IDisposable
     {
         // RakPeer.cpp:5779-5797 sets IP_DONTFRAGMENT around each MTU probe (RakNetSocket2_Berkley.cpp:71-80), so a probe
         // too large for the path is refused rather than fragmented. 192.0.2.1 (TEST-NET-1) is routed through the default
-        // interface, whose MTU is below 1600.
+        // interface, whose MTU is below 1600 on most hosts; one with a larger MTU accepts the probe, so skip there.
         var route = new SystemAddress(IPAddress.Parse("192.0.2.1"), 9);
         var datagram = new byte[1600 - RakNetConstants.UdpHeaderSize];
         using var wildcard = Bind(SocketBinding.AnyIPv4);
         Assert.SkipUnless(wildcard.TrySend([1], route), "No route to TEST-NET-1.");
 
         Assert.True(wildcard.TrySend(datagram, route), "Without don't-fragment the datagram is fragmented.");
-        Assert.False(wildcard.TrySendDoNotFragment(datagram, route, out var error));
+        if (wildcard.TrySendDoNotFragment(datagram, route, out var error))
+            Assert.Skip("This host's route to TEST-NET-1 has an MTU of at least 1600 bytes.");
         Assert.Equal(SocketError.MessageSize, error);
         Assert.True(wildcard.TrySendDoNotFragment(datagram.AsSpan(0, 1000), route, out error));
         Assert.Equal(SocketError.Success, error);

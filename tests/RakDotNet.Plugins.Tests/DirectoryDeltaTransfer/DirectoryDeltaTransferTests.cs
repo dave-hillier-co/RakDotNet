@@ -164,7 +164,7 @@ public sealed class DirectoryDeltaTransferTests : IDisposable
     public void The_application_directory_gets_a_trailing_slash()
     {
         _uploader.ApplicationDirectory = "/srv/game";
-        Assert.Equal("/srv/game/", _uploader.ApplicationDirectory);
+        Assert.Equal("/srv/game" + Path.DirectorySeparatorChar, _uploader.ApplicationDirectory);
         _uploader.ApplicationDirectory = "C:\\Games\\";
         Assert.Equal("C:\\Games\\", _uploader.ApplicationDirectory);
         _uploader.ApplicationDirectory = "";

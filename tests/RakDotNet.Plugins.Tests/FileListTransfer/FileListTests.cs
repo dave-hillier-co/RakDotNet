@@ -162,12 +162,12 @@ public sealed class FileListTests : IDisposable
         Assert.Equal(15u, one.DataLengthBytes);
         Assert.Equal(SuperFastHash.Hash("first level"u8), BinaryPrimitives.ReadUInt32BigEndian(one.Data));
         Assert.Equal("first level"u8.ToArray(), one.Data![4..]);
-        Assert.Equal(Path.Combine(_temp.Path, "app") + "/levels/one.txt", one.FullPathToFile);
+        Assert.Equal(Path.Combine(_temp.Path, "app", "levels", "one.txt"), one.FullPathToFile);
         Assert.Contains(list.Files, f => f.Filename == "levels/deeper/two.txt");
         Assert.Equal(2, list.Files.Count);
         // The top directory's files come before the subdirectory's.
         Assert.Equal("levels/deeper/two.txt", list.Files[^1].Filename);
-        Assert.Equal(Path.Combine(_temp.Path, "app") + "/levels/", progress.Started);
+        Assert.Equal(Path.Combine(_temp.Path, "app", "levels") + Path.DirectorySeparatorChar, progress.Started);
         Assert.Equal(2, progress.Directories.Count);
         Assert.Equal(2, progress.Files.Count);
     }
@@ -320,13 +320,14 @@ public sealed class FileListTests : IDisposable
     public void A_rooted_name_is_written_inside_the_directory()
     {
         var list = new FileList();
-        var rooted = Path.Combine(_temp.Path, "rooted.bin");
+        // A name rooted at the current drive: '/' on Unix, '\' on Windows.
+        var rooted = Path.DirectorySeparatorChar + "rooted.bin";
         list.AddFile(rooted, rooted, [9], 1, default);
 
         list.WriteDataToDisk(Path.Combine(_temp.Path, "out"));
 
         Assert.False(File.Exists(rooted));
-        Assert.True(File.Exists(Path.Combine(_temp.Path, "out") + "/" + rooted));
+        Assert.True(File.Exists(Path.Combine(_temp.Path, "out", "rooted.bin")));
     }
 
     [Fact]

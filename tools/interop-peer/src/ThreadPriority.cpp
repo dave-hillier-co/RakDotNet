@@ -12,7 +12,14 @@
 
 #include <pthread.h>
 
-extern "C" int pthread_attr_setschedparam(pthread_attr_t* attributes, const struct sched_param* parameters)
+// glibc declares this function __THROW, which is noexcept(true) in C++11 and later; macOS declares it without.
+#if defined(__GLIBC__)
+#define INTEROP_PTHREAD_NOEXCEPT noexcept
+#else
+#define INTEROP_PTHREAD_NOEXCEPT
+#endif
+
+extern "C" int pthread_attr_setschedparam(pthread_attr_t* attributes, const struct sched_param* parameters) INTEROP_PTHREAD_NOEXCEPT
 {
     (void)attributes;
     (void)parameters;

@@ -31,11 +31,22 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# RakNet's FileList.cpp includes <sys/io.h> but uses nothing from it. glibc provides the header on x86 and not on
+# arm64, so an empty header stands in where the system has none.
+include(CheckIncludeFileCXX)
+check_include_file_cxx(sys/io.h INTEROP_HAS_SYS_IO_H)
+if(NOT INTEROP_HAS_SYS_IO_H)
+  set(INTEROP_COMPAT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/compat")
+endif()
+
 # RakNet is compiled as-is; build problems are fixed with flags and definitions only.
 # gnu++98: ReplicaManager3.cpp:141 compares a pointer with `false`, which is a null pointer
 # constant only before C++11 (clang rejects it as an error in C++11 and later).
 add_library(raknet_static STATIC ${RAKNET_SOURCES})
 target_include_directories(raknet_static SYSTEM PUBLIC "${RAKNET_SOURCE_ROOT}")
+if(INTEROP_COMPAT_INCLUDE_DIR)
+  target_include_directories(raknet_static SYSTEM PRIVATE "${INTEROP_COMPAT_INCLUDE_DIR}")
+endif()
 set_target_properties(raknet_static PROPERTIES
   CXX_STANDARD 98
   CXX_STANDARD_REQUIRED ON
@@ -128,6 +139,9 @@ if(LIBCAT_SECURITY)
 
   add_library(raknet_static_secure STATIC ${RAKNET_SOURCES})
   target_include_directories(raknet_static_secure SYSTEM PUBLIC "${RAKNET_SOURCE_ROOT}" "${RAKNET_DEPENDENT_EXTENSIONS}")
+  if(INTEROP_COMPAT_INCLUDE_DIR)
+    target_include_directories(raknet_static_secure SYSTEM PRIVATE "${INTEROP_COMPAT_INCLUDE_DIR}")
+  endif()
   target_compile_definitions(raknet_static_secure PUBLIC LIBCAT_SECURITY=1)
   get_target_property(raknet_options raknet_static COMPILE_OPTIONS)
   if(raknet_options)
