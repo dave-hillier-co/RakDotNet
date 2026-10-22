@@ -49,6 +49,14 @@ jobs:
         with:
           global-json-file: global.json
 
+      # The self-hosted runner service starts from a minimal PATH; cmake and ctest live in Homebrew.
+      - name: Add Homebrew to PATH
+        if: runner.os == 'macOS'
+        run: |
+          for dir in /opt/homebrew/bin /usr/local/bin; do
+            if [ -d "$dir" ]; then echo "$dir" >> "$GITHUB_PATH"; fi
+          done
+
       - name: Restore RakNet from cache
         id: raknet-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -108,6 +116,14 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
+
+      # The self-hosted runner service starts from a minimal PATH; cmake and ctest live in Homebrew.
+      - name: Add Homebrew to PATH
+        if: runner.os == 'macOS'
+        run: |
+          for dir in /opt/homebrew/bin /usr/local/bin; do
+            if [ -d "$dir" ]; then echo "$dir" >> "$GITHUB_PATH"; fi
+          done
 
       - name: Restore RakNet from cache
         id: raknet-cache
